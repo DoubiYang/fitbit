@@ -6,7 +6,7 @@
 
 **Architecture:** Build a strict TypeScript Next.js application. Health records first enter an immutable, user-scoped provider contract; a normalizer turns them into day-level inputs; pure metric functions calculate versioned outputs; a view-model builder exposes only these outputs and bounded evidence to the UI and future coach. The initial `DemoHealthProvider` makes the slice testable without secrets. `GoogleHealthProvider` is an adapter boundary only until OAuth credentials and Fitbit Air test accounts are available.
 
-**Tech Stack:** Next.js App Router, React, TypeScript (strict), Vitest, React Testing Library, Zod, ESLint, modern CSS, browser-native PWA manifest. Provider and repository interfaces are storage-neutral in this slice; production persistence/OAuth are a separate plan because they require external credentials and an approved data store.
+**Tech Stack:** Next.js App Router, React, TypeScript 5.9 (strict), Node's test runner executed through `tsx`, React server rendering assertions, Zod, compiler-based static checks, modern CSS, browser-native PWA manifest. Provider and repository interfaces are storage-neutral in this slice; production persistence/OAuth are a separate plan because they require external credentials and an approved data store.
 
 ---
 
@@ -64,48 +64,49 @@ docs/
 ### Task 1: Bootstrap a tested PWA shell
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `next.config.ts`, `vitest.config.ts`, `eslint.config.mjs`
+- Create: `package.json`, `tsconfig.json`, `next.config.ts`
 - Create: `app/layout.tsx`, `app/page.tsx`, `app/globals.css`, `app/manifest.ts`, `public/icon.svg`
 - Create: `tests/smoke.test.ts`
 - Create: `.env.example`, `README.md`
 
 - [ ] **Step 1: Add the configuration-only project files without overwriting documentation**
 
-Create `package.json`, `tsconfig.json`, `next.config.ts`, `eslint.config.mjs`, and `vitest.config.ts` by hand in the existing repository. Use current compatible versions of `next`, `react`, `react-dom`, `typescript`, `vitest`, `@vitejs/plugin-react`, `@testing-library/react`, `@testing-library/jest-dom`, `jsdom`, `zod`, and the corresponding type packages. Do not scaffold into a temporary directory or overwrite `docs/`.
+Create `package.json`, `tsconfig.json`, and `next.config.ts` by hand in the existing repository. Use current compatible versions of `next`, `react`, `react-dom`, TypeScript 5.9, `tsx`, `zod`, and the corresponding type packages. Keep `lint` as `tsc --noEmit` for this zero-config foundation. Do not scaffold into a temporary directory or overwrite `docs/`.
 
 - [ ] **Step 2: Add a failing PWA metadata test**
 
 ```ts
-import { expect, test } from 'vitest';
-import manifest from '@/app/manifest';
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import manifest from '../app/manifest';
 
 test('declares an installable Chinese PWA', () => {
-  expect(manifest.name).toBe('节律');
-  expect(manifest.display).toBe('standalone');
-  expect(manifest.lang).toBe('zh-CN');
+  assert.equal(manifest.name, '节律');
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.lang, 'zh-CN');
 });
 ```
 
 - [ ] **Step 3: Run the test and confirm RED**
 
-Run: `npm run test -- tests/smoke.test.ts`
+Run: `pnpm test -- tests/smoke.test.ts`
 
 Expected: module/configuration failure because the test runner and manifest are not configured yet.
 
 - [ ] **Step 4: Configure Vitest and implement the minimal manifest**
 
-Use a `defineConfig` Vitest configuration with the same `@/` alias as TypeScript. `app/manifest.ts` returns exactly `name`, `short_name`, `description`, `lang: 'zh-CN'`, `display: 'standalone'`, `start_url: '/'`, `theme_color`, `background_color`, and one local SVG icon. Set package scripts `dev`, `build`, `lint`, `test`, and `test:watch`.
+Use the built-in Node test runner via `tsx --test`; keep tests on relative imports so no test-only path alias is required. `app/manifest.ts` returns exactly `name`, `short_name`, `description`, `lang: 'zh-CN'`, `display: 'standalone'`, `start_url: '/'`, `theme_color`, `background_color`, and one local SVG icon. Set package scripts `dev`, `build`, `lint`, `test`, and `test:watch`.
 
 - [ ] **Step 5: Run the focused test, lint, and production build**
 
-Run: `npm run test -- tests/smoke.test.ts`, `npm run lint`, `npm run build`
+Run: `pnpm test -- tests/smoke.test.ts`, `pnpm lint`, `pnpm build`
 
 Expected: all commands exit 0.
 
 - [ ] **Step 6: Commit the shell**
 
 ```bash
-git add package.json package-lock.json tsconfig.json next.config.ts vitest.config.ts eslint.config.mjs app src public tests .env.example README.md
+git add package.json pnpm-lock.yaml tsconfig.json next.config.ts vitest.config.ts eslint.config.mjs app src public tests .env.example README.md
 git commit -m "feat: bootstrap P1 PWA shell"
 ```
 
@@ -123,13 +124,13 @@ Cover each behavior separately: a valid sleep session preserves `civilEndDate` a
 
 ```ts
 test('rejects a HRV record outside the accepted physiological range', () => {
-  expect(() => parseDailyHrv({ ...validHrv, valueMs: 0 })).toThrow();
+  assert.throws(() => parseDailyHrv({ ...validHrv, valueMs: 0 }));
 });
 ```
 
 - [ ] **Step 2: Run the focused test and confirm RED**
 
-Run: `npm run test -- tests/domain/health-records.test.ts`
+Run: `pnpm test -- tests/domain/health-records.test.ts`
 
 Expected: imports fail because parsers and types do not exist.
 
@@ -139,7 +140,7 @@ Create separate discriminated record types for sleep sessions, daily HRV/RHR, ex
 
 - [ ] **Step 4: Re-run focused and full unit tests**
 
-Run: `npm run test -- tests/domain/health-records.test.ts`, then `npm run test`
+Run: `pnpm test -- tests/domain/health-records.test.ts`, then `pnpm test`
 
 Expected: all tests pass; fixture data contains no real user health information.
 
@@ -164,14 +165,14 @@ Include: the longest non-nap session of at least 180 minutes wins; equal session
 ```ts
 test('does not include regularity before 14 historical primary sleeps', () => {
   const result = computeSleepCompleteness(inputWithThirteenPriorSleeps);
-  expect(result.quality).toBe('calibrating');
-  expect(result.components.regularity).toBeUndefined();
+  assert.equal(result.quality, 'calibrating');
+  assert.equal(result.components.regularity, undefined);
 });
 ```
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `npm run test -- tests/domain/metrics.test.ts`
+Run: `pnpm test -- tests/domain/metrics.test.ts`
 
 Expected: missing exported metric functions.
 
@@ -187,7 +188,7 @@ Cover: target day never enters its own baseline; fewer than 14 same-field days d
 
 Implement median/MAD baselines and normalized available-weight aggregation exactly as the metric design specifies. Ensure output language uses non-medical labels only.
 
-Run: `npm run test -- tests/domain/metrics.test.ts`
+Run: `pnpm test -- tests/domain/metrics.test.ts`
 
 Expected: all metric tests pass.
 
@@ -197,7 +198,7 @@ Cover: zone summaries use weights `1/3/4/5`; minute heart rate is used only when
 
 - [ ] **Step 7: Implement training load and run the full suite**
 
-Run: `npm run test`
+Run: `pnpm test`
 
 Expected: all domain tests pass with deterministic outputs for the fixed fixtures.
 
@@ -222,13 +223,13 @@ git commit -m "feat: calculate transparent P1 metrics"
 ```ts
 test('refuses Google Health access when the integration is unconfigured', async () => {
   const provider = new GoogleHealthProvider({ clientId: undefined, clientSecret: undefined });
-  await expect(provider.listRecords('user_a', range)).rejects.toMatchObject({ code: 'integration_unavailable' });
+  await assert.rejects(provider.listRecords('user_a', range), { code: 'integration_unavailable' });
 });
 ```
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `npm run test -- tests/server/google-health-provider.test.ts`
+Run: `pnpm test -- tests/server/google-health-provider.test.ts`
 
 Expected: provider module is absent.
 
@@ -238,7 +239,7 @@ Expected: provider module is absent.
 
 - [ ] **Step 4: Verify focused tests and full suite**
 
-Run: `npm run test -- tests/server/google-health-provider.test.ts`, then `npm run test`
+Run: `pnpm test -- tests/server/google-health-provider.test.ts`, then `pnpm test`
 
 Expected: no real network request; test proves configurations fail closed.
 
@@ -263,14 +264,14 @@ Cover: only records belonging to the resolved session user reach the response; e
 ```ts
 test('returns a calibration message rather than a training instruction with insufficient recovery inputs', async () => {
   const view = await buildTodayView(calibratingContext);
-  expect(view.primaryAction.kind).toBe('data_state');
-  expect(view.primaryAction).not.toHaveProperty('trainingPrescription');
+  assert.equal(view.primaryAction.kind, 'data_state');
+  assert.equal('trainingPrescription' in view.primaryAction, false);
 });
 ```
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `npm run test -- tests/server/build-today.test.ts`
+Run: `pnpm test -- tests/server/build-today.test.ts`
 
 Expected: `buildTodayView` cannot be imported.
 
@@ -280,7 +281,7 @@ Compose provider data and metric results into a stable `TodayView`: three metric
 
 - [ ] **Step 4: Verify API behavior**
 
-Run: `npm run test -- tests/server/build-today.test.ts`, then `npm run test`
+Run: `pnpm test -- tests/server/build-today.test.ts`, then `pnpm test`
 
 Expected: all responses are user-scoped and evidence-complete.
 
@@ -304,32 +305,32 @@ git commit -m "feat: expose evidence-safe today view"
 
 ```tsx
 test('shows evidence dates and quality for the primary action', () => {
-  render(<TodayDashboard view={completeView} />);
-  expect(screen.getByText('依据')).toBeVisible();
-  expect(screen.getByText(/2026-08-22/)).toBeVisible();
-  expect(screen.getByText('数据质量：高')).toBeVisible();
+  const html = renderToStaticMarkup(<TodayDashboard view={completeView} />);
+  assert.match(html, /依据/);
+  assert.match(html, /2026-08-22/);
+  assert.match(html, /数据质量：高/);
 });
 ```
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `npm run test -- tests/ui/today-dashboard.test.tsx`
+Run: `pnpm test -- tests/ui/today-dashboard.test.tsx`
 
 Expected: component module is absent.
 
 - [ ] **Step 3: Implement the presentational components**
 
-Use semantic headings, an ordered evidence list, text labels in addition to color, visible `calibrating`/`low` states, and responsive single-column layout. The page calls the server builder directly; it does not read health data from browser storage or call an external provider. Do not add a meal photo flow, coach chat, OAuth button, or unapproved marketing claims in this slice.
+Use semantic headings, an ordered evidence list, text labels in addition to color, visible `calibrating`/`low` states, and responsive single-column layout. Use `renderToStaticMarkup` in the component tests to assert the accessible text contract. The page calls the server builder directly; it does not read health data from browser storage or call an external provider. Do not add a meal photo flow, coach chat, OAuth button, or unapproved marketing claims in this slice.
 
 - [ ] **Step 4: Verify UI tests, lint and build**
 
-Run: `npm run test -- tests/ui/today-dashboard.test.tsx`, `npm run test`, `npm run lint`, `npm run build`
+Run: `pnpm test -- tests/ui/today-dashboard.test.tsx`, `pnpm test`, `pnpm lint`, `pnpm build`
 
 Expected: all commands exit 0 and no accessibility-visible state depends only on color.
 
 - [ ] **Step 5: Manually inspect the local dashboard at a mobile viewport**
 
-Run: `npm run dev`
+Run: `pnpm dev`
 
 Confirm: the header, primary action, evidence, three metrics, freshness and quality are visible without horizontal scroll at 390 px width. Stop the local server after inspection.
 
@@ -356,7 +357,7 @@ Document only variable names (never values): Google client ID/secret, redirect U
 
 - [ ] **Step 3: Run final verification**
 
-Run: `npm run test`, `npm run lint`, `npm run build`, `git diff --check`, `git status --short`
+Run: `pnpm test`, `pnpm lint`, `pnpm build`, `git diff --check`, `git status --short`
 
 Expected: tests/lint/build pass, diff has no whitespace errors, and only intended files are modified.
 
@@ -369,7 +370,7 @@ git commit -m "docs: add P1 foundation runbook"
 
 ## Completion criteria for this slice
 
-1. `npm run test`, `npm run lint`, and `npm run build` pass on a clean clone with Node 25 and no secrets.
+1. `pnpm test`, `pnpm lint`, and `pnpm build` pass on a clean clone with Node 25 and no secrets.
 2. A local PWA shows transparent metrics and evidence for the fixture-backed demo user.
 3. All user-derived reads are scoped through a server-side session and provider contract; raw records and credentials never reach the browser view model.
 4. No score is shown when its documented minimum inputs are missing; all actions cite evidence and downgrade on low quality.

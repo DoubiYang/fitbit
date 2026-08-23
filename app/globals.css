@@ -1,0 +1,57 @@
+:root {
+  color: #172826;
+  background: #f6f4ee;
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  display: grid;
+  gap: 1rem;
+  max-width: 42rem;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 4rem 1.5rem;
+}
+
+.eyebrow {
+  margin: 0;
+  color: #3b625e;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(2.5rem, 9vw, 4rem);
+  letter-spacing: -0.06em;
+}
+
+.lede {
+  color: #49615d;
+  font-size: 1.125rem;
+  line-height: 1.6;
+}
+
+.notice {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1.25rem;
+  border: 1px solid #bfd0c9;
+  border-radius: 1rem;
+  background: #ffffff;
+  line-height: 1.6;
+}
