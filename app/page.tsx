@@ -3,6 +3,8 @@ import { buildTodayView } from '../src/server/dashboard/build-today';
 import { DemoHealthProvider } from '../src/server/health/demo-provider';
 import { getCurrentUser } from '../src/server/session/current-user';
 
+export const dynamic = 'force-dynamic';
+
 export default async function Home() {
   const user = await getCurrentUser();
   const now = new Date().toISOString();

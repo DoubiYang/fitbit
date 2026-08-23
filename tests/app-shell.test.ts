@@ -4,7 +4,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import Home from '../app/page';
+import Home, { dynamic } from '../app/page';
 
 test('renders the controlled today dashboard for the demo user', async () => {
   const html = renderToStaticMarkup(await Home());
@@ -13,4 +13,8 @@ test('renders the controlled today dashboard for the demo user', async () => {
   assert.match(html, /今天的建议/);
   assert.match(html, /恢复信号/);
   assert.match(html, /数据新鲜/);
+});
+
+test('keeps the dashboard request-rendered so a synced view is not frozen at build time', () => {
+  assert.equal(dynamic, 'force-dynamic');
 });

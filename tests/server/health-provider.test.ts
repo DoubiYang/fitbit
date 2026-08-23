@@ -16,6 +16,15 @@ test('fails closed when Google Health is not configured', async () => {
   );
 });
 
+test('keeps Google Health disabled even when OAuth-looking values exist locally', async () => {
+  const provider = new GoogleHealthProvider({ clientId: 'local-client', clientSecret: 'local-secret' });
+
+  await assert.rejects(
+    () => provider.listRecords('user_a', range),
+    (error: unknown) => error instanceof IntegrationUnavailableError && error.code === 'integration_unavailable',
+  );
+});
+
 test('returns copied demo records only for the resolved demo user', async () => {
   const provider = new DemoHealthProvider();
   const first = await provider.listRecords('demo_user', range);
