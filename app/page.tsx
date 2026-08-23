@@ -1,15 +1,17 @@
-import React from 'react';
+import { TodayDashboard } from '../src/ui/dashboard/today-dashboard';
+import { buildTodayView } from '../src/server/dashboard/build-today';
+import { DemoHealthProvider } from '../src/server/health/demo-provider';
+import { getCurrentUser } from '../src/server/session/current-user';
 
-export default function Home() {
-  return (
-    <main className="shell">
-      <p className="eyebrow">节律 · P1 演示</p>
-      <h1>今日节律</h1>
-      <p className="lede">正在准备你的个性化节律视图。</p>
-      <section className="notice" aria-labelledby="data-heading">
-        <h2 id="data-heading">先连接数据</h2>
-        <p>连接健康数据后，这里会显示睡眠、恢复、训练负荷和可追溯的今日建议。</p>
-      </section>
-    </main>
-  );
+export default async function Home() {
+  const user = await getCurrentUser();
+  const now = new Date().toISOString();
+  const view = await buildTodayView({
+    provider: new DemoHealthProvider(),
+    userId: user.id,
+    now,
+    lastSuccessfulSyncAt: now,
+  });
+
+  return <TodayDashboard view={view} />;
 }

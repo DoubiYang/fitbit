@@ -6,10 +6,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import Home from '../app/page';
 
-test('renders an honest data-preparation state before health data is connected', () => {
-  const html = renderToStaticMarkup(React.createElement(Home));
+test('renders the controlled today dashboard for the demo user', async () => {
+  const html = renderToStaticMarkup(await Home());
 
   assert.match(html, /今日节律/);
-  assert.match(html, /正在准备你的个性化节律视图/);
-  assert.match(html, /连接健康数据后/);
+  assert.match(html, /今天的建议/);
+  assert.match(html, /恢复信号/);
+  assert.match(html, /数据新鲜/);
 });
