@@ -2,18 +2,51 @@
 
 面向 Fitbit Air 用户的中文健康数据仪表盘与自助 AI 教练。
 
-当前分支实现一期的本地演示基础：PWA 壳、透明指标计算和“今日”视图。它不会读取 Google Health，也不会调用 DeepSeek；真实服务在凭证、测试账号和合规前置完成后才会启用。
+当前分支包含本地演示仪表盘，以及 Google OAuth / 账户管理。未配置密钥时仍是演示模式；配置完整后可在本机连接 Google Health，但**不会**拉取真实健康记录，账户页会显示「已连接，等待同步」。
 
-演示模式只使用服务器固定的 `demo_user` 和确定性样本，不能通过浏览器传入其他人的用户 ID；其目的是先确认数据隔离、指标和展示边界。完整实现说明见 [P1 Foundation](docs/implementation/p1-foundation.md)。
+## 本地演示
 
-## 本地运行
-
-需要 Node.js 25 与 pnpm 11。
+需要 Node.js 25 与 pnpm 11。不填 Google / 数据库密钥时：
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm dev
 ```
+
+打开 `http://localhost:3000/rhythm`。演示只使用服务器固定的 `demo_user`。
+
+## Google OAuth 与 Docker
+
+1. 复制 `.env.example` 为 `.env.local`（不要提交）。
+2. 填入 Google OAuth Web client 的 `GOOGLE_HEALTH_CLIENT_ID` / `GOOGLE_HEALTH_CLIENT_SECRET`。
+3. 生成本地密钥，不要复用示例值：
+
+```bash
+openssl rand -base64 32   # TOKEN_ENCRYPTION_KEY
+openssl rand -hex 16      # POSTGRES_PASSWORD
+```
+
+4. `DATABASE_URL` 在 Compose 里会改写为容器内的 `db` 主机，`.env.local` 里仍需要 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`。
+5. 丢失 `TOKEN_ENCRYPTION_KEY` 且没有 `TOKEN_ENCRYPTION_KEY_PREVIOUS` 时，已保存的授权无法解密，必须重新连接。
+
+```bash
+docker compose --env-file .env.local up --build
+```
+
+然后只使用：
+
+```
+http://localhost:3000/rhythm
+http://localhost:3000/rhythm/account
+```
+
+不要用 `http://127.0.0.1:3000`。本地 callback 必须是 `http://localhost:3000/rhythm/api/auth/google/callback`。
+
+Google Cloud 还需：启用 Health API、Testing + Test users、文档中的 10 个 scope、授权网域 `doubiyang.com`。同意屏链接：
+
+- `https://doubiyang.com/rhythm`
+- `https://doubiyang.com/rhythm/privacy`
+- `https://doubiyang.com/rhythm/terms`
 
 ## 校验
 
@@ -23,4 +56,4 @@ pnpm lint
 pnpm build
 ```
 
-仅复制 `.env.example` 为 `.env.local` 后填写后续集成所需变量；不要把任何真实凭证写入 Git。演示模式不读取这些变量。
+自动化测试不需要 Postgres，也不读取真实 Google 密钥。

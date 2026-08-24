@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: rhythm
+      POSTGRES_DB: rhythm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./.data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rhythm -d rhythm']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  app:
+    build: .
+    ports:
+      - '3000:3000'
+    env_file: .env.local
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_USER: rhythm
+      POSTGRES_DB: rhythm
+      APP_BASE_PATH: /rhythm
+      DATABASE_URL: postgresql://rhythm:${POSTGRES_PASSWORD}@db:5432/rhythm
+    depends_on:
+      db:
+        condition: service_healthy

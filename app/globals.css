@@ -202,6 +202,33 @@ h3 {
   line-height: 1.6;
 }
 
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+button,
+.button-secondary {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.7rem 1.1rem;
+  color: #f6f4ee;
+  background: #1f6b57;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.button-secondary {
+  color: #1f6b57;
+  background: #e7f3ee;
+}
+
+a {
+  color: #1f6b57;
+}
+
 @media (max-width: 42rem) {
   .dashboard-header__title-row,
   .section-heading {

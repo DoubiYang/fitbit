@@ -1,22 +1,20 @@
-import { buildTodayView } from '../../../src/server/dashboard/build-today';
-import { DemoHealthProvider } from '../../../src/server/health/demo-provider';
+import { createRequestDeps } from '../../../src/server/auth/runtime';
+import { loadConfig } from '../../../src/server/config/env';
+import { buildTodayResponse } from '../../../src/server/dashboard/today-response';
 import { getCurrentUser } from '../../../src/server/session/current-user';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(): Promise<Response> {
-  const user = await getCurrentUser();
-  const now = new Date().toISOString();
-  const view = await buildTodayView({
-    provider: new DemoHealthProvider(),
-    userId: user.id,
-    now,
-    lastSuccessfulSyncAt: now,
+export async function GET(request: Request): Promise<Response> {
+  const config = loadConfig();
+  if (config.kind === 'demo') {
+    return buildTodayResponse({ mode: 'demo', id: 'demo_user' });
+  }
+  const deps = await createRequestDeps();
+  const user = await getCurrentUser({
+    config,
+    store: deps.store,
+    cookieHeader: request.headers.get('Cookie'),
   });
-
-  return Response.json(view, {
-    headers: {
-      'Cache-Control': 'no-store',
-    },
-  });
+  return buildTodayResponse(user);
 }

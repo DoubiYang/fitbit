@@ -13,7 +13,7 @@ export type UserHealthRecords = {
 };
 
 export type HealthProviderCapabilities = {
-  mode: 'demo' | 'unavailable';
+  mode: 'demo' | 'unavailable' | 'oauth';
   canSync: boolean;
 };
 

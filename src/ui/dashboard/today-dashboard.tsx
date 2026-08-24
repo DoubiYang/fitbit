@@ -3,20 +3,27 @@ import type { TodayView } from '../../server/dashboard/build-today';
 import { DataState, EvidenceList } from './data-state';
 import { MetricCard } from './metric-card';
 
-export function TodayDashboard({ view }: { view: TodayView }) {
+export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; variant?: 'demo' | 'oauth' }) {
   const action = view.primaryAction;
 
   return (
     <main className="dashboard">
       <header className="dashboard-header">
-        <p className="eyebrow">节律 · P1 演示</p>
+        <p className="eyebrow">{variant === 'demo' ? '节律 · 演示' : '节律'}</p>
         <div className="dashboard-header__title-row">
           <h1>今日节律</h1>
           <p className={view.freshness === 'fresh' ? 'freshness freshness--fresh' : 'freshness freshness--stale'}>
             {view.freshness === 'fresh' ? '数据新鲜' : '等待同步'}
           </p>
         </div>
-        <p className="lede">基于你的近期睡眠、恢复与训练记录生成。分数只作辅助，建议始终保留给你的主观感受。</p>
+        <p className="lede">
+          {variant === 'demo'
+            ? '基于演示样本生成。分数只作辅助，建议始终保留给你的主观感受。'
+            : '已连接 Google Health，正在等待第一次同步。本页不会显示演示数据。'}
+        </p>
+        <p>
+          <a href="/rhythm/account">账户</a>
+        </p>
       </header>
 
       <section className="action-card" aria-labelledby="today-action-heading">

@@ -30,15 +30,19 @@ Health Connect 是 Android 本机数据层，不作为一期核心依赖；仅�
 
 ## 3. 授权范围、同意与数据流
 
-### 最小 scope 集合
+### Scope 集合
 
-首次连接只请求仪表盘所需的只读 scope：
+首次 Google 授权的完整 scope 列表以 [OAuth 与账户设计](2026-08-24-05-oauth-account-docker-design.md) 为准：一次请求 Google Health **全部现行只读数据 scope**（睡眠、生命体征、活动、营养读、档案、设置、运动 GPS、ECG、心律不齐）以及一期写回所需的 `nutrition.writeonly`。不再把营养权限留到第二次 Google 同意页——后续补 scope 会再次打断用户，且测试模式 refresh token 只有 7 天。
+
+仪表盘核心读权限仍是：
 
 - `googlehealth.sleep.readonly`：睡眠会话与阶段；
 - `googlehealth.health_metrics_and_measurements.readonly`：HRV、RHR、心率及可用生命体征；
 - `googlehealth.activity_and_fitness.readonly`：训练会话、步数与活动/心率区间上下文。
 
-用户主动打开“写回 Google Health”时，才以增量授权请求 `googlehealth.nutrition.readonly` 与 `googlehealth.nutrition.writeonly`：前者仅用于读取本产品创建的 `nutrition-log`、处理未知写入和删除映射，后者仅用于创建或删除。每个 scope 在 OAuth 同意页之前显示对应功能；用户拒绝某一增量 scope 时，仪表盘和本产品内餐食记录继续可用，但停用 Google Health 写回。
+用户拒绝部分 scope 时按部分同意降级：核心三项缺失则仪表盘数据不完整；仅缺营养写则仪表盘和本产品内餐食记录继续可用，但停用 Google Health 写回。
+
+**Google 已授予 `nutrition.writeonly` 不等于可以写回。** 必须等用户在产品内打开“写回 Google Health”并确认该次餐食后，才创建或删除 `nutrition-log`。每个写回功能在开关与确认 UI 上说明用途；应用内拒绝写回时不得调用写接口。不申请睡眠/运动/档案等产品不会使用的 writeonly。
 
 ### 敏感数据与第三方模型
 
