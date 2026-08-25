@@ -16,6 +16,9 @@ function cloneConnection(row: ConnectionRow): ConnectionRow {
     connectedAt: new Date(row.connectedAt),
     updatedAt: new Date(row.updatedAt),
     lastSuccessfulSyncAt: row.lastSuccessfulSyncAt ? new Date(row.lastSuccessfulSyncAt) : undefined,
+    nextSyncAt: row.nextSyncAt ? new Date(row.nextSyncAt) : undefined,
+    syncLeaseUntil: row.syncLeaseUntil ? new Date(row.syncLeaseUntil) : undefined,
+    lastSyncAttemptAt: row.lastSyncAttemptAt ? new Date(row.lastSyncAttemptAt) : undefined,
   };
 }
 
@@ -66,6 +69,55 @@ export function createMemoryStore(): MemoryStore {
             accessTokenExpiresAt: input.accessTokenExpiresAt,
             refreshTokenExpiresAt: input.refreshTokenExpiresAt ?? current.refreshTokenExpiresAt,
             updatedAt: input.updatedAt,
+          }),
+        );
+        return true;
+      },
+      async claimDueSyncs(input) {
+        const due = [...connections.values()]
+          .filter(
+            (row) =>
+              (row.status === 'active' || row.status === 'partial') &&
+              (!input.userId || row.userId === input.userId) &&
+              row.nextSyncAt &&
+              row.nextSyncAt.getTime() <= input.now.getTime() &&
+              (!row.syncLeaseUntil || row.syncLeaseUntil.getTime() <= input.now.getTime()),
+          )
+          .sort((left, right) => {
+            const byDue = left.nextSyncAt!.getTime() - right.nextSyncAt!.getTime();
+            return byDue || left.id.localeCompare(right.id);
+          })
+          .slice(0, input.limit);
+        for (const row of due) {
+          connections.set(
+            row.id,
+            cloneConnection({ ...row, syncLeaseUntil: input.leaseUntil, lastSyncAttemptAt: input.now, updatedAt: input.now }),
+          );
+        }
+        return due.map((row) =>
+          cloneConnection({ ...row, syncLeaseUntil: input.leaseUntil, lastSyncAttemptAt: input.now, updatedAt: input.now }),
+        );
+      },
+      async finishScheduledSync(input): Promise<boolean> {
+        const current = connections.get(input.id);
+        if (
+          !current ||
+          current.userId !== input.userId ||
+          (current.status !== 'active' && current.status !== 'partial') ||
+          !current.syncLeaseUntil ||
+          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime()
+        ) {
+          return false;
+        }
+        connections.set(
+          current.id,
+          cloneConnection({
+            ...current,
+            nextSyncAt: input.nextSyncAt,
+            syncRetryCount: input.syncRetryCount,
+            syncLeaseUntil: undefined,
+            lastErrorCode: input.lastErrorCode,
+            updatedAt: input.now,
           }),
         );
         return true;

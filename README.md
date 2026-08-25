@@ -2,7 +2,7 @@
 
 面向 Fitbit Air 用户的中文健康数据仪表盘与自助 AI 教练。
 
-当前分支包含本地演示仪表盘、Google OAuth / 账户管理，以及首次授权后的真实数据热同步。未配置密钥时仍是演示模式；配置完整后可在本机连接 Google Health。连接成功后，应用只会为**刚授权的用户**尝试同步最近 14 天的睡眠、HRV、静息心率和训练数据；首页只读成功保存的本地快照，**不会**在打开页面时请求 Google。当前没有全用户定时同步、历史回填、webhook、拍照记餐、营养写回或 AI Coach。
+当前分支包含本地演示仪表盘、Google OAuth / 账户管理，以及真实数据同步。授权成功后会立即为该用户同步最近 14 天的睡眠、HRV、静息心率和训练；随后独立 worker 每分钟检查到期连接，每个用户在上次成功后 6 小时再次同步。失败会在 30 分钟、1 小时、2 小时后重试，之后回到 6 小时周期。首页只读成功保存的本地快照，**不会**在打开页面时请求 Google。当前没有历史回填、webhook、拍照记餐、营养写回或 AI Coach。
 
 ## 本地演示
 
@@ -24,10 +24,12 @@ pnpm dev
 ```bash
 openssl rand -base64 32   # TOKEN_ENCRYPTION_KEY
 openssl rand -hex 16      # POSTGRES_PASSWORD
+openssl rand -hex 32      # SYNC_SECRET
 ```
 
 4. `DATABASE_URL` 在 Compose 里会改写为容器内的 `db` 主机，`.env.local` 里仍需要 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`。
-5. 丢失 `TOKEN_ENCRYPTION_KEY` 且没有 `TOKEN_ENCRYPTION_KEY_PREVIOUS` 时，已保存的授权无法解密，必须重新连接。
+5. `SYNC_SECRET` 仅供 Compose 内的 `sync` worker 调用内部入口，不能给浏览器或外部服务。
+6. 丢失 `TOKEN_ENCRYPTION_KEY` 且没有 `TOKEN_ENCRYPTION_KEY_PREVIOUS` 时，已保存的授权无法解密，必须重新连接。
 
 ```bash
 docker compose --env-file .env.local up --build

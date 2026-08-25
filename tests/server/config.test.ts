@@ -11,6 +11,7 @@ const completeEnv = {
   GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
   GOOGLE_HEALTH_CLIENT_SECRET: 'client-secret',
   TOKEN_ENCRYPTION_KEY: validKey,
+  SYNC_SECRET: '2e9e56ce2ee5b4374d8e5bcf8df0f32a3f1ab6789e1b7f4aa03edfbd827a3045',
   APP_ORIGIN: 'http://localhost:3000',
 };
 
@@ -46,9 +47,15 @@ test('complete secrets load oauth config with /rhythm redirect', () => {
   }
   assert.equal(config.appOrigin, 'http://localhost:3000');
   assert.equal(config.appBasePath, '/rhythm');
+  assert.equal(config.syncSecret, completeEnv.SYNC_SECRET);
   assert.equal(redirectUri(config), 'http://localhost:3000/rhythm/api/auth/google/callback');
   assert.equal(publicPath(config.appOrigin, '/account'), 'http://localhost:3000/rhythm/account');
   assert.equal(parseEncryptionKey(validKey).length, 32);
+});
+
+test('missing sync secret is unconfigured', () => {
+  const { SYNC_SECRET: _syncSecret, ...withoutSyncSecret } = completeEnv;
+  assert.equal(loadConfig(withoutSyncSecret).kind, 'unconfigured');
 });
 
 test('origin with a path is rejected', () => {
@@ -75,6 +82,7 @@ test('builds DATABASE_URL from postgres parts when the URL is omitted', () => {
     GOOGLE_HEALTH_CLIENT_ID: completeEnv.GOOGLE_HEALTH_CLIENT_ID,
     GOOGLE_HEALTH_CLIENT_SECRET: completeEnv.GOOGLE_HEALTH_CLIENT_SECRET,
     TOKEN_ENCRYPTION_KEY: validKey,
+    SYNC_SECRET: completeEnv.SYNC_SECRET,
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');

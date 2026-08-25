@@ -20,6 +20,27 @@ export type ConnectionRow = TokenEnvelopeFields & {
   connectedAt: Date;
   updatedAt: Date;
   lastSuccessfulSyncAt: Date | undefined;
+  nextSyncAt?: Date | undefined;
+  syncRetryCount?: number;
+  syncLeaseUntil?: Date | undefined;
+  lastSyncAttemptAt?: Date | undefined;
+};
+
+export type ScheduledSyncFinish = {
+  id: string;
+  userId: string;
+  leaseUntil: Date;
+  now: Date;
+  nextSyncAt: Date;
+  syncRetryCount: number;
+  lastErrorCode: string | undefined;
+};
+
+export type DueSyncClaim = {
+  now: Date;
+  leaseUntil: Date;
+  limit: number;
+  userId?: string;
 };
 
 export type AccessTokenUpdate = {
@@ -65,6 +86,8 @@ export type AuthStore = {
     insert(row: ConnectionRow): Promise<void>;
     update(row: ConnectionRow): Promise<void>;
     updateAccessTokenIfSyncable(input: AccessTokenUpdate): Promise<boolean>;
+    claimDueSyncs(input: DueSyncClaim): Promise<ConnectionRow[]>;
+    finishScheduledSync(input: ScheduledSyncFinish): Promise<boolean>;
   };
   sessions: {
     insert(row: SessionRow): Promise<void>;

@@ -13,6 +13,7 @@ test('does not restore credentials when the user disconnects while a token refre
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');

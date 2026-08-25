@@ -90,6 +90,10 @@ function applyTokens(
     lastErrorCode: undefined,
     connectedAt: now,
     updatedAt: now,
+    nextSyncAt: now,
+    syncRetryCount: 0,
+    syncLeaseUntil: undefined,
+    lastSyncAttemptAt: undefined,
   };
 }
 
@@ -106,6 +110,10 @@ function clearTokens(row: ConnectionRow, now: Date): ConnectionRow {
     status: 'disconnected',
     lastErrorCode: 'disconnected',
     updatedAt: now,
+    nextSyncAt: undefined,
+    syncRetryCount: 0,
+    syncLeaseUntil: undefined,
+    lastSyncAttemptAt: undefined,
   };
 }
 
@@ -336,6 +344,10 @@ export async function completeGoogleOAuth(input: {
         connectedAt: now,
         updatedAt: now,
         lastSuccessfulSyncAt: undefined,
+        nextSyncAt: undefined,
+        syncRetryCount: 0,
+        syncLeaseUntil: undefined,
+        lastSyncAttemptAt: undefined,
       };
       await store.connections.insert(applyTokens(created, tokens, tokens.refreshToken, identity, keyring.current, now));
       const sessionToken = await createSession(store, userId, now);

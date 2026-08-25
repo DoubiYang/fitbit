@@ -5,7 +5,7 @@ import { createGoogleOAuthClient } from './google-client';
 import type { HttpDeps } from './http';
 import { SESSION_COOKIE } from './cookies';
 import { ensurePostgresReady } from '../db/postgres-store';
-import { syncUserConnection } from '../health/run-sync';
+import { runDueSyncForUser } from '../health/scheduled-sync';
 
 export async function createRequestDeps(): Promise<HttpDeps> {
   const config = loadConfig();
@@ -18,7 +18,7 @@ export async function createRequestDeps(): Promise<HttpDeps> {
     store,
     google: createGoogleOAuthClient(config),
     afterSuccessfulConnect: (userId) => {
-      void syncUserConnection({ config, store, userId }).catch(() => undefined);
+      void runDueSyncForUser({ config, store, userId }).catch(() => undefined);
     },
   };
 }

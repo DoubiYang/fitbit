@@ -14,6 +14,7 @@ function oauthConfig() {
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key,
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   if (config.kind !== 'oauth') {

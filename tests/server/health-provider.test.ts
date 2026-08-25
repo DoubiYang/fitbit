@@ -17,6 +17,7 @@ test('live provider maps Health API points and does not leak another user', asyn
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');
@@ -92,6 +93,7 @@ test('live provider fails closed when one core Health API filter fails', async (
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');
@@ -163,6 +165,7 @@ test('does not replace a successful snapshot when any core Health API query fail
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');
@@ -222,6 +225,7 @@ test('does not mark a sync successful when snapshot persistence fails', async ()
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');
@@ -270,6 +274,7 @@ test('does not persist a snapshot after the connection is disconnected during sy
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
     TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   assert.equal(config.kind, 'oauth');

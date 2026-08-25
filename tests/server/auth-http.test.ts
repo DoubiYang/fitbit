@@ -17,6 +17,7 @@ function config() {
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'client-secret',
     TOKEN_ENCRYPTION_KEY: validKey,
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'http://localhost:3000',
   });
   if (loaded.kind !== 'oauth') {
@@ -140,6 +141,7 @@ test('https production POST without Origin is rejected', async () => {
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
     GOOGLE_HEALTH_CLIENT_SECRET: 'client-secret',
     TOKEN_ENCRYPTION_KEY: validKey,
+    SYNC_SECRET: 'test-sync-secret',
     APP_ORIGIN: 'https://doubiyang.com',
   });
   const response = await handleGoogleStart(new Request('https://doubiyang.com/rhythm/api/auth/google/start', { method: 'POST' }), {
