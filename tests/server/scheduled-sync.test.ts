@@ -3,7 +3,8 @@ import test from 'node:test';
 
 import type { ConnectionRow } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import { runDueSyncForUser } from '../../src/server/health/scheduled-sync';
+import { TokenRefreshError } from '../../src/server/health/access-token';
+import { runDueSyncForUser, runDueSyncs, scheduleInitialSync } from '../../src/server/health/scheduled-sync';
 
 type ScheduledConnection = ConnectionRow & {
   nextSyncAt: Date;
@@ -48,6 +49,64 @@ const config = {
   tokenEncryptionKey: Buffer.alloc(32),
   tokenEncryptionKeyPrevious: undefined,
 };
+
+test('initial sync logs claimed/succeeded/failed instead of swallowing the result', async () => {
+  const work: Array<() => void | Promise<void>> = [];
+  const logs: string[] = [];
+  scheduleInitialSync(
+    async () => ({ claimed: 1, succeeded: 1, failed: 0 }),
+    (task) => {
+      work.push(task);
+    },
+    (message) => logs.push(message),
+  );
+  assert.equal(work.length, 1);
+  await work[0]?.();
+  assert.deepEqual(logs, ['[sync] initial claimed=1 succeeded=1 failed=0']);
+});
+
+test('initial sync logs a failure without throwing into the request', async () => {
+  const work: Array<() => void | Promise<void>> = [];
+  const logs: string[] = [];
+  scheduleInitialSync(
+    async () => {
+      throw new Error('connection no longer syncable');
+    },
+    (task) => {
+      work.push(task);
+    },
+    (message) => logs.push(message),
+  );
+  await work[0]?.();
+  assert.deepEqual(logs, ['[sync] initial sync failed']);
+});
+
+test('claims each due user under a fresh lease instead of leasing the whole batch up front', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  for (const userId of ['first-user', 'second-user']) {
+    const row = connection(userId, now);
+    await store.users.insert(row.userId);
+    await store.connections.insert(row);
+  }
+  const claimLimits: number[] = [];
+  const originalClaim = store.connections.claimDueSyncs.bind(store.connections);
+  store.connections.claimDueSyncs = async (input) => {
+    claimLimits.push(input.limit);
+    return originalClaim(input);
+  };
+
+  const result = await runDueSyncs({
+    config,
+    store,
+    now,
+    limit: 2,
+    syncConnection: async () => {},
+  });
+
+  assert.deepEqual(result, { claimed: 2, succeeded: 2, failed: 0 });
+  assert.deepEqual(claimLimits, [1, 1]);
+});
 
 test('a successful due sync schedules only the claimed user six hours later', async () => {
   const store = createMemoryStore();
@@ -110,6 +169,129 @@ test('failed due syncs retry at 30 minutes, one hour, two hours, then return to 
     now = new Date(nextSyncAt);
   }
   assert.equal(((await store.connections.findByUserId(row.userId)) as ScheduledConnection).syncRetryCount, 0);
+});
+
+test('health api 401 and 403 stay on the retry schedule instead of expiring', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  for (const [userId, message] of [
+    ['health-401', 'health api 401'],
+    ['health-403', 'health api 403'],
+  ] as const) {
+    const row = connection(userId, now);
+    await store.users.insert(row.userId);
+    await store.connections.insert(row);
+    await runDueSyncForUser({
+      config,
+      store,
+      userId,
+      now,
+      syncConnection: async () => {
+        throw new Error(message);
+      },
+    });
+    const current = (await store.connections.findByUserId(userId)) as ScheduledConnection;
+    assert.equal(current.status, 'active');
+    assert.equal(current.nextSyncAt.toISOString(), '2026-08-24T12:30:00.000Z');
+    assert.equal(current.lastErrorCode, 'sync_failed');
+  }
+});
+
+test('an in-flight auth failure does not expire a reauthorized envelope', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection('reauth-user', now);
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+
+  await runDueSyncForUser({
+    config,
+    store,
+    userId: row.userId,
+    now,
+    syncConnection: async () => {
+      const current = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
+      await store.connections.update({
+        ...current,
+        tokenEnvelopeCiphertext: Buffer.from('new-envelope'),
+        nextSyncAt: now,
+        lastErrorCode: undefined,
+      });
+      throw new TokenRefreshError(400);
+    },
+  });
+
+  const current = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
+  assert.equal(current.status, 'active');
+  assert.equal(current.nextSyncAt.toISOString(), now.toISOString());
+  assert.equal(current.syncLeaseUntil, undefined);
+  assert.equal(current.lastErrorCode, undefined);
+  assert.deepEqual(current.tokenEnvelopeCiphertext, Buffer.from('new-envelope'));
+});
+
+test('a successful in-flight sync keeps a reauthorize due time instead of pushing six hours', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection('success-reauth', now);
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+
+  await runDueSyncForUser({
+    config,
+    store,
+    userId: row.userId,
+    now,
+    syncConnection: async () => {
+      const current = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
+      await store.connections.update({
+        ...current,
+        nextSyncAt: now,
+      });
+    },
+  });
+
+  const current = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
+  assert.equal(current.status, 'active');
+  assert.equal(current.nextSyncAt.toISOString(), now.toISOString());
+  assert.equal(current.syncLeaseUntil, undefined);
+});
+
+test('token refresh auth failures expire; 5xx stays on retry', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const authRow = connection('refresh-auth', now);
+  const serverRow = connection('refresh-5xx', now);
+  for (const row of [authRow, serverRow]) {
+    await store.users.insert(row.userId);
+    await store.connections.insert(row);
+  }
+
+  await runDueSyncForUser({
+    config,
+    store,
+    userId: authRow.userId,
+    now,
+    syncConnection: async () => {
+      throw new TokenRefreshError(400);
+    },
+  });
+  await runDueSyncForUser({
+    config,
+    store,
+    userId: serverRow.userId,
+    now,
+    syncConnection: async () => {
+      throw new TokenRefreshError(500);
+    },
+  });
+
+  const expired = (await store.connections.findByUserId(authRow.userId)) as ScheduledConnection;
+  const retried = (await store.connections.findByUserId(serverRow.userId)) as ScheduledConnection;
+  assert.equal(expired.status, 'expired');
+  assert.equal(expired.nextSyncAt, undefined);
+  assert.equal(retried.status, 'active');
+  assert.equal(retried.nextSyncAt.toISOString(), '2026-08-24T12:30:00.000Z');
+  assert.equal(retried.lastErrorCode, 'sync_failed');
 });
 
 test('a disconnected in-flight sync does not requeue or leave a lease', async () => {

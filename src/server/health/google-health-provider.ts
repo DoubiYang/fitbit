@@ -111,11 +111,14 @@ export class GoogleHealthProvider implements HealthProvider {
     if (!isSyncable(latest)) {
       throw new Error('connection no longer syncable');
     }
-    await this.input.store.connections.update({
-      ...latest,
-      lastSuccessfulSyncAt: syncedAt,
-      updatedAt: syncedAt,
+    const stamped = await this.input.store.connections.markLastSuccessfulSyncIfSyncable({
+      id: latest.id,
+      userId: latest.userId,
+      syncedAt,
     });
+    if (!stamped) {
+      throw new Error('connection no longer syncable');
+    }
     return records;
   }
 }

@@ -2,6 +2,7 @@ import { computeRecoverySignal, computeSleepCompleteness, computeTrainingBalance
 import type { MetricEvidence, MetricQuality, RecoverySignalResult, SleepCompletenessResult, TrainingBalanceResult } from '../../domain/metric-types';
 import type { UserHealthRecords } from '../health/provider';
 import type { HealthProvider } from '../health/provider';
+import { civilDate, civilDateDaysAgo } from '../time/civil-date';
 
 type BuildTodayInput = {
   provider: HealthProvider;
@@ -42,12 +43,11 @@ export type TodayView = {
 };
 
 function dateFor(instant: string): string {
-  return instant.slice(0, 10);
+  return civilDate(new Date(instant));
 }
 
 function startDateFor(now: string): string {
-  const start = new Date(Date.parse(now) - 90 * 24 * 60 * 60 * 1_000);
-  return start.toISOString().slice(0, 10);
+  return civilDateDaysAgo(dateFor(now), 90);
 }
 
 function scopedRecords(records: UserHealthRecords, userId: string): UserHealthRecords {

@@ -66,6 +66,25 @@ test('initial sync only reads the selected active user for the recent 14-day ran
   assert.deepEqual(seen, ['u1:2026-08-11:2026-08-24']);
 });
 
+test('14-day sync window uses Asia/Shanghai civil dates, not the UTC calendar date', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(connection({ id: 'c1', userId: 'u1', healthUserId: 'h1' }));
+
+  const seen: string[] = [];
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-23T23:00:00.000Z'),
+    syncOne: async (row, range) => {
+      seen.push(`${row.userId}:${range.from}:${range.to}`);
+    },
+  });
+
+  assert.deepEqual(seen, ['u1:2026-08-11:2026-08-24']);
+});
+
 test('initial sync does not read an expired or disconnected connection', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');

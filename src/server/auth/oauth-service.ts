@@ -75,6 +75,7 @@ function applyTokens(
     refreshTokenExpiresAt: tokens.refreshExpiresAt,
     now,
   });
+  const liveLease = row.syncLeaseUntil && row.syncLeaseUntil.getTime() > now.getTime() ? row.syncLeaseUntil : undefined;
   return {
     ...row,
     healthUserId: identity.healthUserId,
@@ -92,8 +93,8 @@ function applyTokens(
     updatedAt: now,
     nextSyncAt: now,
     syncRetryCount: 0,
-    syncLeaseUntil: undefined,
-    lastSyncAttemptAt: undefined,
+    syncLeaseUntil: liveLease,
+    lastSyncAttemptAt: liveLease ? row.lastSyncAttemptAt : undefined,
   };
 }
 

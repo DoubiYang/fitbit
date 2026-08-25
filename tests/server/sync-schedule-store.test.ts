@@ -17,12 +17,12 @@ function connection(input: Partial<ScheduledConnection> & Pick<ScheduledConnecti
     userId: input.userId,
     healthUserId: `health-${input.userId}`,
     legacyUserId: undefined,
-    tokenEnvelopeCiphertext: Buffer.from('ciphertext'),
-    tokenEnvelopeIv: Buffer.alloc(12),
-    tokenEnvelopeAuthTag: Buffer.alloc(16),
+    tokenEnvelopeCiphertext: 'tokenEnvelopeCiphertext' in input ? input.tokenEnvelopeCiphertext : Buffer.from('ciphertext'),
+    tokenEnvelopeIv: 'tokenEnvelopeIv' in input ? input.tokenEnvelopeIv : Buffer.alloc(12),
+    tokenEnvelopeAuthTag: 'tokenEnvelopeAuthTag' in input ? input.tokenEnvelopeAuthTag : Buffer.alloc(16),
     encryptionKeyVersion: 1,
     accessTokenExpiresAt: new Date('2026-08-24T13:00:00.000Z'),
-    refreshTokenExpiresAt: new Date('2026-08-31T12:00:00.000Z'),
+    refreshTokenExpiresAt: input.refreshTokenExpiresAt ?? new Date('2026-08-31T12:00:00.000Z'),
     grantedScopes: [],
     status: input.status,
     lastErrorCode: undefined,
@@ -60,4 +60,36 @@ test('claims each due active connection once and skips future, disconnected, and
   assert.deepEqual(first.map((row) => row.userId), ['due-user']);
   assert.deepEqual(second, []);
   assert.equal((await store.connections.findByUserId('due-user') as ScheduledConnection | undefined)?.syncLeaseUntil?.toISOString(), leaseUntil.toISOString());
+});
+
+test('does not claim expired refresh tokens or connections without a token envelope', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const leaseUntil = new Date('2026-08-24T12:15:00.000Z');
+  const rows = [
+    connection({
+      id: 'expired-token',
+      userId: 'expired-user',
+      status: 'active',
+      nextSyncAt: now,
+      refreshTokenExpiresAt: new Date('2026-08-24T11:59:00.000Z'),
+    }),
+    connection({
+      id: 'no-token',
+      userId: 'no-token-user',
+      status: 'active',
+      nextSyncAt: now,
+      tokenEnvelopeCiphertext: undefined,
+      tokenEnvelopeIv: undefined,
+      tokenEnvelopeAuthTag: undefined,
+    }),
+    connection({ id: 'due', userId: 'due-user', status: 'active', nextSyncAt: now }),
+  ];
+  for (const row of rows) {
+    await store.users.insert(row.userId);
+    await store.connections.insert(row);
+  }
+
+  const claimed = await store.connections.claimDueSyncs({ now, leaseUntil, limit: 10 });
+  assert.deepEqual(claimed.map((row) => row.userId), ['due-user']);
 });

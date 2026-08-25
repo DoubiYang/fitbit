@@ -55,6 +55,28 @@ export type AccessTokenUpdate = {
   updatedAt: Date;
 };
 
+export type LastSuccessfulSyncUpdate = {
+  id: string;
+  userId: string;
+  syncedAt: Date;
+};
+
+export type ConnectionExpire = {
+  id: string;
+  userId: string;
+  now: Date;
+  lastErrorCode: string;
+  leaseUntil: Date;
+  tokenEnvelopeCiphertext: Buffer | undefined;
+};
+
+export type SyncLeaseRelease = {
+  id: string;
+  userId: string;
+  leaseUntil: Date;
+  now: Date;
+};
+
 export type SessionRow = {
   id: string;
   userId: string;
@@ -86,8 +108,11 @@ export type AuthStore = {
     insert(row: ConnectionRow): Promise<void>;
     update(row: ConnectionRow): Promise<void>;
     updateAccessTokenIfSyncable(input: AccessTokenUpdate): Promise<boolean>;
+    markLastSuccessfulSyncIfSyncable(input: LastSuccessfulSyncUpdate): Promise<boolean>;
     claimDueSyncs(input: DueSyncClaim): Promise<ConnectionRow[]>;
     finishScheduledSync(input: ScheduledSyncFinish): Promise<boolean>;
+    expireIfSyncable(input: ConnectionExpire): Promise<boolean>;
+    clearSyncLeaseIfHeld(input: SyncLeaseRelease): Promise<boolean>;
   };
   sessions: {
     insert(row: SessionRow): Promise<void>;

@@ -4,6 +4,17 @@ import { CURRENT_KEY_VERSION, decryptTokenEnvelope, encryptTokenEnvelope } from 
 
 const SKEW_MS = 60_000;
 
+export class TokenRefreshError extends Error {
+  constructor(readonly status: number) {
+    super('refresh failed');
+    this.name = 'TokenRefreshError';
+  }
+
+  get isAuthFailure(): boolean {
+    return this.status === 400 || this.status === 401 || this.status === 403;
+  }
+}
+
 function envelopeFrom(row: ConnectionRow) {
   if (!row.tokenEnvelopeCiphertext || !row.tokenEnvelopeIv || !row.tokenEnvelopeAuthTag) {
     return undefined;
@@ -29,7 +40,7 @@ export function createGoogleTokenRefresher(config: OAuthConfig): TokenRefresher 
         }),
       });
       if (!response.ok) {
-        throw new Error('refresh failed');
+        throw new TokenRefreshError(response.status);
       }
       const body = (await response.json()) as {
         access_token?: string;

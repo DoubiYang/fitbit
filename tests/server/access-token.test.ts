@@ -4,7 +4,7 @@ import test from 'node:test';
 import { loadConfig } from '../../src/server/config/env';
 import { encryptTokenEnvelope } from '../../src/server/crypto/token-envelope';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import { resolveAccessToken } from '../../src/server/health/access-token';
+import { createGoogleTokenRefresher, TokenRefreshError, resolveAccessToken } from '../../src/server/health/access-token';
 
 test('does not restore credentials when the user disconnects while a token refresh is in flight', async () => {
   const key = Buffer.alloc(32, 9);
@@ -81,4 +81,29 @@ test('does not restore credentials when the user disconnects while a token refre
   assert.equal(current?.status, 'disconnected');
   assert.equal(current?.tokenEnvelopeCiphertext, undefined);
   assert.equal(current?.accessTokenExpiresAt, undefined);
+});
+
+test('token refresh 401 is an auth failure, not a generic retry', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('invalid_grant', { status: 401 });
+  try {
+    const config = loadConfig({
+      DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+      GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+      GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+      TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+      SYNC_SECRET: 'test-sync-secret',
+      APP_ORIGIN: 'http://localhost:3000',
+    });
+    assert.equal(config.kind, 'oauth');
+    if (config.kind !== 'oauth') {
+      return;
+    }
+    await assert.rejects(
+      () => createGoogleTokenRefresher(config).refresh('refresh'),
+      (error: unknown) => error instanceof TokenRefreshError && error.status === 401 && error.isAuthFailure,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -53,9 +53,13 @@ test('complete secrets load oauth config with /rhythm redirect', () => {
   assert.equal(parseEncryptionKey(validKey).length, 32);
 });
 
-test('missing sync secret is unconfigured', () => {
+test('missing sync secret keeps oauth and disables the scheduler secret', () => {
   const { SYNC_SECRET: _syncSecret, ...withoutSyncSecret } = completeEnv;
-  assert.equal(loadConfig(withoutSyncSecret).kind, 'unconfigured');
+  const config = loadConfig(withoutSyncSecret);
+  assert.equal(config.kind, 'oauth');
+  if (config.kind === 'oauth') {
+    assert.equal(config.syncSecret, undefined);
+  }
 });
 
 test('origin with a path is rejected', () => {

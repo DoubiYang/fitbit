@@ -6,6 +6,7 @@ import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
 import type { GoogleOAuthClient, GoogleTokenResponse } from '../../src/server/auth/types';
 import { loadConfig, redirectUri } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
+import { runDueSyncForUser } from '../../src/server/health/scheduled-sync';
 
 const validKey = Buffer.alloc(32, 9).toString('base64');
 const now = new Date('2026-08-24T12:00:00.000Z');
@@ -191,6 +192,36 @@ test('reauthorize without a new refresh token keeps the previous refresh token',
 
   const row = await store.connections.findByUserId(userId!);
   assert.ok(row?.tokenEnvelopeCiphertext);
+});
+
+test('reauthorize does not clear a live sync lease', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = await readSessionUserId(store, first.sessionToken, now);
+  const current = await store.connections.findByUserId(userId!);
+  const leaseUntil = new Date('2026-08-24T12:15:00.000Z');
+  await store.connections.update({
+    ...current!,
+    nextSyncAt: now,
+    syncLeaseUntil: leaseUntil,
+    lastSyncAttemptAt: now,
+  });
+
+  const reauth = await startAndCallback({ store, google: googleClient(), sessionUserId: userId });
+  assert.equal(reauth.authError, undefined);
+  const updated = await store.connections.findByUserId(userId!);
+  assert.equal(updated?.syncLeaseUntil?.toISOString(), leaseUntil.toISOString());
+
+  const result = await runDueSyncForUser({
+    config: oauthConfig(),
+    store,
+    userId: userId!,
+    now,
+    syncConnection: async () => {
+      throw new Error('must not start a second sync');
+    },
+  });
+  assert.deepEqual(result, { claimed: 0, succeeded: 0, failed: 0 });
 });
 
 test('logged-in callback cannot attach another user identity', async () => {

@@ -28,7 +28,7 @@ openssl rand -hex 32      # SYNC_SECRET
 ```
 
 4. `DATABASE_URL` 在 Compose 里会改写为容器内的 `db` 主机，`.env.local` 里仍需要 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`。
-5. `SYNC_SECRET` 仅供 Compose 内的 `sync` worker 调用内部入口，不能给浏览器或外部服务。
+5. `SYNC_SECRET` 可选：不填时应用仍可授权和同步，但 Compose `sync` worker 不会调度。填了则仅供 worker 调用内部入口，不能给浏览器或外部服务。
 6. 丢失 `TOKEN_ENCRYPTION_KEY` 且没有 `TOKEN_ENCRYPTION_KEY_PREVIOUS` 时，已保存的授权无法解密，必须重新连接。
 
 ```bash

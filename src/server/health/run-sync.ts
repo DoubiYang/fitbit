@@ -1,5 +1,6 @@
 import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow } from '../auth/types';
+import { civilDateRange } from '../time/civil-date';
 import type { HealthDateRange, UserHealthRecords } from './provider';
 import { GoogleHealthProvider } from './google-health-provider';
 import { saveHealthSnapshot } from './snapshot-store';
@@ -15,8 +16,7 @@ export async function syncUserConnection(input: {
 }): Promise<boolean> {
   const now = input.now ?? new Date();
   const rangeDays = input.rangeDays ?? 14;
-  const to = now.toISOString().slice(0, 10);
-  const from = new Date(now.getTime() - (rangeDays - 1) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const { from, to } = civilDateRange(now, rangeDays);
   const persistSnapshot =
     input.persistSnapshot ??
     ((userId, records, syncedAt) =>

@@ -1,5 +1,6 @@
 import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow } from '../auth/types';
+import { TokenRefreshError } from './access-token';
 import { syncUserConnection } from './run-sync';
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1_000;
@@ -31,26 +32,35 @@ function errorCode(error: unknown): string {
   return error instanceof Error && /health api 429/i.test(error.message) ? 'rate_limited' : 'sync_failed';
 }
 
-export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledSyncResult> {
-  const now = input.now ?? new Date();
-  const leaseUntil = new Date(now.getTime() + LEASE_MS);
-  const connections = await input.store.connections.claimDueSyncs({
-    now,
-    leaseUntil,
-    limit: input.limit ?? 10,
-    userId: input.userId,
-  });
-  const syncConnection =
-    input.syncConnection ??
-    (async (connection: ConnectionRow) => {
-      const synced = await syncUserConnection({ config: input.config, store: input.store, userId: connection.userId, now });
-      if (!synced) {
-        throw new Error('connection no longer syncable');
-      }
-    });
-  const result: ScheduledSyncResult = { claimed: connections.length, succeeded: 0, failed: 0 };
+function isAuthFailure(error: unknown): boolean {
+  return error instanceof TokenRefreshError && error.isAuthFailure;
+}
 
-  for (const connection of connections) {
+export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledSyncResult> {
+  const maxClaims = input.limit ?? 10;
+  const result: ScheduledSyncResult = { claimed: 0, succeeded: 0, failed: 0 };
+
+  for (let index = 0; index < maxClaims; index += 1) {
+    const now = input.now ?? new Date();
+    const leaseUntil = new Date(now.getTime() + LEASE_MS);
+    const [connection] = await input.store.connections.claimDueSyncs({
+      now,
+      leaseUntil,
+      limit: 1,
+      userId: input.userId,
+    });
+    if (!connection) {
+      break;
+    }
+    const syncConnection =
+      input.syncConnection ??
+      (async (row: ConnectionRow) => {
+        const synced = await syncUserConnection({ config: input.config, store: input.store, userId: row.userId, now });
+        if (!synced) {
+          throw new Error('connection no longer syncable');
+        }
+      });
+    result.claimed += 1;
     if (!connection.syncLeaseUntil) {
       result.failed += 1;
       continue;
@@ -72,6 +82,26 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
         result.failed += 1;
       }
     } catch (error) {
+      if (isAuthFailure(error)) {
+        const expired = await input.store.connections.expireIfSyncable({
+          id: connection.id,
+          userId: connection.userId,
+          now,
+          lastErrorCode: 'expired',
+          leaseUntil: connection.syncLeaseUntil,
+          tokenEnvelopeCiphertext: connection.tokenEnvelopeCiphertext,
+        });
+        if (!expired) {
+          await input.store.connections.clearSyncLeaseIfHeld({
+            id: connection.id,
+            userId: connection.userId,
+            leaseUntil: connection.syncLeaseUntil,
+            now,
+          });
+        }
+        result.failed += 1;
+        continue;
+      }
       const next = failureSchedule(now, connection.syncRetryCount ?? 0);
       await input.store.connections.finishScheduledSync({
         id: connection.id,
@@ -92,4 +122,20 @@ export async function runDueSyncForUser(
   input: Omit<ScheduledSyncInput, 'userId' | 'limit'> & { userId: string },
 ): Promise<ScheduledSyncResult> {
   return runDueSyncs({ ...input, limit: 1 });
+}
+
+export function scheduleInitialSync(
+  run: () => Promise<ScheduledSyncResult>,
+  schedule: (work: () => void | Promise<void>) => void,
+  log: (message: string) => void = console.log,
+): void {
+  schedule(() =>
+    run()
+      .then((result) => {
+        log(`[sync] initial claimed=${result.claimed} succeeded=${result.succeeded} failed=${result.failed}`);
+      })
+      .catch(() => {
+        log('[sync] initial sync failed');
+      }),
+  );
 }

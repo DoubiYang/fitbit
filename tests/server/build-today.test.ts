@@ -41,6 +41,24 @@ test('returns a data state instead of a training instruction with insufficient r
   assert.equal(view.metrics.recovery.score, null);
 });
 
+test('today range uses the Asia/Shanghai civil date before UTC midnight', async () => {
+  let to: string | undefined;
+  const provider: HealthProvider = {
+    capabilities: { mode: 'oauth', canSync: true },
+    async listRecords(_userId, range): Promise<UserHealthRecords> {
+      to = range.to;
+      return emptyUserHealthRecords();
+    },
+  };
+  await buildTodayView({
+    provider,
+    userId: 'u1',
+    now: '2026-08-23T23:00:00.000Z',
+    lastSuccessfulSyncAt: '2026-08-23T22:00:00.000Z',
+  });
+  assert.equal(to, '2026-08-24');
+});
+
 test('does not allow provider records for another user into the view', async () => {
   const otherUserSleep = parseSleepSession({
     userId: 'another_user',

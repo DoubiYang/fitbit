@@ -4,6 +4,16 @@ export type MemoryStore = AuthStore & {
   deletedHealthSnapshotUserIds: string[];
 };
 
+function envelopesEqual(left: Buffer | undefined, right: Buffer | undefined): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right || left.length !== right.length) {
+    return false;
+  }
+  return left.equals(right);
+}
+
 function cloneConnection(row: ConnectionRow): ConnectionRow {
   return {
     ...row,
@@ -73,12 +83,29 @@ export function createMemoryStore(): MemoryStore {
         );
         return true;
       },
+      async markLastSuccessfulSyncIfSyncable(input): Promise<boolean> {
+        const current = connections.get(input.id);
+        if (!current || current.userId !== input.userId || (current.status !== 'active' && current.status !== 'partial')) {
+          return false;
+        }
+        connections.set(
+          current.id,
+          cloneConnection({
+            ...current,
+            lastSuccessfulSyncAt: input.syncedAt,
+            updatedAt: input.syncedAt,
+          }),
+        );
+        return true;
+      },
       async claimDueSyncs(input) {
         const due = [...connections.values()]
           .filter(
             (row) =>
               (row.status === 'active' || row.status === 'partial') &&
               (!input.userId || row.userId === input.userId) &&
+              Boolean(row.tokenEnvelopeCiphertext) &&
+              (!row.refreshTokenExpiresAt || row.refreshTokenExpiresAt.getTime() > input.now.getTime()) &&
               row.nextSyncAt &&
               row.nextSyncAt.getTime() <= input.now.getTime() &&
               (!row.syncLeaseUntil || row.syncLeaseUntil.getTime() <= input.now.getTime()),
@@ -91,11 +118,23 @@ export function createMemoryStore(): MemoryStore {
         for (const row of due) {
           connections.set(
             row.id,
-            cloneConnection({ ...row, syncLeaseUntil: input.leaseUntil, lastSyncAttemptAt: input.now, updatedAt: input.now }),
+            cloneConnection({
+              ...row,
+              syncLeaseUntil: input.leaseUntil,
+              lastSyncAttemptAt: input.now,
+              updatedAt: input.now,
+              nextSyncAt: undefined,
+            }),
           );
         }
         return due.map((row) =>
-          cloneConnection({ ...row, syncLeaseUntil: input.leaseUntil, lastSyncAttemptAt: input.now, updatedAt: input.now }),
+          cloneConnection({
+            ...row,
+            syncLeaseUntil: input.leaseUntil,
+            lastSyncAttemptAt: input.now,
+            updatedAt: input.now,
+            nextSyncAt: undefined,
+          }),
         );
       },
       async finishScheduledSync(input): Promise<boolean> {
@@ -109,17 +148,57 @@ export function createMemoryStore(): MemoryStore {
         ) {
           return false;
         }
+        const keepDue = current.nextSyncAt && current.nextSyncAt.getTime() <= input.now.getTime();
         connections.set(
           current.id,
           cloneConnection({
             ...current,
-            nextSyncAt: input.nextSyncAt,
-            syncRetryCount: input.syncRetryCount,
+            nextSyncAt: keepDue ? current.nextSyncAt : input.nextSyncAt,
+            syncRetryCount: keepDue ? current.syncRetryCount : input.syncRetryCount,
+            syncLeaseUntil: undefined,
+            lastErrorCode: keepDue ? current.lastErrorCode : input.lastErrorCode,
+            updatedAt: input.now,
+          }),
+        );
+        return true;
+      },
+      async expireIfSyncable(input): Promise<boolean> {
+        const current = connections.get(input.id);
+        if (
+          !current ||
+          current.userId !== input.userId ||
+          (current.status !== 'active' && current.status !== 'partial') ||
+          !current.syncLeaseUntil ||
+          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime() ||
+          !envelopesEqual(current.tokenEnvelopeCiphertext, input.tokenEnvelopeCiphertext)
+        ) {
+          return false;
+        }
+        connections.set(
+          current.id,
+          cloneConnection({
+            ...current,
+            status: 'expired',
+            nextSyncAt: undefined,
+            syncRetryCount: 0,
             syncLeaseUntil: undefined,
             lastErrorCode: input.lastErrorCode,
             updatedAt: input.now,
           }),
         );
+        return true;
+      },
+      async clearSyncLeaseIfHeld(input): Promise<boolean> {
+        const current = connections.get(input.id);
+        if (
+          !current ||
+          current.userId !== input.userId ||
+          !current.syncLeaseUntil ||
+          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime()
+        ) {
+          return false;
+        }
+        connections.set(current.id, cloneConnection({ ...current, syncLeaseUntil: undefined, updatedAt: input.now }));
         return true;
       },
     },

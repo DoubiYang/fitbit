@@ -1,3 +1,4 @@
+import { after } from 'next/server';
 import { cookies } from 'next/headers';
 
 import { loadConfig } from '../config/env';
@@ -5,7 +6,7 @@ import { createGoogleOAuthClient } from './google-client';
 import type { HttpDeps } from './http';
 import { SESSION_COOKIE } from './cookies';
 import { ensurePostgresReady } from '../db/postgres-store';
-import { runDueSyncForUser } from '../health/scheduled-sync';
+import { runDueSyncForUser, scheduleInitialSync } from '../health/scheduled-sync';
 
 export async function createRequestDeps(): Promise<HttpDeps> {
   const config = loadConfig();
@@ -18,7 +19,7 @@ export async function createRequestDeps(): Promise<HttpDeps> {
     store,
     google: createGoogleOAuthClient(config),
     afterSuccessfulConnect: (userId) => {
-      void runDueSyncForUser({ config, store, userId }).catch(() => undefined);
+      scheduleInitialSync(() => runDueSyncForUser({ config, store, userId }), after);
     },
   };
 }

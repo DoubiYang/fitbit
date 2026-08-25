@@ -1,6 +1,6 @@
 import pg from 'pg';
 
-import type { AccessTokenUpdate, AuthStore, ConnectionRow, DueSyncClaim, OauthTransactionRow, ScheduledSyncFinish, SessionRow } from '../auth/types';
+import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
 import type { ConnectionStatus } from '../auth/scopes';
 
 const pools = new Map<string, pg.Pool>();
@@ -143,6 +143,15 @@ function storeFor(queryable: Queryable): AuthStore {
       );
       return result.rowCount === 1;
     },
+    async markLastSuccessfulSyncIfSyncable(input: LastSuccessfulSyncUpdate): Promise<boolean> {
+      const result = await queryable.query(
+        `UPDATE google_health_connections
+         SET last_successful_sync_at = $3, updated_at = $3
+         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')`,
+        [input.id, input.userId, input.syncedAt],
+      );
+      return result.rowCount === 1;
+    },
     async claimDueSyncs(input: DueSyncClaim) {
       const values: unknown[] = [input.now, input.leaseUntil, input.limit];
       const userFilter = input.userId ? ` AND user_id = $${values.push(input.userId)}` : '';
@@ -151,6 +160,8 @@ function storeFor(queryable: Queryable): AuthStore {
            SELECT id
            FROM google_health_connections
            WHERE status IN ('active', 'partial')
+             AND token_envelope_ciphertext IS NOT NULL
+             AND (refresh_token_expires_at IS NULL OR refresh_token_expires_at > $1)
              AND next_sync_at IS NOT NULL
              AND next_sync_at <= $1
              AND (sync_lease_until IS NULL OR sync_lease_until <= $1)
@@ -160,7 +171,7 @@ function storeFor(queryable: Queryable): AuthStore {
            LIMIT $3
          )
          UPDATE google_health_connections AS connection
-         SET sync_lease_until = $2, last_sync_attempt_at = $1, updated_at = $1
+         SET sync_lease_until = $2, last_sync_attempt_at = $1, updated_at = $1, next_sync_at = NULL
          FROM due
          WHERE connection.id = due.id
          RETURNING connection.*`,
@@ -171,7 +182,20 @@ function storeFor(queryable: Queryable): AuthStore {
     async finishScheduledSync(input: ScheduledSyncFinish) {
       const result = await queryable.query(
         `UPDATE google_health_connections
-         SET next_sync_at = $4, sync_retry_count = $5, sync_lease_until = NULL, last_error_code = $6, updated_at = $7
+         SET next_sync_at = CASE
+               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $7 THEN next_sync_at
+               ELSE $4
+             END,
+             sync_retry_count = CASE
+               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $7 THEN sync_retry_count
+               ELSE $5
+             END,
+             sync_lease_until = NULL,
+             last_error_code = CASE
+               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $7 THEN last_error_code
+               ELSE $6
+             END,
+             updated_at = $7
          WHERE id = $1
            AND user_id = $2
            AND status IN ('active', 'partial')
@@ -185,6 +209,27 @@ function storeFor(queryable: Queryable): AuthStore {
           input.lastErrorCode ?? null,
           input.now,
         ],
+      );
+      return result.rowCount === 1;
+    },
+    async expireIfSyncable(input: ConnectionExpire): Promise<boolean> {
+      const result = await queryable.query(
+        `UPDATE google_health_connections
+         SET status = 'expired', next_sync_at = NULL, sync_retry_count = 0, sync_lease_until = NULL,
+             last_error_code = $3, updated_at = $4
+         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')
+           AND sync_lease_until = $5
+           AND token_envelope_ciphertext IS NOT DISTINCT FROM $6`,
+        [input.id, input.userId, input.lastErrorCode, input.now, input.leaseUntil, input.tokenEnvelopeCiphertext ?? null],
+      );
+      return result.rowCount === 1;
+    },
+    async clearSyncLeaseIfHeld(input: SyncLeaseRelease): Promise<boolean> {
+      const result = await queryable.query(
+        `UPDATE google_health_connections
+         SET sync_lease_until = NULL, updated_at = $4
+         WHERE id = $1 AND user_id = $2 AND sync_lease_until = $3`,
+        [input.id, input.userId, input.leaseUntil, input.now],
       );
       return result.rowCount === 1;
     },

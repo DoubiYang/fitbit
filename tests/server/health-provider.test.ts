@@ -331,6 +331,82 @@ test('does not persist a snapshot after the connection is disconnected during sy
   assert.equal(persisted, false);
 });
 
+test('does not restore tokens when disconnect races the success stamp', async () => {
+  const config = loadConfig({
+    DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+    GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+    TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
+    APP_ORIGIN: 'http://localhost:3000',
+  });
+  assert.equal(config.kind, 'oauth');
+  if (config.kind !== 'oauth') {
+    return;
+  }
+  const store = createMemoryStore();
+  const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, key, 'c6', 'u6');
+  const connection = {
+    id: 'c6',
+    userId: 'u6',
+    healthUserId: 'h6',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2099-01-08T00:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active' as const,
+    lastErrorCode: undefined,
+    connectedAt: new Date('2026-08-24T00:00:00.000Z'),
+    updatedAt: new Date('2026-08-24T00:00:00.000Z'),
+    lastSuccessfulSyncAt: undefined,
+  };
+  await store.users.insert('u6');
+  await store.connections.insert(connection);
+  const originalFind = store.connections.findByUserId.bind(store.connections);
+  let afterPersist = false;
+  store.connections.findByUserId = async (userId) => {
+    const row = await originalFind(userId);
+    if (afterPersist && row) {
+      await store.connections.update({
+        ...row,
+        status: 'disconnected',
+        tokenEnvelopeCiphertext: undefined,
+        tokenEnvelopeIv: undefined,
+        tokenEnvelopeAuthTag: undefined,
+        encryptionKeyVersion: undefined,
+        accessTokenExpiresAt: undefined,
+        refreshTokenExpiresAt: undefined,
+        grantedScopes: [],
+        lastErrorCode: 'disconnected',
+        nextSyncAt: undefined,
+        syncLeaseUntil: undefined,
+      });
+      return row;
+    }
+    return row;
+  };
+  const provider = new GoogleHealthProvider({
+    config,
+    store,
+    connection,
+    api: { async listDataPoints() { return []; } },
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+    persistSnapshot: async () => {
+      afterPersist = true;
+    },
+  });
+
+  await assert.rejects(() => provider.listRecords('u6', range), /connection no longer syncable/);
+  const current = await originalFind('u6');
+  assert.equal(current?.status, 'disconnected');
+  assert.equal(current?.tokenEnvelopeCiphertext, undefined);
+  assert.equal(current?.lastSuccessfulSyncAt, undefined);
+});
+
 test('returns copied demo records only for the resolved demo user', async () => {
   const provider = new DemoHealthProvider();
   const first = await provider.listRecords('demo_user', range);

@@ -6,7 +6,7 @@ export type OAuthConfig = {
   databaseUrl: string;
   googleClientId: string;
   googleClientSecret: string;
-  syncSecret: string;
+  syncSecret: string | undefined;
   appOrigin: string;
   appBasePath: typeof APP_BASE_PATH;
   tokenEncryptionKey: Buffer;
@@ -23,7 +23,6 @@ const SECRET_KEYS = [
   'GOOGLE_HEALTH_CLIENT_ID',
   'GOOGLE_HEALTH_CLIENT_SECRET',
   'TOKEN_ENCRYPTION_KEY',
-  'SYNC_SECRET',
 ] as const;
 
 export function parseEncryptionKey(value: string, label = 'TOKEN_ENCRYPTION_KEY'): Buffer {
@@ -121,7 +120,7 @@ export function loadConfig(env: NodeJS.Dict<string> = process.env): AppConfig {
     databaseUrl: databaseUrl!,
     googleClientId: env.GOOGLE_HEALTH_CLIENT_ID!.trim(),
     googleClientSecret: env.GOOGLE_HEALTH_CLIENT_SECRET!.trim(),
-    syncSecret: env.SYNC_SECRET!.trim(),
+    syncSecret: present(env.SYNC_SECRET) ? env.SYNC_SECRET.trim() : undefined,
     appOrigin,
     appBasePath: APP_BASE_PATH,
     tokenEncryptionKey,

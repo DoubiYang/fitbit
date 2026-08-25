@@ -9,9 +9,9 @@ export function dataPointFilter(dataType: string, from: string, untilExclusive: 
     case 'sleep':
       return `sleep.interval.civil_end_time >= "${from}" AND sleep.interval.civil_end_time < "${untilExclusive}"`;
     case 'daily-heart-rate-variability':
-      return `daily_heart_rate_variability.date >= "${from}" AND daily_heart_rate_variability.date < "${untilExclusive}"`;
+      return `dailyHeartRateVariability.date >= "${from}" AND dailyHeartRateVariability.date < "${untilExclusive}"`;
     case 'daily-resting-heart-rate':
-      return `daily_resting_heart_rate.date >= "${from}" AND daily_resting_heart_rate.date < "${untilExclusive}"`;
+      return `dailyRestingHeartRate.date >= "${from}" AND dailyRestingHeartRate.date < "${untilExclusive}"`;
     case 'exercise':
       return `exercise.interval.civil_start_time >= "${from}" AND exercise.interval.civil_start_time < "${untilExclusive}"`;
     default:
