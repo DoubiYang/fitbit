@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
 import { buildGoogleAuthUrl, generatePkcePair } from '../../src/server/auth/oauth-url';
 
 const redirectUri = 'http://localhost:3000/rhythm/api/auth/google/callback';
@@ -27,7 +26,18 @@ test('authorization URL includes all requested scopes, offline access, state and
   assert.equal(query.get('code_challenge'), pkce.challenge);
   assert.equal(query.get('prompt'), 'consent');
   const scopes = query.get('scope')?.split(' ') ?? [];
-  assert.deepEqual(scopes, [...REQUESTED_SCOPES]);
+  assert.deepEqual(scopes, [
+    'https://www.googleapis.com/auth/googlehealth.sleep.readonly',
+    'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly',
+    'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
+    'https://www.googleapis.com/auth/googlehealth.nutrition.readonly',
+    'https://www.googleapis.com/auth/googlehealth.nutrition.writeonly',
+    'https://www.googleapis.com/auth/googlehealth.profile.readonly',
+    'https://www.googleapis.com/auth/googlehealth.settings.readonly',
+    'https://www.googleapis.com/auth/googlehealth.location.readonly',
+    'https://www.googleapis.com/auth/googlehealth.ecg.readonly',
+    'https://www.googleapis.com/auth/googlehealth.irn.readonly',
+  ]);
 });
 
 test('never sets include_granted_scopes=true', () => {

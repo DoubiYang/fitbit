@@ -21,6 +21,7 @@ export type StartOAuthResult =
 export type CallbackOAuthResult = {
   authError?: AuthErrorCode;
   sessionToken?: string;
+  userId?: string;
   keepExistingSession: boolean;
 };
 
@@ -281,7 +282,7 @@ export async function completeGoogleOAuth(input: {
         }
 
         await store.connections.update(applyTokens(mine, tokens, refreshToken, identity, keyring.current, now));
-        return { keepExistingSession: true };
+        return { keepExistingSession: true, userId: mine.userId };
       }
 
       if (existing) {
@@ -307,7 +308,7 @@ export async function completeGoogleOAuth(input: {
         }
         await store.connections.update(applyTokens(existing, tokens, refreshToken, identity, keyring.current, now));
         const sessionToken = await createSession(store, existing.userId, now);
-        return { sessionToken, keepExistingSession: false };
+        return { sessionToken, userId: existing.userId, keepExistingSession: false };
       }
 
       if (!tokens.refreshToken) {
@@ -334,10 +335,11 @@ export async function completeGoogleOAuth(input: {
         lastErrorCode: undefined,
         connectedAt: now,
         updatedAt: now,
+        lastSuccessfulSyncAt: undefined,
       };
       await store.connections.insert(applyTokens(created, tokens, tokens.refreshToken, identity, keyring.current, now));
       const sessionToken = await createSession(store, userId, now);
-      return { sessionToken, keepExistingSession: false };
+      return { sessionToken, userId, keepExistingSession: false };
     });
   } catch {
     await revokeBestEffort();
@@ -395,6 +397,7 @@ export async function disconnectUser(input: {
     }
     await input.store.withTransaction(async (store) => {
       await store.connections.update(clearTokens(connection, now));
+      await store.healthSnapshots.deleteForUser(input.userId);
       await store.sessions.deleteAllForUser(input.userId);
     });
   } else {

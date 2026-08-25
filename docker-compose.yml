@@ -20,6 +20,7 @@ services:
       - '3000:3000'
     env_file: .env.local
     environment:
+      HOSTNAME: 0.0.0.0
       POSTGRES_HOST: db
       POSTGRES_USER: rhythm
       POSTGRES_DB: rhythm
@@ -28,3 +29,15 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          'fetch("http://127.0.0.1:3000/rhythm/account").then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

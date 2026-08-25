@@ -21,6 +21,7 @@ function connection(overrides: Partial<ConnectionRow> = {}): ConnectionRow {
     lastErrorCode: undefined,
     connectedAt: new Date('2026-08-24T10:00:00.000Z'),
     updatedAt: new Date('2026-08-24T10:00:00.000Z'),
+    lastSuccessfulSyncAt: undefined,
     ...overrides,
   };
 }

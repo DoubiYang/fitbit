@@ -2,7 +2,7 @@
 
 面向 Fitbit Air 用户的中文健康数据仪表盘与自助 AI 教练。
 
-当前分支包含本地演示仪表盘，以及 Google OAuth / 账户管理。未配置密钥时仍是演示模式；配置完整后可在本机连接 Google Health，但**不会**拉取真实健康记录，账户页会显示「已连接，等待同步」。
+当前分支包含本地演示仪表盘、Google OAuth / 账户管理，以及首次授权后的真实数据热同步。未配置密钥时仍是演示模式；配置完整后可在本机连接 Google Health。连接成功后，应用只会为**刚授权的用户**尝试同步最近 14 天的睡眠、HRV、静息心率和训练数据；首页只读成功保存的本地快照，**不会**在打开页面时请求 Google。当前没有全用户定时同步、历史回填、webhook、拍照记餐、营养写回或 AI Coach。
 
 ## 本地演示
 
@@ -42,7 +42,7 @@ http://localhost:3000/rhythm/account
 
 不要用 `http://127.0.0.1:3000`。本地 callback 必须是 `http://localhost:3000/rhythm/api/auth/google/callback`。
 
-Google Cloud 还需：启用 Health API、Testing + Test users、文档中的 10 个 scope、授权网域 `doubiyang.com`。同意屏链接：
+Google Cloud 还需：启用 Health API、Testing + Test users、[OAuth 设计](docs/superpowers/specs/2026-08-24-05-oauth-account-docker-design.md)中固定的 10 个 scope，以及授权网域 `doubiyang.com`。其中营养写入权限只为后续已确认餐食的写回预先授权；当前代码不会写入 Google Health。
 
 - `https://doubiyang.com/rhythm`
 - `https://doubiyang.com/rhythm/privacy`

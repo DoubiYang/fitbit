@@ -5,16 +5,21 @@ import { createGoogleOAuthClient } from './google-client';
 import type { HttpDeps } from './http';
 import { SESSION_COOKIE } from './cookies';
 import { ensurePostgresReady } from '../db/postgres-store';
+import { syncUserConnection } from '../health/run-sync';
 
 export async function createRequestDeps(): Promise<HttpDeps> {
   const config = loadConfig();
   if (config.kind !== 'oauth') {
     return { config };
   }
+  const store = await ensurePostgresReady(config.databaseUrl);
   return {
     config,
-    store: await ensurePostgresReady(config.databaseUrl),
+    store,
     google: createGoogleOAuthClient(config),
+    afterSuccessfulConnect: (userId) => {
+      void syncUserConnection({ config, store, userId }).catch(() => undefined);
+    },
   };
 }
 

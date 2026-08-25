@@ -9,15 +9,16 @@ export const dynamic = 'force-dynamic';
 
 export default async function Home() {
   const config = loadConfig();
+  const deps = config.kind === 'demo' ? { config } : await createRequestDeps();
   const user =
     config.kind === 'demo'
       ? await getCurrentUser({ config })
       : await getCurrentUser({
           config,
-          store: (await createRequestDeps()).store,
+          store: deps.store,
           cookieHeader: await requestCookieHeader(),
         });
-  const view = await buildTodayViewForUser(user);
+  const view = await buildTodayViewForUser(user, new Date().toISOString(), deps);
 
   if (user.mode === 'unconfigured') {
     return (

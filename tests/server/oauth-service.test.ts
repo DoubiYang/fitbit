@@ -162,6 +162,7 @@ test('unknown identity creates an owner; reconnect after disconnect reuses the s
   const disconnected = await store.connections.findByHealthUserId('health-1');
   assert.equal(disconnected?.status, 'disconnected');
   assert.equal(disconnected?.id, connectionId);
+  assert.deepEqual((store as unknown as { deletedHealthSnapshotUserIds: string[] }).deletedHealthSnapshotUserIds, [userId]);
   assert.equal(await readSessionUserId(store, first.sessionToken, now), undefined);
 
   const second = await startAndCallback({ store, google });

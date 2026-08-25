@@ -1,0 +1,9 @@
+CREATE TABLE health_snapshots (
+  user_id UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  sleep_count INTEGER NOT NULL DEFAULT 0,
+  hrv_count INTEGER NOT NULL DEFAULT 0,
+  rhr_count INTEGER NOT NULL DEFAULT 0,
+  training_day_count INTEGER NOT NULL DEFAULT 0,
+  records JSONB NOT NULL,
+  synced_at TIMESTAMPTZ NOT NULL
+);

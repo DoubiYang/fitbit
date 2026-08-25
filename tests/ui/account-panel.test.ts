@@ -41,7 +41,9 @@ test('renders each account safety state without secrets', () => {
   assert.match(states[0], /需要本地 Google Health 配置/);
   assert.match(states[1], /连接 Google Health/);
   assert.match(states[1], /Google 第三方应用权限/);
-  assert.match(states[2], /已连接，等待同步/);
+  assert.match(states[1], /尝试同步最近 14 天/);
+  assert.match(states[2], /已连接/);
+  assert.match(states[2], /最近一次成功保存的本地快照/);
   assert.match(states[3], /权限不完整/);
   assert.match(states[4], /需要重新连接/);
   assert.match(states[5], /已取消 Google 授权/);

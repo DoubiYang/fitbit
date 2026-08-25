@@ -1,17 +1,25 @@
-import { emptyUserHealthRecords, type HealthProvider } from '../health/provider';
+import type { HttpDeps } from '../auth/http';
 import { DemoHealthProvider } from '../health/demo-provider';
+import { emptyUserHealthRecords } from '../health/provider';
+import { loadHealthSnapshot } from '../health/snapshot-store';
 import { buildTodayView, type TodayView } from './build-today';
 import type { CurrentUser } from '../session/current-user';
 
-class WaitingSyncProvider implements HealthProvider {
-  readonly capabilities = { mode: 'oauth' as const, canSync: false };
-
-  async listRecords(): Promise<ReturnType<typeof emptyUserHealthRecords>> {
-    return emptyUserHealthRecords();
+async function oauthSnapshot(userId: string, deps: HttpDeps) {
+  if (deps.snapshotForUser) {
+    return deps.snapshotForUser(userId);
   }
+  if (deps.config.kind !== 'oauth') {
+    return undefined;
+  }
+  return loadHealthSnapshot(deps.config.databaseUrl, userId);
 }
 
-export async function buildTodayViewForUser(user: CurrentUser, now = new Date().toISOString()): Promise<TodayView | undefined> {
+export async function buildTodayViewForUser(
+  user: CurrentUser,
+  now = new Date().toISOString(),
+  deps?: HttpDeps,
+): Promise<TodayView | undefined> {
   if (user.mode === 'demo') {
     return buildTodayView({
       provider: new DemoHealthProvider(),
@@ -21,23 +29,31 @@ export async function buildTodayViewForUser(user: CurrentUser, now = new Date().
     });
   }
   if (user.mode === 'oauth') {
+    const snapshot = deps ? await oauthSnapshot(user.id, deps) : undefined;
     return buildTodayView({
-      provider: new WaitingSyncProvider(),
+      provider: {
+        capabilities: { mode: 'oauth', canSync: Boolean(snapshot) },
+        listRecords: async () => snapshot?.records ?? emptyUserHealthRecords(),
+      },
       userId: user.id,
       now,
-      lastSuccessfulSyncAt: undefined,
+      lastSuccessfulSyncAt: snapshot?.syncedAt.toISOString(),
     });
   }
   return undefined;
 }
 
-export async function buildTodayResponse(user: CurrentUser, now = new Date().toISOString()): Promise<Response> {
+export async function buildTodayResponse(
+  user: CurrentUser,
+  now = new Date().toISOString(),
+  deps?: HttpDeps,
+): Promise<Response> {
   if (user.mode === 'unconfigured') {
     return Response.json({ error: 'unconfigured' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
   if (user.mode === 'unauthenticated') {
     return Response.json({ error: 'unauthenticated' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
   }
-  const view = await buildTodayViewForUser(user, now);
+  const view = await buildTodayViewForUser(user, now, deps);
   return Response.json(view, { headers: { 'Cache-Control': 'no-store' } });
 }

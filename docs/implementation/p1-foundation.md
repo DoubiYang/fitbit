@@ -1,6 +1,8 @@
-# P1 Foundation 本地演示实现
+# P1 Foundation 本地演示实现（历史切片）
 
-最后更新：2026-08-23
+最后更新：2026-08-25
+
+> 本文记录 2026-08-23 的演示纵切。随后已增加 Google OAuth、多用户服务器会话、PostgreSQL 加密 token 存储，以及授权完成后仅同步该用户最近 14 天的核心数据。现行真实同步行为以 [整改设计](../superpowers/specs/2026-08-25-sync-remediation-design.md) 为准；不要把本文的“未实现”清单理解为当前仓库状态。
 
 ## 这次实现了什么
 
@@ -14,20 +16,19 @@
 
 ## 当前没有实现的内容
 
-这不是可上线的 Google Health 或 AI Coach 集成。以下能力被有意留在后续切片中：
+这仍不是完整可上线的 Google Health 或 AI Coach 集成。以下能力留在后续切片中：
 
-- 多用户登录、会话、数据库和加密的 OAuth token 存储。
-- Google Health OAuth、历史回填、webhook、增量同步、删除和重算。
-- Fitbit Air 真实账号的数据可用性验证，以及任何真实数据读取或写回。
+- 历史回填、webhook、持续增量同步、原始记录的删除和完整重算。
+- Fitbit Air 多账号、跨地区的真实字段可用性验证，以及任何写回能力。
 - 拍照识别餐食、营养确认、匿名营养日志的写回状态机。
 - DeepSeek-V4-Flash-Vision-Exp 或其他视觉/教练模型的实际调用、评测、提示词安全策略和隐私审查。
 - 医疗建议、疾病诊断、自动增训或自动写入用户健康记录。
 
-`GoogleHealthProvider` 目前是一个显式的 fail-closed 适配器：无论配置状态如何，它都不会发起网络请求，并返回“集成尚不可用”的受控错误。这样不会因为误填环境变量而开始处理真实健康数据。
+当前 `GoogleHealthProvider` 仅在安全配置完整、连接仍有效并由授权完成的单用户同步任务调用时访问 Google Health；它固定为 `google-wearables` 来源，任何请求或保存失败均 fail closed，保留旧快照。仪表盘页面从不直接访问 Google。
 
 ## 数据与隐私边界
 
-浏览器不选择健康数据所属用户，也不能提供 `userId`。当前用户从 `src/server/session/current-user.ts` 的服务器会话边界取得；P1 演示固定返回 `demo_user`。未来替换为真实会话时，必须保持这个边界，不能接受 URL 参数、请求体或客户端存储提供的健康用户 ID。
+浏览器不选择健康数据所属用户，也不能提供 `userId`。当前用户从 `src/server/session/current-user.ts` 的服务器会话边界取得：演示模式固定为 `demo_user`，OAuth 模式为服务器 session 对应的内部用户 ID。不得接受 URL 参数、请求体或客户端存储提供的健康用户 ID。
 
 页面只消费 `TodayView`，而非记录明细。建议最多附三条含日期的指标依据；数据校准中、过期或不足时，界面显示数据状态而不是训练处方。
 
@@ -54,4 +55,4 @@ pnpm build
 
 ## 下一步的外部前置
 
-开始 Google Health 接入前，需要 Google Cloud/Health API 应用、经验证 redirect URI、Fitbit Air 测试账号、数据保存期限与删除策略、加密密钥托管和隐私审查。开始拍照记餐前，还需要确定营养数据源、人工确认交互、Google 匿名营养日志写回/删除重建策略，以及视觉模型供应商的数据处理条款和离线评测集。
+继续 Google Health 接入前，需要用 Fitbit Air 测试账号验证真实字段、数据保存期限与删除策略、加密密钥托管和隐私审查。开始拍照记餐前，还需要确定营养数据源、人工确认交互、Google 匿名营养日志写回/删除重建策略，以及视觉模型供应商的数据处理条款和离线评测集。

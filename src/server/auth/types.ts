@@ -19,6 +19,19 @@ export type ConnectionRow = TokenEnvelopeFields & {
   lastErrorCode: string | undefined;
   connectedAt: Date;
   updatedAt: Date;
+  lastSuccessfulSyncAt: Date | undefined;
+};
+
+export type AccessTokenUpdate = {
+  id: string;
+  userId: string;
+  tokenEnvelopeCiphertext: Buffer;
+  tokenEnvelopeIv: Buffer;
+  tokenEnvelopeAuthTag: Buffer;
+  encryptionKeyVersion: number;
+  accessTokenExpiresAt: Date;
+  refreshTokenExpiresAt: Date | undefined;
+  updatedAt: Date;
 };
 
 export type SessionRow = {
@@ -51,12 +64,16 @@ export type AuthStore = {
     findByUserId(userId: string): Promise<ConnectionRow | undefined>;
     insert(row: ConnectionRow): Promise<void>;
     update(row: ConnectionRow): Promise<void>;
+    updateAccessTokenIfSyncable(input: AccessTokenUpdate): Promise<boolean>;
   };
   sessions: {
     insert(row: SessionRow): Promise<void>;
     findByTokenHash(tokenHash: Buffer): Promise<SessionRow | undefined>;
     deleteByTokenHash(tokenHash: Buffer): Promise<void>;
     deleteAllForUser(userId: string): Promise<void>;
+  };
+  healthSnapshots: {
+    deleteForUser(userId: string): Promise<void>;
   };
   transactions: {
     insert(row: OauthTransactionRow): Promise<void>;

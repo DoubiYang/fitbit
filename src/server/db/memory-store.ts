@@ -1,5 +1,9 @@
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 
+export type MemoryStore = AuthStore & {
+  deletedHealthSnapshotUserIds: string[];
+};
+
 function cloneConnection(row: ConnectionRow): ConnectionRow {
   return {
     ...row,
@@ -11,14 +15,16 @@ function cloneConnection(row: ConnectionRow): ConnectionRow {
     refreshTokenExpiresAt: row.refreshTokenExpiresAt ? new Date(row.refreshTokenExpiresAt) : undefined,
     connectedAt: new Date(row.connectedAt),
     updatedAt: new Date(row.updatedAt),
+    lastSuccessfulSyncAt: row.lastSuccessfulSyncAt ? new Date(row.lastSuccessfulSyncAt) : undefined,
   };
 }
 
-export function createMemoryStore(): AuthStore {
+export function createMemoryStore(): MemoryStore {
   const users = new Set<string>();
   const connections = new Map<string, ConnectionRow>();
   const sessions = new Map<string, SessionRow>();
   const transactions = new Map<string, OauthTransactionRow>();
+  const deletedHealthSnapshotUserIds: string[] = [];
 
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
@@ -44,6 +50,26 @@ export function createMemoryStore(): AuthStore {
       async update(row: ConnectionRow): Promise<void> {
         connections.set(row.id, cloneConnection(row));
       },
+      async updateAccessTokenIfSyncable(input): Promise<boolean> {
+        const current = connections.get(input.id);
+        if (!current || current.userId !== input.userId || (current.status !== 'active' && current.status !== 'partial')) {
+          return false;
+        }
+        connections.set(
+          current.id,
+          cloneConnection({
+            ...current,
+            tokenEnvelopeCiphertext: input.tokenEnvelopeCiphertext,
+            tokenEnvelopeIv: input.tokenEnvelopeIv,
+            tokenEnvelopeAuthTag: input.tokenEnvelopeAuthTag,
+            encryptionKeyVersion: input.encryptionKeyVersion,
+            accessTokenExpiresAt: input.accessTokenExpiresAt,
+            refreshTokenExpiresAt: input.refreshTokenExpiresAt ?? current.refreshTokenExpiresAt,
+            updatedAt: input.updatedAt,
+          }),
+        );
+        return true;
+      },
     },
     sessions: {
       async insert(row: SessionRow): Promise<void> {
@@ -62,6 +88,11 @@ export function createMemoryStore(): AuthStore {
             sessions.delete(key);
           }
         }
+      },
+    },
+    healthSnapshots: {
+      async deleteForUser(userId: string): Promise<void> {
+        deletedHealthSnapshotUserIds.push(userId);
       },
     },
     transactions: {
@@ -85,5 +116,5 @@ export function createMemoryStore(): AuthStore {
     },
   };
 
-  return store;
+  return Object.assign(store, { deletedHealthSnapshotUserIds });
 }

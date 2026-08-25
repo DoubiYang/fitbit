@@ -9,6 +9,8 @@ export type HttpDeps = {
   store?: AuthStore;
   google?: GoogleOAuthClient;
   now?: () => Date;
+  snapshotForUser?: (userId: string) => Promise<{ records: import('../health/provider').UserHealthRecords; syncedAt: Date } | undefined>;
+  afterSuccessfulConnect?: (userId: string) => void;
 };
 
 function originOf(config: AppConfig): string {
@@ -125,6 +127,9 @@ export async function handleGoogleCallback(request: Request, deps: HttpDeps): Pr
         secure: secureCookies(deps.config),
       }),
     );
+  }
+  if (!result.authError && result.userId) {
+    deps.afterSuccessfulConnect?.(result.userId);
   }
   return redirect(accountLocation(deps.config, result.authError), cookies, headers);
 }

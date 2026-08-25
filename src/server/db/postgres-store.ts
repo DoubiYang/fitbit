@@ -1,6 +1,6 @@
 import pg from 'pg';
 
-import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
+import type { AccessTokenUpdate, AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 import type { ConnectionStatus } from '../auth/scopes';
 
 const pools = new Map<string, pg.Pool>();
@@ -41,6 +41,7 @@ function mapConnection(row: pg.QueryResult['rows'][number]): ConnectionRow {
     lastErrorCode: row.last_error_code ?? undefined,
     connectedAt: row.connected_at,
     updatedAt: row.updated_at,
+    lastSuccessfulSyncAt: row.last_successful_sync_at ?? undefined,
   };
 }
 
@@ -59,8 +60,8 @@ function storeFor(queryable: Queryable): AuthStore {
         `INSERT INTO google_health_connections (
           id, user_id, health_user_id, legacy_user_id,
           token_envelope_ciphertext, token_envelope_iv, token_envelope_auth_tag, encryption_key_version,
-          access_token_expires_at, refresh_token_expires_at, granted_scopes, status, last_error_code, connected_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          access_token_expires_at, refresh_token_expires_at, granted_scopes, status, last_error_code, connected_at, updated_at, last_successful_sync_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
         [
           row.id,
           row.userId,
@@ -77,6 +78,7 @@ function storeFor(queryable: Queryable): AuthStore {
           row.lastErrorCode ?? null,
           row.connectedAt,
           row.updatedAt,
+          row.lastSuccessfulSyncAt ?? null,
         ],
       );
     },
@@ -86,7 +88,7 @@ function storeFor(queryable: Queryable): AuthStore {
           health_user_id = $2, legacy_user_id = $3,
           token_envelope_ciphertext = $4, token_envelope_iv = $5, token_envelope_auth_tag = $6, encryption_key_version = $7,
           access_token_expires_at = $8, refresh_token_expires_at = $9, granted_scopes = $10, status = $11, last_error_code = $12,
-          connected_at = $13, updated_at = $14
+          connected_at = $13, updated_at = $14, last_successful_sync_at = $15
          WHERE id = $1`,
         [
           row.id,
@@ -103,8 +105,29 @@ function storeFor(queryable: Queryable): AuthStore {
           row.lastErrorCode ?? null,
           row.connectedAt,
           row.updatedAt,
+          row.lastSuccessfulSyncAt ?? null,
         ],
       );
+    },
+    async updateAccessTokenIfSyncable(input: AccessTokenUpdate): Promise<boolean> {
+      const result = await queryable.query(
+        `UPDATE google_health_connections SET
+          token_envelope_ciphertext = $3, token_envelope_iv = $4, token_envelope_auth_tag = $5, encryption_key_version = $6,
+          access_token_expires_at = $7, refresh_token_expires_at = COALESCE($8, refresh_token_expires_at), updated_at = $9
+         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')`,
+        [
+          input.id,
+          input.userId,
+          input.tokenEnvelopeCiphertext,
+          input.tokenEnvelopeIv,
+          input.tokenEnvelopeAuthTag,
+          input.encryptionKeyVersion,
+          input.accessTokenExpiresAt,
+          input.refreshTokenExpiresAt ?? null,
+          input.updatedAt,
+        ],
+      );
+      return result.rowCount === 1;
     },
   };
 
@@ -163,6 +186,11 @@ function storeFor(queryable: Queryable): AuthStore {
         await queryable.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
       },
     },
+    healthSnapshots: {
+      async deleteForUser(userId: string): Promise<void> {
+        await queryable.query('DELETE FROM health_snapshots WHERE user_id = $1', [userId]);
+      },
+    },
     transactions: {
       async insert(row: OauthTransactionRow): Promise<void> {
         await queryable.query(
@@ -212,6 +240,10 @@ function storeFor(queryable: Queryable): AuthStore {
 
 export function getPostgresStore(databaseUrl: string): AuthStore {
   return storeFor(poolFor(databaseUrl));
+}
+
+export function getPool(databaseUrl: string): pg.Pool {
+  return poolFor(databaseUrl);
 }
 
 const migrated = new Set<string>();

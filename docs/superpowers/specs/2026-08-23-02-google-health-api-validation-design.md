@@ -4,6 +4,8 @@
 **日期：** 2026-08-23
 **对应工作项：** 2. 验证 Google Health API 的授权、拉数、写回和多用户审批
 
+> **实现状态更新（2026-08-25）：** OAuth、10 个固定首次 scope、账户隔离，以及授权后单用户最近 14 天的睡眠 / 每日 HRV / 每日静息心率 / 训练热同步已实现。本文其余的冷同步、webhook、营养写回、拍照记餐和 AI Coach 是后续验证与实现目标，不能视为已交付能力；现行同步边界以 [真实数据同步整改设计](2026-08-25-sync-remediation-design.md) 为准。
+
 ## 1. 目标
 
 在开始产品开发前，证明系统可以在多用户场景下安全地：
@@ -40,7 +42,7 @@ Health Connect 是 Android 本机数据层，不作为一期核心依赖；仅�
 - `googlehealth.health_metrics_and_measurements.readonly`：HRV、RHR、心率及可用生命体征；
 - `googlehealth.activity_and_fitness.readonly`：训练会话、步数与活动/心率区间上下文。
 
-用户拒绝部分 scope 时按部分同意降级：核心三项缺失则仪表盘数据不完整；仅缺营养写则仪表盘和本产品内餐食记录继续可用，但停用 Google Health 写回。
+用户拒绝部分 scope 时按部分同意降级：核心三项缺失则仪表盘数据不完整；仅缺营养写时连接仍为部分授权，当前仪表盘热同步继续可用，但未来 Google Health 写回必须停用。
 
 **Google 已授予 `nutrition.writeonly` 不等于可以写回。** 必须等用户在产品内打开“写回 Google Health”并确认该次餐食后，才创建或删除 `nutrition-log`。每个写回功能在开关与确认 UI 上说明用途；应用内拒绝写回时不得调用写接口。不申请睡眠/运动/档案等产品不会使用的 writeonly。
 
@@ -65,8 +67,8 @@ Health Connect 是 Android 本机数据层，不作为一期核心依赖；仅�
                          ├─ healthUserId / OAuth scope / 同意版本
                          ├─ 原始数据与来源记录
                          ├─ 标准化日数据 / 自建指标
-                         ├─ webhook 验签与增量拉取
-                         └─ 已确认餐食写回
+                         ├─ webhook 验签与增量拉取（后续）
+                         └─ 已确认餐食写回（后续）
 ```
 
 访问令牌与 refresh token 只保存于后端，不进入浏览器、前端日志或 AI 上下文。每个用户的 API 凭证、原始记录、派生数据和删除任务必须按用户 ID 严格隔离。模型调用只接收本次功能最少字段，永不接收 refresh token、完整原始健康 JSON 或其他用户的数据。
@@ -88,16 +90,16 @@ Health Connect 是 Android 本机数据层，不作为一期核心依赖；仅�
 
 - 保存每条数据的 v4 `dataPoint.name`、数据源、开始/结束时间、civil time 与 UTC offset、抓取时间和原始负载哈希。
 - 同一餐食写回使用客户端生成的、符合 v4 格式的 data point ID 作为幂等键；每个 ID 映射唯一的本地餐食版本。只有在验证证明该 ID 对 `nutrition-log` 可检索且创建语义稳定后才启用自动恢复。
-- 原始层保留 `list` 结果；展示与指标计算优先使用同一时间窗口的 `reconcile` 结果。若 `reconcile` 无结果，才按“Google wearable → Google source → 本产品手动记录”的固定顺序选择，且在 UI 展示来源。任何冲突都不覆盖原始记录。
+- 后续原始层保留 `list` 结果；展示与指标计算优先使用同一时间窗口的 `reconcile` 结果。当前热同步显式限定 `google-wearables`，请求失败不降级为其他来源或空成功。未来若引入来源回退，必须在 UI 展示来源，且不得覆盖原始记录。
 
 ## 6. 同步生命周期
 
-1. **授权与 identity：** 显示最小 scope、用途和对应同意后进入 Google OAuth；调用 `getIdentity` 获取并保存 `healthUserId`，不把邮箱当作健康数据主键。
-2. **热同步：** 在前台仅拉取最近 7–14 天的睡眠、HRV、RHR、训练和活动；完成后立即展示数据新鲜度，不等待历史导入。
-3. **冷同步：** 后台按数据类型的日期范围和分页限制分块回填最近 90 天。睡眠和训练每页最多 25 条，必须消费 `nextPageToken`；任务可暂停、恢复、重放且显示进度。
-4. **增量同步：** 为睡眠、每日 HRV、每日 RHR、训练和 nutrition-log 配置 v4 HTTPS webhook；验证签名/共享密钥后按通知时间窗拉取。日轮询仅作 webhook 遗漏、延迟或初期验证的兜底。
-5. **标准化：** 校验 civil time、UTC offset、重复、异常值和来源，写入不可变原始层及可更新的日汇总层。
-6. **断开与删除：** 撤销 token、删除 webhook/订阅、停止任务、删除令牌与用户选择删除的原始/派生数据，并记录完成状态。
+1. **授权与 identity（已实现）：** 显示固定 10 个 scope 的用途后进入 Google OAuth；调用 `getIdentity` 获取并保存 `healthUserId`，不把邮箱当作健康数据主键。
+2. **热同步（已实现）：** 授权完成后仅为该用户尝试拉取最近 14 天的睡眠、HRV、RHR 与训练；失败不覆盖旧快照，首页只读最后成功快照。
+3. **冷同步（后续）：** 按数据类型的日期范围和分页限制分块回填最近 90 天。睡眠和训练每页最多 25 条，必须消费 `nextPageToken`；任务可暂停、恢复、重放且显示进度。
+4. **增量同步（后续）：** 为睡眠、每日 HRV、每日 RHR、训练和 nutrition-log 配置 v4 HTTPS webhook；验证签名/共享密钥后按通知时间窗拉取。日轮询仅作 webhook 遗漏、延迟或初期验证的兜底。
+5. **标准化（部分实现）：** 当前实现保守映射睡眠、每日 HRV/RHR 与训练；完整原始层、来源审计与可更新日汇总层仍待实现。
+6. **断开与删除（部分实现）：** 当前断开会撤销本地连接、删除本地快照并尽力撤销 Google token；webhook/订阅、原始/派生数据的选择删除与完成审计仍待实现。
 
 ## 7. 营养写回规则
 
@@ -128,7 +130,7 @@ Health Connect 是 Android 本机数据层，不作为一期核心依赖；仅�
 ### 验证顺序
 
 1. 注册 Google Health API v4 应用、配置 OAuth consent screen、HTTPS redirect URI、隐私政策和 webhook endpoint；
-2. 验证首次只读 scope、增量 nutrition scope、refresh token、`getIdentity` 与用户拒绝部分 scope 的降级；
+2. 验证首次固定 10 个 scope、refresh token、`getIdentity` 与用户拒绝部分 scope 的降级；
 3. 验证热同步、90 天冷同步、分页、webhook 验签、漏通知日轮询与幂等重放；
 4. 验证 sleep、daily HRV、daily RHR、exercise、心率区间和 nutrition-log 的实际字段、来源与 Fitbit Air 覆盖；
 5. 用匿名 nutrition-log 验证创建、读取、删除后重建、删除、Operation 延迟及五种未知响应用例；

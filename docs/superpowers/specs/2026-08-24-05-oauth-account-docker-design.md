@@ -1,6 +1,6 @@
 # Google OAuth、账户管理与 Docker 本地部署设计
 
-**状态：** 用户已同意方案 A；2026-08-24 按设计审查修订，待实现
+**状态：** 已实现 OAuth、账户管理与首次 14 天热同步；其余一期能力仍待实现
 **日期：** 2026-08-24
 **对应工作项：** 在本机以 Google OAuth 登录，安全持久化 Google Health 授权，并提供本地账户管理
 **取代：** 本文的首次授权 scope 集合取代 [Google Health API 验证设计](2026-08-23-02-google-health-api-validation-design.md) 中“首次只请求三个只读 scope、营养权限增量申请”的决定。应用内写回开关、模型传输同意仍按原文，不因 Google 已授 write scope 就自动写回。
@@ -14,11 +14,11 @@
 3. 在账户页查看连接状态、重新授权、退出和断开；
 4. 为下一切片的真实 Health 数据同步提供服务端 refresh token、`healthUserId` 与实际授予的 scope。
 
-本切片**不**调用 Google Health 的 list / rollup / 写回等数据端点，不保存或展示真实健康记录，不启动历史回填、webhook、AI Coach 或拍照记餐。授权成功只表示后续同步具备凭据。页面须诚实显示“已连接，等待同步”。callback 中允许的唯一 Health API 调用是 `users.getIdentity`。
+当前实现会在授权成功后，仅为刚授权的用户尝试同步最近 14 天的睡眠、每日 HRV、每日静息心率与训练，成功后写入本地快照；首页只读取该快照，打开页面不会请求 Google。同步失败不覆盖旧快照，也不推进成功时间。当前仍**不**包含历史回填、webhook、拍照记餐、`nutrition-log` 写回或 AI Coach；即使已获营养写入授权，代码也不会调用写接口。
 
 ## 2. 关键决定
 
-1. **本地运行形态：Compose 内同时跑 Next.js 与 PostgreSQL。** 内存 OAuth 无法跨重启保存 refresh token；把 token 放进 cookie 会暴露给浏览器。后台同步与 webhook 不在本切片。
+1. **本地运行形态：Compose 内同时跑 Next.js 与 PostgreSQL。** 内存 OAuth 无法跨重启保存 refresh token；把 token 放进 cookie 会暴露给浏览器。当前仅有授权后、当前用户的 14 天热同步；没有全用户 cron、历史回填或 webhook。
 2. **首次授权一次要齐可读数据 + 营养写回。** 后续加 Google scope 必须让用户再走同意页，测试模式 refresh token 又只有 7 天，因此不把数据 scope 拆到以后。产品不会写入睡眠、运动、档案等，故**不**申请对应 writeonly（writeonly 也不增加读权限，且违反 Google“只申请实际使用的写权限”）。应用内仍须用户打开写回开关后才真正写 `nutrition-log`。
 3. **健康身份主键是 `healthUserId`，断开不断号。** 连接行软删除：撤权、清空密文、删全部 session，但保留 `health_user_id` / `legacy_user_id` 与同一个 `users.id`。重连必须回到原 owner，不能新建用户。
 4. **首次连接没有 refresh token 则失败，不落库。** 重授权若未带回新 refresh token，才解密旧 envelope 并保留。
@@ -48,7 +48,7 @@ Google Health writeonly **不包含**读权限。要读营养日志必须同时�
 
 ### 4.1 首次连接固定请求的集合
 
-每次 start 都请求下面这一份完整集合，顺序固定，便于测试断言。URL 使用完整 scope URI。
+每次 start 都请求下面这一份完整集合，顺序固定，便于测试断言。该 10-scope 集合是产品已确认的首次授权契约，目的是覆盖后续完整仪表盘、AI Coach 与经用户确认的餐食写回；它不是“当前热同步的最小集合”。URL 使用完整 scope URI。
 
 | Scope | 用途 |
 | --- | --- |
@@ -79,8 +79,8 @@ Google 要求对部分同意做降级，应用不得因用户少勾一项就整�
 
 - 连接保存 **实际授予** 的 `granted_scopes`，不是请求集合。
 - 缺任意已请求 scope → 账户页「权限不完整」，列出缺失类别。
-- 三个仪表盘核心 scope 都在 → 仍可进入「已连接，等待同步」；缺核心 scope 时额外说明仪表盘数据将不完整。
-- 仅缺 `nutrition.writeonly` → 不挡仪表盘；后续写回开关显示为不可用，直到重新授权补齐。
+- 三个仪表盘核心 scope 都在 → 当前 14 天热同步仍可尝试；缺核心 scope 时额外说明仪表盘数据将不完整。
+- 仅缺 `nutrition.writeonly` → 连接仍标记为部分授权，但当前仪表盘热同步不受该项影响；未来写回功能不可用，直到重新授权补齐。
 - 用户在 Google 同意页点取消（`error=access_denied`）→ 不建连接，账户页安全错误。
 
 ### 4.4 授权 URL 硬约束
@@ -189,7 +189,7 @@ Google Cloud 须同时登记：
 | --- | --- |
 | 上述变量**全部**缺失或空 | 演示模式。`getCurrentUser()` 返回 `{ mode: 'demo', id: 'demo_user' }`。首页与 `/api/today` 仍用 `DemoHealthProvider`。必须有明显「演示」标识。OAuth 路由仍 fail closed（不生成授权 URL）。 |
 | 至少一个变量出现，但集合不完整或 key 非法 | **未配置**。OAuth fail closed。账户页「本地授权尚未配置」。首页与 `/api/today` **不得**使用 `demo_user` 或演示健康数据。 |
-| 集合完整 | **OAuth 模式**。无 session → 未登录。有 session → 内部 UUID。首页不得回退 `demo_user`。本切片已登录用户看到空数据 + 等待同步。 |
+| 集合完整 | **OAuth 模式**。无 session → 未登录。有 session → 内部 UUID。首页不得回退 `demo_user`。授权后只展示最近一次成功保存的本地快照；尚无成功快照时显示数据不足。 |
 
 ## 7. 数据库模型
 
@@ -310,11 +310,9 @@ Cookie 名在 localhost 与 https 上保持一致，不使用 `__Host-` 前缀�
 3. Google 顶层跳回 callback。校验：短 cookie 能取到未过期 transaction、`SHA-256(query.state)` 与 `state_hash` 常量时间相等。失败则不换 token。`error=access_denied` 等在换 token 之前结束。
 4. 用 Google 官方 Node 库 [`google-auth-library`](https://developers.google.com/identity/protocols/oauth2#libraries) 换 token（带 PKCE verifier）。然后服务端调用 `users.getIdentity`。`healthUserId` 为空或调用失败：尽力 revoke，不落库，`identity_unavailable`。
 5. 按 §5 决定 owner。用**一个**数据库事务写入/恢复连接、加密 envelope、（若未登录）插入 session。然后删除 transaction、清 OAuth cookie。
-6. 303 `/account`。已登录用户的 `/` 用内部 UUID + 空健康数据；未登录用户的 `/` 不再出现演示数据。
+6. 303 `/account`，并在运行时仅为该内部用户异步尝试最近 14 天热同步。已登录用户的 `/` 用内部 UUID + 最近一次成功快照；未登录用户的 `/` 不再出现演示数据。
 
-本切片不刷新 access token。下一切片必须按用户同步**按需**刷新，禁止对全部用户做批量 cron。[何时刷新](https://developers.google.com/health/setup)
-
-刷新响应若带回新的 `refresh_token`，下一切片必须写回 envelope；本切片只规定存储形状。
+当前热同步会按需刷新 access token；刷新响应若带回新的 `refresh_token`，会写回加密 envelope。禁止对全部用户做批量 cron；后续日常刷新须采用已登录用户显式动作或独立、可观察的每用户作业。[何时刷新](https://developers.google.com/health/setup)
 
 ### 9.4 `getCurrentUser` 与首页
 
@@ -333,9 +331,9 @@ export type CurrentUser =
 | `demo` | 现有 `DemoHealthProvider` 仪表盘，带演示标识 | 200，`userId=demo_user` |
 | `unconfigured` | 配置说明 + 链到 `/account`，无演示健康数据 | 503，body 不含 `demo_user` 记录 |
 | `unauthenticated` | 引导去 `/account` 连接，无演示健康数据 | 401 |
-| `oauth` | 空记录 +「已连接，等待同步」。**禁止** `DemoHealthProvider` | 200，`userId` 为内部 UUID，无原始健康记录 |
+| `oauth` | 最近一次成功保存的本地快照；无快照时显示数据不足。**禁止** `DemoHealthProvider` | 200，`userId` 为内部 UUID，无原始健康记录 |
 
-`HealthProvider.capabilities.mode` 扩展为 `'demo' | 'unavailable' | 'oauth'`。本切片 `oauth` 的 `canSync` 仍为 `false`；`GoogleHealthProvider.listRecords` 继续 fail closed，直到同步切片。
+`HealthProvider.capabilities.mode` 扩展为 `'demo' | 'unavailable' | 'oauth'`。当前 `GoogleHealthProvider` 可在授权后的单用户热同步中读取四类核心数据；仪表盘路径仍只读快照，不能因页面访问触发 Google 请求。
 
 现有断言 `body.userId === 'demo_user'` 的测试只在演示配置下成立；OAuth 模式必须有对测覆盖「不回退 demo_user」。
 
@@ -347,7 +345,7 @@ export type CurrentUser =
 | --- | --- | --- |
 | 未配置 | 需要本地 Google Health 配置；README 变量名与生成命令 | 查看说明 |
 | 未登录 | 尚未连接 Google Health | 连接（POST start） |
-| 已连接 / 等待同步 | 最近授权时间、scope 摘要（类别名，不是原始 URI 列表刷屏）、测试模式可能 7 天到期 | 重新授权、退出、断开 |
+| 已连接 | 最近授权时间、scope 摘要（类别名，不是原始 URI 列表刷屏）、连接后尝试同步最近 14 天、测试模式可能 7 天到期 | 重新授权、退出、断开 |
 | 部分权限 | 缺失类别、对仪表盘/写回的影响 | 重新授权、断开 |
 | 授权失效 | 需要重新连接（refresh 到期或解密失败） | 重新授权、断开 |
 | callback 失败 | 安全中文原因 + 重试 | 回账户页 |
@@ -361,7 +359,7 @@ PWA：本切片在**普通浏览器标签**完成 OAuth。独立窗口（`displa
 - access token、refresh token、PKCE verifier、authorization code、明文 session token 不得进入日志、响应体、React props、测试快照、错误页或后续应用 URL。code 只出现在 Google 打到已注册 callback 的那一次 query；立即消费、删 transaction、303 去掉 query。
 - 生产 cookie 设 `Secure`。数据库 URL、client secret、token 密钥只在 `app` 容器环境，名称不得以 `NEXT_PUBLIC_` 开头。
 - 断开：本地事务成功即对用户完成；Google revoke 失败只提示去权限页。
-- 本切片除 `users.getIdentity` 外不读、不写、不缓存、不把任何真实健康数据送给模型或浏览器。
+- 当前实现除 `users.getIdentity` 外，会为授权完成的单个用户读取四类核心数据并保存本地快照；不写入 Google Health，不把原始健康数据送给模型或浏览器。
 - 丢失 `TOKEN_ENCRYPTION_KEY`（且无 previous）= 所有连接作废，必须重新授权。
 - 大陆网络访问 `accounts.google.com`、`oauth2.googleapis.com`、`health.googleapis.com` 可能失败，列为外部前置，不在应用内做代理。
 
@@ -377,13 +375,13 @@ PWA：本切片在**普通浏览器标签**完成 OAuth。独立窗口（`displa
 6. **会话：** 仅 hash 匹配且未过期才解析为 user；cookie `Path=/` 且无 `Domain`；过期、伪造、断开后的 cookie fail closed。
 7. **路由：** callback 忽略意外参数；POST 拒绝错误 Origin、生产缺 Origin、无 session 的已登录接口；disconnect 在 revoke mock 失败后仍清除本地密文与 session。
 8. **隔离：** 两用户只能读到自己的连接状态；URL / header 不能冒充 `userId`。
-9. **UI / 首页：** 账户页覆盖未配置、未登录、active 等待同步、partial、expired、callback 失败；OAuth 模式首页与 `/api/today` 不出现 `demo_user` 或演示记录。
+9. **UI / 首页：** 账户页覆盖未配置、未登录、active、partial、expired、callback 失败；OAuth 模式首页与 `/api/today` 不出现 `demo_user` 或演示记录，只读取成功保存的本地快照。
 
 ### 手动验收（需要用户的本地 Google Cloud 与可达的 Google 网络）
 
 1. `docker compose up --build` 后只用 `http://localhost:3000/account`；
 2. Cloud Console 登记全部 §4.1 scope、Test user、origin 与 callback；
-3. 连接测试账号，回到「已连接，等待同步」；重启容器后仍登录；
+3. 连接测试账号，回到「已连接」并核对只尝试该用户最近 14 天的热同步；重启容器后仍登录；
 4. 重新授权、退出、断开后再连接：仍是同一本地账户（不断号），浏览器网络与日志无 token；
 5. 测试模式注明 7 天 refresh 限制；把 `refresh_token_expires_at` 视为已过期时页面提供重新授权；
 6. 同意页取消部分敏感项时进入「权限不完整」而非 500。
@@ -401,7 +399,7 @@ PWA：本切片在**普通浏览器标签**完成 OAuth。独立窗口（`displa
 
 | 风险 | 应对 |
 | --- | --- |
-| 同意页过长，用户去掉 ECG/IRN/位置 | 部分同意降级；核心三项仍可等待同步；账户页列出缺失项并提供重新授权 |
+| 同意页过长，用户去掉 ECG/IRN/位置 | 部分同意降级；核心三项仍可尝试热同步；账户页列出缺失项并提供重新授权 |
 | 申请较多敏感 scope，将来生产验证更重 | 本切片保持 Testing；验证材料按实际使用的数据类别准备，不在本切片提交 |
 | 旧 `fitness.*` 混入 token 导致数据面 403 | 禁止 `include_granted_scopes`；只请求 `googlehealth.*` |
 | 测试模式 7 天 refresh | 存 `refresh_token_expires_at`；到期显示重新授权；不假装长期有效 |

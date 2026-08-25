@@ -19,7 +19,7 @@ export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; va
         <p className="lede">
           {variant === 'demo'
             ? '基于演示样本生成。分数只作辅助，建议始终保留给你的主观感受。'
-            : '已连接 Google Health，正在等待第一次同步。本页不会显示演示数据。'}
+            : '基于你最近同步的睡眠、恢复与训练记录生成。分数只作辅助，建议始终保留给你的主观感受。'}
         </p>
         <p>
           <a href="/rhythm/account">账户</a>

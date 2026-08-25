@@ -16,5 +16,5 @@ export async function GET(request: Request): Promise<Response> {
     store: deps.store,
     cookieHeader: request.headers.get('Cookie'),
   });
-  return buildTodayResponse(user);
+  return buildTodayResponse(user, new Date().toISOString(), deps);
 }

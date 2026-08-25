@@ -71,15 +71,26 @@ test('callback ignores unexpected query keys and sets host-only session cookie p
     return;
   }
   const state = new URL(started.url).searchParams.get('state');
+  const connectedUserIds: string[] = [];
   const response = await handleGoogleCallback(
     new Request(
       `http://localhost:3000/rhythm/api/auth/google/callback?code=code-1&state=${state}&foo=bar`,
       { headers: { Cookie: `rhythm_oauth_tx=${started.transactionId}` } },
     ),
-    { config: config(), store, google: google(), now: () => now },
+    {
+      config: config(),
+      store,
+      google: google(),
+      now: () => now,
+      afterSuccessfulConnect: (userId) => {
+        connectedUserIds.push(userId);
+      },
+    },
   );
   assert.equal(response.status, 303);
   assert.equal(response.headers.get('Location'), 'http://localhost:3000/rhythm/account');
+  const connection = await store.connections.findByHealthUserId('health-1');
+  assert.deepEqual(connectedUserIds, [connection?.userId]);
   const cookies = response.headers.getSetCookie?.() ?? [];
   const session = cookies.find((item) => item.startsWith('rhythm_session='));
   assert.ok(session);
@@ -87,6 +98,25 @@ test('callback ignores unexpected query keys and sets host-only session cookie p
   assert.doesNotMatch(session ?? '', /Domain=/);
   assert.doesNotMatch(JSON.stringify(cookies), /refresh-token/);
   assert.doesNotMatch(JSON.stringify(cookies), /access-token/);
+});
+
+test('failed callback does not start a health sync', async () => {
+  let connectKicks = 0;
+  const response = await handleGoogleCallback(
+    new Request('http://localhost:3000/rhythm/api/auth/google/callback?error=access_denied'),
+    {
+      config: config(),
+      store: createMemoryStore(),
+      google: google(),
+      now: () => now,
+      afterSuccessfulConnect: () => {
+        connectKicks += 1;
+      },
+    },
+  );
+  assert.equal(response.status, 303);
+  assert.match(response.headers.get('Location') ?? '', /auth_error=/);
+  assert.equal(connectKicks, 0);
 });
 
 test('reauthorize and disconnect require a session', async () => {

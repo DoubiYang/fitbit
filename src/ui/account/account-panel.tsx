@@ -71,7 +71,7 @@ export function AccountPanel({ view }: { view: AccountView }) {
       {view.state === 'unauthenticated' ? (
         <section className="action-card">
           <h2>尚未连接 Google Health</h2>
-          <p className="action-card__text">连接后只会保存授权，不会立刻同步健康记录。</p>
+          <p className="action-card__text">连接后会尝试同步最近 14 天的数据；同步失败不会覆盖已保存的历史快照。</p>
           <Actions showConnect />
           <p className="lede">
             若 Google 账号权限页仍显示本应用，请到{' '}
@@ -82,8 +82,9 @@ export function AccountPanel({ view }: { view: AccountView }) {
 
       {view.state === 'connected' ? (
         <section className="action-card">
-          <h2>已连接，等待同步</h2>
+          <h2>已连接</h2>
           <p className="action-card__text">最近授权时间：{formatConnectedAt(view.connectedAt)}</p>
+          <p className="lede">连接后会尝试同步最近 14 天；首页只展示最近一次成功保存的本地快照。</p>
           <ScopeList labels={view.scopeLabels} />
           {view.canWriteNutrition ? null : <p className="lede">尚未授予营养写回权限，餐食写回将不可用。</p>}
           <TestingNote />
