@@ -184,7 +184,7 @@ test('meal photo requires explicit consent before sending image to vision', asyn
   assert.equal(calls, 0);
 });
 
-test('meal photo persists a caller-owned validated draft without returning image bytes', async () => {
+test('meal photo creates a sanitized editable draft without returning vision or image bytes', async () => {
   const signedIn = await signedInStore();
   const response = await handleMealPhoto(await photoRequest({ sessionToken: signedIn.sessionToken }), {
     config: config(),
@@ -193,14 +193,15 @@ test('meal photo persists a caller-owned validated draft without returning image
     vision: { async complete() { return visionJson; } },
   });
   assert.equal(response.status, 201);
-  const body = (await response.json()) as { draftId?: string; foods?: unknown[] };
-  assert.ok(body.draftId);
-  assert.equal(body.foods?.length, 1);
+  const body = (await response.json()) as { draft?: { mealId?: string; dishes?: unknown[] } };
+  assert.ok(body.draft?.mealId);
+  assert.equal(body.draft?.dishes?.length, 1);
   assert.equal(JSON.stringify(body).includes('base64'), false);
+  assert.equal(JSON.stringify(body).includes('globalUncertainties'), false);
 
-  const read = await handleMealDraft(new Request(`http://localhost:3000/rhythm/api/meals/drafts/${body.draftId}`, {
+  const read = await handleMealDraft(new Request(`http://localhost:3000/rhythm/api/meals/drafts/${body.draft?.mealId}`, {
     headers: { Cookie: `rhythm_session=${signedIn.sessionToken}` },
-  }), body.draftId!, { config: config(), store: signedIn.store, now: () => now });
+  }), body.draft?.mealId!, { config: config(), store: signedIn.store, now: () => now, catalogForUser: async () => ({ catalog: catalog(), canWriteNutrition: true, connectionSyncable: true }) });
   assert.equal(read.status, 200);
 });
 
@@ -222,9 +223,21 @@ test('meal photo does not send an image when the DeepSeek key is absent', async 
   assert.equal(calls, 0);
 });
 
-test('meal confirm resolves caller-owned food facts and queues only that caller writeback', async () => {
+test('meal photo keeps a vision service failure distinct from local nutrition catalog errors', async () => {
   const signedIn = await signedInStore();
-  await signedIn.store.users.setNutritionWritebackEnabled(signedIn.userId, true);
+  const response = await handleMealPhoto(await photoRequest({ sessionToken: signedIn.sessionToken }), {
+    config: config(),
+    store: signedIn.store,
+    now: () => now,
+    vision: { async complete() { throw new Error('model gateway unavailable'); } },
+    catalogForUser: async () => ({ catalog: catalog(), canWriteNutrition: true, connectionSyncable: true }),
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: 'vision_unavailable' });
+});
+
+test('legacy meal confirm is permanently retired and never queues a legacy writeback', async () => {
+  const signedIn = await signedInStore();
   const draft = await signedIn.store.meals.insertDraft({
     userId: signedIn.userId,
     mealType: 'LUNCH',
@@ -246,8 +259,7 @@ test('meal confirm resolves caller-owned food facts and queues only that caller 
       catalogForUser: async () => ({ catalog: catalog(), canWriteNutrition: true, connectionSyncable: true }),
     },
   );
-  assert.equal(response.status, 200);
-  const body = (await response.json()) as { nutrients?: Array<{ nutrientCode: string }>; outbox?: Array<{ status: string }> };
-  assert.ok(body.nutrients?.some((nutrient) => nutrient.nutrientCode === 'VITAMIN_C'));
-  assert.deepEqual(body.outbox?.map((item) => item.status), ['write_pending']);
+  assert.equal(response.status, 410);
+  assert.deepEqual(await response.json(), { error: 'meal_confirm_replaced' });
+  assert.deepEqual(signedIn.store.outboxRows(), []);
 });
