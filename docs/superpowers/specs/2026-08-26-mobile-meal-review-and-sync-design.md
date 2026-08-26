@@ -69,34 +69,66 @@
 
 “问 AI 修改这餐”打开底部对话弹层。模型每次只接收当前结构化餐食：餐次、时间、菜品、食材、克数、当前营养项和用户新问题；不接收 OAuth token，也不在保存后接收原照片。
 
-模型返回严格的 `suggestions[]`，而不是直接写数据库：
+模型返回严格的 `suggestions[]`，而不是直接写数据库。每条 suggestion 都带一次响应内唯一的 `id`，并且只能引用请求中已有的 `dishId`。一期只允许以下两类，不允许模型增删菜、声明未知营养代码、给出自行计算的热量，或输出任意数据库字段：
 
 ```json
 {
   "suggestions": [
     {
+      "id": "s-1",
       "scope": "dish",
       "dishId": "current-dish-id",
       "kind": "replace_ingredients",
       "summary": "鸡蛋改为嫩豆腐；食用油 15 g 改为 5 g",
       "requiresRecalculation": true,
-      "patch": { "ingredients": [] }
+      "patch": {
+        "nameZh": "番茄豆腐",
+        "portionGrams": 200,
+        "ingredients": [
+          { "nameZh": "嫩豆腐", "grams": 110 },
+          { "nameZh": "番茄", "grams": 75 },
+          { "nameZh": "食用油", "grams": 5 }
+        ]
+      }
+    },
+    {
+      "id": "s-2",
+      "scope": "dish",
+      "dishId": "current-dish-id",
+      "kind": "set_nutrient",
+      "summary": "维生素 C 改为 50 mg",
+      "requiresRecalculation": false,
+      "patch": {
+        "nutrientCode": "VITAMIN_C",
+        "value": 50,
+        "unit": "mg"
+      }
     }
   ]
 }
 ```
 
+`replace_ingredients` 可同时改菜名、总克数和完整食材数组；数组中的克数必须为有限且大于零的数，服务端重新查本地食物库并计算数值。`set_nutrient` 只能引用当前完整营养列表中的代码；能量单位只能是 `kcal`，重量单位只能是 `g`、`mg` 或 `μg`，服务端验证非负有限值后标准化保存。模型响应不合 schema、dishId 不属于当前餐食、食材未命中或单位不匹配时，整条建议不可应用且不修改草稿。
+
 AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入对比页，逐项显示变化和影响：
 
 - 食材/克数建议显示“应用后重新计算这道菜全部营养”。
 - 单项营养建议显示“只修改此项”。
-- 用户可应用单项、应用全部或忽略；应用才改变编辑态。AI 请求或解析失败只显示错误，不改变餐食。
+- 用户可应用单项、应用全部或忽略；应用才改变编辑态。`应用全部` 仅在建议之间没有冲突时可用：同一道菜不能同时出现两个 `replace_ingredients`，也不能在同一次批量应用中混合 `replace_ingredients` 与该菜的 `set_nutrient`。遇到冲突时，页面要求用户按顺序逐项应用。AI 请求或解析失败只显示错误，不改变餐食。
 
 聊天消息只保留在当前浏览器会话。刷新后可以对同一已保存餐食发起新对话，但不恢复旧消息；若问题依赖视觉内容，AI 明确要求重新上传照片。
 
 ## 5. 本地最新快照与 API 边界
 
-页面和服务均把一餐视为一个稳定的“当前餐食”而非用户可见的版本历史。保存和后续编辑以事务替换该餐的当前 dishes、ingredients、nutrients、当前同步状态与当前 Google links；被替换的本地营养事实不另存历史。
+页面和服务均把一餐视为一个稳定的“当前餐食”而非用户可见的版本历史。保存和后续编辑以事务替换该餐的当前 dishes、ingredients、nutrients 与当前同步状态；被替换的本地营养事实不另存历史。草稿转为已保存餐食后必须删除 `meal_drafts.vision`，因此原始识别结果也不残留。
+
+“不保留历史”不等于丢失删除 Google 旧 log 所必需的远端名称。为此新增不可见的、最小化的同步标识，而不是保留旧营养快照：
+
+- `current_meal`：稳定的 `mealId`、当前结构化餐食、`content_revision` 和聚合同步状态；编辑时 `content_revision` 加一。
+- `meal_sync_generation`：一次用户发起的同步所冻结的当前 revision 与状态（`pending_delete`、`pending_create`、`synced`、`recovery`）；同一餐同一时间最多一个活动 generation。
+- `meal_sync_point`：generation、当前菜的本地 `dishKey`、唯一的 Google data point name 与状态。它不外键到可替换的当前 dish 行，因此食材编辑不会把尚需删除的旧 name 级联删掉。
+
+同步 generation 和 point 只保存远端删除/恢复所需的名字、状态和 in-flight payload；成功后删除已完成的 outbox 记录与旧 point，保留当前 active point name。它们不是用户可浏览的餐食或营养历史。
 
 为支持页面，新增或调整以下受 session 保护的接口；路径统一位于 `/rhythm` 前缀下：
 
@@ -115,9 +147,16 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 
 `POST /api/meals/:id/sync` 同时满足下列条件才入队：该餐已本地保存、当前有未同步改动、账户级写回开关开启、连接为可用状态、已授 nutrition write scope、至少有一个可写字段。
 
-首次同步为该餐当前每道菜创建一个 anonymous `nutrition-log`。已同步餐食修改后的下次同步，先删除其旧 Google data points，再创建当前菜品对应的新 data points；本地只保留当前 Google link 以便安全删除，不把旧营养数据当作历史展示。
+首次同步为该餐当前每道菜创建一个 anonymous `nutrition-log`。创建时才为每个当前 dish 分配新的随机 `d-{uuid}` client ID；此名称在任何已改变 payload 的重同步中都不会复用。
 
-写入沿用既有 outbox 的确定性名称、payload hash、两分钟 lease、30 秒请求 deadline 与精确名称 GET 恢复规则。替换流程若删除成功但创建失败，页面状态为“同步恢复中”，绝不显示为已同步，也不自动生成额外重复 log；用户只能对这一餐发起重试。页面只显示聚合状态，不显示 token、payload 或原图。
+已同步餐食修改后的“同步这一餐”以一个新的 generation 运行，顺序固定如下：
+
+1. 事务冻结 `content_revision`，读取上个 active generation 的全部 point name，并将它们写为当前 generation 的 `delete` targets；同时为当前 dishes 建立新的唯一 `create` point 和不可变 payload。
+2. 先完成所有旧 point 的 delete outbox；尚有任一 delete 未完成时不发送新的 create。
+3. 所有 delete 成功后才运行新 point 的 create。所有新 create 成功才将新 generation 设为 active、删除旧 point 记录并显示“已同步”。
+4. 任一 delete 或 create 失败/超时/未知即转为 `recovery`。保留已知的旧/新 point names 与未完成 outbox，页面显示“同步恢复中”，不自动创建额外 log。用户只能重试这一餐；重试复用该 generation 内尚未成功的 name 和 payload，而不另生成一批 name。
+
+写入沿用既有 outbox 的 payload hash、两分钟 lease、30 秒请求 deadline 与精确名称 GET 恢复规则。编辑在 active generation 结束前被锁定；因此不能把新编辑误写到旧 generation。页面只显示聚合状态，不显示 token、payload 或原图。
 
 ## 7. 错误与空数据
 
@@ -135,7 +174,7 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 - 手机宽度 320–430 px 下，编辑、AI 弹层与底部动作均可单手触达，且底部动作不遮挡内容。
 - 上传并识别后，营养分组显示所有本地已知字段；没有搜索入口。
 - 手改一个营养项只变该项；食材或克数更改会重算并覆盖该菜所有当前营养。
-- AI 建议未经“应用”不会改变草稿；刷新不恢复对话，已保存后的新对话没有原图。
+- AI 建议未经“应用”不会改变草稿；服务端拒绝未知 kind、非当前 dishId、非法单位/数值和冲突的批量建议；刷新不恢复对话，已保存后的新对话没有原图。
 - “保存修改”从不调用 Google；只有“同步这一餐”会为该餐入队。
-- 已同步餐食编辑后回到未同步状态；下一次同步不会让旧、新 Google log 双计。
+- 已同步餐食编辑后回到未同步状态；下一次同步先删旧 point、再建新 point，编辑锁定至 generation 结束，失败重试不新增 name，旧、新 Google log 不会双计。
 - 不持久化照片、原始识别值、营养修正历史或聊天消息；日志不含图片、token 或 payload。
