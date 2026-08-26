@@ -64,6 +64,28 @@ const defaultTimeoutScheduler: TimeoutScheduler = (callback, timeoutMs) => {
   return () => clearTimeout(timer);
 };
 
+class MealAssistantRequestAbortedError extends Error {}
+
+function awaitUntilAborted<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new MealAssistantRequestAbortedError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new MealAssistantRequestAbortedError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class MealAssistantError extends Error {
   constructor(
     readonly code: 'ai_model_unavailable' | 'ai_response_invalid',
@@ -122,46 +144,51 @@ export async function fetchDeepSeekMealAssistant(input: {
     () => controller.abort(),
     requestTimeoutMs,
   );
-  let response: Response;
   try {
-    response = await (dependencies.fetch ?? globalThis.fetch)(DEEPSEEK_CHAT_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${input.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: DEEPSEEK_MEAL_ASSISTANT_MODEL,
-        thinking: { type: 'disabled' },
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: input.prompt },
-          { role: 'user', content: input.question },
-        ],
-      }),
-    });
-  } catch {
-    throw new MealAssistantError('ai_model_unavailable');
+    let response: Response;
+    try {
+      response = await awaitUntilAborted((dependencies.fetch ?? globalThis.fetch)(DEEPSEEK_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${input.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: DEEPSEEK_MEAL_ASSISTANT_MODEL,
+          thinking: { type: 'disabled' },
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: input.prompt },
+            { role: 'user', content: input.question },
+          ],
+        }),
+      }), controller.signal);
+    } catch {
+      throw new MealAssistantError('ai_model_unavailable');
+    }
+
+    if (!response.ok) {
+      throw new MealAssistantError('ai_model_unavailable');
+    }
+
+    let body: unknown;
+    try {
+      body = await awaitUntilAborted(response.json(), controller.signal);
+    } catch (error) {
+      if (error instanceof MealAssistantRequestAbortedError || controller.signal.aborted) {
+        throw new MealAssistantError('ai_model_unavailable');
+      }
+      throw new MealAssistantError('ai_response_invalid');
+    }
+    const parsed = deepSeekResponseSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new MealAssistantError('ai_response_invalid');
+    }
+    return parsed.data.choices[0]!.message.content;
   } finally {
     clearRequestTimeout();
   }
-
-  if (!response.ok) {
-    throw new MealAssistantError('ai_model_unavailable');
-  }
-
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new MealAssistantError('ai_response_invalid');
-  }
-  const parsed = deepSeekResponseSchema.safeParse(body);
-  if (!parsed.success) {
-    throw new MealAssistantError('ai_response_invalid');
-  }
-  return parsed.data.choices[0]!.message.content;
 }
 
 async function isApplicableSuggestion(

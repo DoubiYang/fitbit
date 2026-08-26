@@ -202,3 +202,44 @@ test('maps a controlled request timeout abort to ai_model_unavailable', async ()
   assert.equal(await errorCode(request), 'ai_model_unavailable');
   assert.equal(cleared, true);
 });
+
+test('keeps the request deadline through a stalled response.json call', async () => {
+  let triggerTimeout: (() => void) | undefined;
+  let jsonStarted!: () => void;
+  let releaseJson!: (value: unknown) => void;
+  const jsonHasStarted = new Promise<void>((resolve) => { jsonStarted = resolve; });
+  const stalledJson = new Promise<unknown>((resolve) => { releaseJson = resolve; });
+  const request = fetchDeepSeekMealAssistant({
+    apiKey: 'server-only-key', prompt: 'prompt', question: 'question',
+    meal: { mealType: 'LUNCH', eatenAt: meal.eatenAt, dishes: [], nutrients: [] },
+  }, {
+    scheduleTimeout(callback) {
+      triggerTimeout = callback;
+      return () => {};
+    },
+    async fetch() {
+      return {
+        ok: true,
+        json() {
+          jsonStarted();
+          return stalledJson;
+        },
+      } as Response;
+    },
+  });
+  let rejection: unknown;
+  void request.catch((error) => { rejection = error; });
+
+  try {
+    await jsonHasStarted;
+    assert.ok(triggerTimeout);
+    triggerTimeout();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.ok(rejection instanceof MealAssistantError);
+    assert.equal((rejection as MealAssistantError).code, 'ai_model_unavailable');
+  } finally {
+    releaseJson(null);
+    await request.catch(() => undefined);
+  }
+});
