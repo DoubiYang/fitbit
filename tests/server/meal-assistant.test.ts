@@ -28,6 +28,7 @@ const meal: EditableMealDraft = {
     { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 180, unit: 'kcal', source: 'tw_fda' },
     { dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 16, unit: 'g', source: 'tw_fda' },
     { dishId: 'dish-1', nutrientCode: 'VITAMIN_C', value: 0.02, unit: 'g', source: 'tw_fda' },
+    { dishId: 'dish-1', nutrientCode: 'VITAMIN_D', value: 0.00001, unit: 'g', source: 'tw_fda' },
   ],
 };
 
@@ -79,6 +80,12 @@ test('returns only suggestions validated against the current meal, units, and lo
   assert.doesNotMatch(prompt, /server-only-key|photo|image_url|data:image|Authorization|history/i);
   assert.deepEqual(received?.meal.dishes[0]?.ingredients.map(({ nameZh, grams }) => ({ nameZh, grams })), [
     { nameZh: '番茄', grams: 120 }, { nameZh: '雞蛋', grams: 80 },
+  ]);
+  assert.deepEqual(received?.meal.nutrients, [
+    { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 180, unit: 'kcal' },
+    { dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 16, unit: 'g' },
+    { dishId: 'dish-1', nutrientCode: 'VITAMIN_C', value: 20, unit: 'mg' },
+    { dishId: 'dish-1', nutrientCode: 'VITAMIN_D', value: 10, unit: 'μg' },
   ]);
   assert.equal('foodSource' in (received?.meal.dishes[0]?.ingredients[0] ?? {}), false);
 });

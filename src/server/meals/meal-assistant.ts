@@ -5,7 +5,11 @@ import {
   mealAiSuggestionSchema,
   type MealAiSuggestion,
 } from '../../domain/meal-ai-suggestions';
-import type { EditableMealDraft, EditableMealSaved } from '../../domain/meal-editor';
+import {
+  fromInternalNutrientAmount,
+  type EditableMealDraft,
+  type EditableMealSaved,
+} from '../../domain/meal-editor';
 import { DEEPSEEK_CHAT_URL, DEEPSEEK_VISION_MODEL } from './deepseek-vision';
 import { extractJsonObject } from './extract-json';
 import type { TwFdaFoodCatalog } from '../nutrition/tw-fda';
@@ -61,7 +65,10 @@ function promptMeal(meal: AssistantMeal): MealAssistantPromptMeal {
       portionGrams: dish.portionGrams,
       ingredients: dish.ingredients.map(({ nameZh, grams }) => ({ nameZh, grams })),
     })),
-    nutrients: meal.nutrients.map(({ dishId, nutrientCode, value, unit }) => ({ dishId, nutrientCode, value, unit })),
+    nutrients: meal.nutrients.map(({ dishId, nutrientCode, value }) => {
+      const display = fromInternalNutrientAmount(nutrientCode, value, mealAiNutrientUnit(nutrientCode));
+      return { dishId, ...display };
+    }),
   };
 }
 
