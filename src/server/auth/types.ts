@@ -1,5 +1,5 @@
 import type { VisionMeal } from '../../domain/meal-vision';
-import type { ConfirmMealInput, ConfirmMealResult, MealDraftRow, MealIngredientRow, MealNutrientRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
+import type { ConfirmMealInput, ConfirmMealResult, CurrentMealStore, MealDraftRow, MealIngredientRow, MealNutrientRow, MealSyncGenerationRow, MealSyncPointRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
 import type { LocalTwFdaFood } from '../nutrition/tw-fda';
 import type { ConnectionStatus } from './scopes';
 
@@ -93,6 +93,31 @@ export type NutritionOutboxLease = {
   now: Date;
 };
 
+export type MealSyncPointClaim = {
+  now: Date;
+  leaseUntil: Date;
+  limit: number;
+};
+
+export type MealSyncPointLease = {
+  id: string;
+  generationId: string;
+  userId: string;
+  leaseUntil: Date;
+  now: Date;
+};
+
+/** Future sync-worker persistence contract. It deliberately does not surface any UI view. */
+export type MealSyncStore = {
+  startGeneration(input: { mealId: string; userId: string; now: Date }): Promise<MealSyncGenerationRow | undefined>;
+  beginRecovery(input: { mealId: string; userId: string; now: Date; reason: string }): Promise<MealSyncGenerationRow | undefined>;
+  claimDuePoints(input: MealSyncPointClaim): Promise<MealSyncPointRow[]>;
+  finishPoint(input: MealSyncPointLease): Promise<boolean>;
+  retryPoint(input: MealSyncPointLease & { nextAttemptAt: Date; errorCode: string }): Promise<boolean>;
+  markPointUnknown(input: MealSyncPointLease & { errorCode: string }): Promise<boolean>;
+  markPointOperationPending(input: MealSyncPointLease & { operationName: string; nextAttemptAt: Date }): Promise<boolean>;
+};
+
 export type SessionRow = {
   id: string;
   userId: string;
@@ -128,6 +153,9 @@ export type AuthStore = {
     listIngredients(userId: string, versionId: string): Promise<MealIngredientRow[]>;
     listNutrients(userId: string, versionId: string): Promise<MealNutrientRow[]>;
   };
+  // TODO(Task 4): make these required once the Postgres store persists 009's tables.
+  currentMeals?: CurrentMealStore;
+  mealSync?: MealSyncStore;
   connections: {
     findByHealthUserId(healthUserId: string): Promise<ConnectionRow | undefined>;
     findByUserId(userId: string): Promise<ConnectionRow | undefined>;

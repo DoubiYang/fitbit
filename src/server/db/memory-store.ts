@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto';
 
+import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealVersionRow, OutboxRow } from '../meals/types';
+import type { CurrentMealDishRow, CurrentMealIngredientRow, CurrentMealNutrientRow, CurrentMealSnapshot, CurrentMealStore, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealSyncPointRow, MealVersionRow, OutboxRow } from '../meals/types';
 import { resolveExactTwFdaFood, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
-export type MemoryStore = AuthStore & {
+export type MemoryStore = Omit<AuthStore, 'currentMeals'> & {
+  currentMeals: CurrentMealStore;
   deletedHealthSnapshotUserIds: string[];
   seedFoodComposition(foods: LocalTwFdaFood[]): void;
   outboxRows(): OutboxRow[];
+  currentMealSnapshots(): CurrentMealSnapshot[];
+  mealSyncPoints(): MealSyncPointRow[];
 };
 
 function envelopesEqual(left: Buffer | undefined, right: Buffer | undefined): boolean {
@@ -49,6 +53,22 @@ function cloneOutbox(row: OutboxRow): OutboxRow {
   };
 }
 
+function cloneCurrentMeal(row: CurrentMealSnapshot): CurrentMealSnapshot {
+  return {
+    ...structuredClone(row),
+    eatenAt: new Date(row.eatenAt),
+    createdAt: new Date(row.createdAt),
+    updatedAt: new Date(row.updatedAt),
+  };
+}
+
+function hasMeaningfulCurrentContentChange(current: CurrentMealSnapshot, editor: EditableMealDraft): boolean {
+  return JSON.stringify({ dishes: current.dishes, nutrients: current.nutrients }) !== JSON.stringify({
+    dishes: editor.dishes,
+    nutrients: editor.nutrients,
+  });
+}
+
 function ownsOutboxLease(row: OutboxRow | undefined, input: { userId: string; leaseUntil: Date }): row is OutboxRow {
   return Boolean(row && row.userId === input.userId && row.leaseUntil?.getTime() === input.leaseUntil.getTime());
 }
@@ -57,6 +77,11 @@ export function createMemoryStore(): MemoryStore {
   const users = new Set<string>();
   const writebackEnabled = new Map<string, boolean>();
   const drafts = new Map<string, MealDraftRow>();
+  const editorDrafts = new Map<string, EditableMealDraft>();
+  const currentMeals = new Map<string, CurrentMealSnapshot>();
+  const currentDishes = new Map<string, CurrentMealDishRow[]>();
+  const currentIngredients = new Map<string, CurrentMealIngredientRow[]>();
+  const currentNutrients = new Map<string, CurrentMealNutrientRow[]>();
   const versions: MealVersionRow[] = [];
   const dishes: MealDishRow[] = [];
   const ingredients: MealIngredientRow[] = [];
@@ -69,9 +94,101 @@ export function createMemoryStore(): MemoryStore {
   const deletedHealthSnapshotUserIds: string[] = [];
   let foodComposition: LocalTwFdaFood[] = [];
 
+  function replaceCurrentChildren(snapshot: CurrentMealSnapshot): void {
+    currentDishes.set(snapshot.id, snapshot.dishes.map((dish) => ({
+      mealId: snapshot.id,
+      userId: snapshot.userId,
+      dishKey: dish.id,
+      nameZh: dish.nameZh,
+      portionGrams: dish.portionGrams,
+    })));
+    currentIngredients.set(snapshot.id, snapshot.dishes.flatMap((dish) => dish.ingredients.map((ingredient) => ({
+      mealId: snapshot.id,
+      userId: snapshot.userId,
+      dishKey: dish.id,
+      nameZh: ingredient.nameZh,
+      grams: ingredient.grams,
+      foodSource: 'unmatched' as const,
+      foodSourceId: undefined,
+      foodSourceVersion: undefined,
+    }))));
+    currentNutrients.set(snapshot.id, snapshot.nutrients.map((nutrient) => {
+      const internal = toInternalNutrientAmount(nutrient.nutrientCode, nutrient.value, nutrient.unit);
+      return {
+        mealId: snapshot.id,
+        userId: snapshot.userId,
+        dishKey: nutrient.dishId,
+        nutrientCode: nutrient.nutrientCode,
+        grams: internal.unit === 'g' ? internal.value : undefined,
+        kcal: internal.unit === 'kcal' ? internal.value : undefined,
+        source: 'editor',
+        sourceUnit: nutrient.unit,
+        currentUnit: internal.unit,
+      };
+    }));
+  }
+
+  function snapshotState() {
+    return {
+      users: new Set(users),
+      writebackEnabled: new Map(writebackEnabled),
+      drafts: new Map([...drafts].map(([id, row]) => [id, structuredClone(row)])),
+      editorDrafts: new Map([...editorDrafts].map(([id, row]) => [id, structuredClone(row)])),
+      currentMeals: new Map([...currentMeals].map(([id, row]) => [id, cloneCurrentMeal(row)])),
+      currentDishes: new Map([...currentDishes].map(([id, rows]) => [id, structuredClone(rows)])),
+      currentIngredients: new Map([...currentIngredients].map(([id, rows]) => [id, structuredClone(rows)])),
+      currentNutrients: new Map([...currentNutrients].map(([id, rows]) => [id, structuredClone(rows)])),
+      versions: structuredClone(versions),
+      dishes: structuredClone(dishes),
+      ingredients: structuredClone(ingredients),
+      nutrients: structuredClone(nutrients),
+      provenance: structuredClone(provenance),
+      outbox: structuredClone(outbox),
+      connections: new Map([...connections].map(([id, row]) => [id, cloneConnection(row)])),
+      sessions: new Map([...sessions].map(([id, row]) => [id, structuredClone(row)])),
+      transactions: new Map([...transactions].map(([id, row]) => [id, structuredClone(row)])),
+      deletedHealthSnapshotUserIds: [...deletedHealthSnapshotUserIds],
+      foodComposition: structuredClone(foodComposition),
+    };
+  }
+
+  function restoreMap<T>(target: Map<string, T>, source: Map<string, T>): void {
+    target.clear();
+    for (const [id, row] of source) target.set(id, row);
+  }
+
+  function restoreState(state: ReturnType<typeof snapshotState>): void {
+    users.clear();
+    for (const user of state.users) users.add(user);
+    restoreMap(writebackEnabled, state.writebackEnabled);
+    restoreMap(drafts, state.drafts);
+    restoreMap(editorDrafts, state.editorDrafts);
+    restoreMap(currentMeals, state.currentMeals);
+    restoreMap(currentDishes, state.currentDishes);
+    restoreMap(currentIngredients, state.currentIngredients);
+    restoreMap(currentNutrients, state.currentNutrients);
+    versions.splice(0, versions.length, ...state.versions);
+    dishes.splice(0, dishes.length, ...state.dishes);
+    ingredients.splice(0, ingredients.length, ...state.ingredients);
+    nutrients.splice(0, nutrients.length, ...state.nutrients);
+    provenance.splice(0, provenance.length, ...state.provenance);
+    outbox.splice(0, outbox.length, ...state.outbox);
+    restoreMap(connections, state.connections);
+    restoreMap(sessions, state.sessions);
+    restoreMap(transactions, state.transactions);
+    deletedHealthSnapshotUserIds.splice(0, deletedHealthSnapshotUserIds.length, ...state.deletedHealthSnapshotUserIds);
+    foodComposition = state.foodComposition;
+  }
+
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
-      return fn(store);
+      const state = snapshotState();
+      try {
+        return await fn(store);
+      } catch (error) {
+        restoreState(state);
+        throw error;
+      }
     },
     users: {
       async insert(id: string): Promise<void> {
@@ -135,6 +252,103 @@ export function createMemoryStore(): MemoryStore {
       async listNutrients(userId, versionId) {
         const dishIds = new Set(dishes.filter((row) => row.userId === userId && row.versionId === versionId).map((row) => row.id));
         return nutrients.filter((row) => row.userId === userId && dishIds.has(row.dishId)).map((row) => ({ ...row }));
+      },
+    },
+    currentMeals: {
+      async insertEditorDraft(input) {
+        const editor = editableMealDraftSchema.parse(input.editor);
+        const row: MealDraftRow = {
+          id: input.id,
+          userId: input.userId,
+          mealType: input.mealType,
+          eatenAt: new Date(input.eatenAt),
+          vision: structuredClone(input.vision),
+          createdAt: new Date(input.now),
+          updatedAt: new Date(input.now),
+        };
+        drafts.set(row.id, row);
+        editorDrafts.set(row.id, structuredClone(editor));
+        return structuredClone(editor);
+      },
+      async findEditorDraft(userId, id) {
+        const draft = drafts.get(id);
+        const editor = editorDrafts.get(id);
+        if (!draft || draft.userId !== userId || !editor) return undefined;
+        return structuredClone(editor);
+      },
+      async replaceEditorDraft(input) {
+        const draft = drafts.get(input.id);
+        if (!draft || draft.userId !== input.userId || !editorDrafts.has(input.id)) return undefined;
+        const editor = editableMealDraftSchema.parse(input.editor);
+        drafts.set(input.id, { ...draft, updatedAt: new Date(input.now) });
+        editorDrafts.set(input.id, structuredClone(editor));
+        return structuredClone(editor);
+      },
+      async saveEditorDraft(input) {
+        const draft = drafts.get(input.draftId);
+        const editor = editorDrafts.get(input.draftId);
+        if (!draft || draft.userId !== input.userId || !editor) throw new Error('editor draft not found');
+        const snapshot: CurrentMealSnapshot = {
+          id: draft.id,
+          userId: draft.userId,
+          mealType: draft.mealType,
+          eatenAt: new Date(draft.eatenAt),
+          contentRevision: 1,
+          syncState: 'unsynced',
+          lastSyncedGenerationId: undefined,
+          dishes: structuredClone(editor.dishes),
+          nutrients: structuredClone(editor.nutrients),
+          createdAt: new Date(input.now),
+          updatedAt: new Date(input.now),
+        };
+        currentMeals.set(snapshot.id, snapshot);
+        replaceCurrentChildren(snapshot);
+        editorDrafts.delete(draft.id);
+        drafts.delete(draft.id);
+        return cloneCurrentMeal(snapshot);
+      },
+      async findCurrentMeal(userId, id) {
+        const snapshot = currentMeals.get(id);
+        return snapshot && snapshot.userId === userId ? cloneCurrentMeal(snapshot) : undefined;
+      },
+      async replaceCurrentMealContent(input) {
+        const current = currentMeals.get(input.mealId);
+        if (!current || current.userId !== input.userId) return undefined;
+        const editor = editableMealDraftSchema.parse(input.editor);
+        if (!hasMeaningfulCurrentContentChange(current, editor)) return cloneCurrentMeal(current);
+        const next: CurrentMealSnapshot = {
+          ...current,
+          dishes: structuredClone(editor.dishes),
+          nutrients: structuredClone(editor.nutrients),
+          contentRevision: current.contentRevision + 1,
+          syncState: 'unsynced',
+          updatedAt: new Date(input.now),
+        };
+        currentMeals.set(next.id, next);
+        replaceCurrentChildren(next);
+        return cloneCurrentMeal(next);
+      },
+      async setCurrentMealNutrient(input) {
+        const current = currentMeals.get(input.mealId);
+        if (!current || current.userId !== input.userId) return undefined;
+        const existing = current.nutrients.find((nutrient) => nutrient.dishId === input.dishId && nutrient.nutrientCode === input.nutrientCode);
+        if (!existing) throw new Error(`unknown nutrient: ${input.nutrientCode}`);
+        const internal = toInternalNutrientAmount(input.nutrientCode, input.value, input.unit);
+        return store.currentMeals!.replaceCurrentMealContent({
+          userId: input.userId,
+          mealId: input.mealId,
+          editor: {
+            view: 'draft',
+            mealId: input.mealId,
+            mealType: current.mealType,
+            eatenAt: current.eatenAt.toISOString(),
+            dishes: structuredClone(current.dishes),
+            nutrients: current.nutrients.map((nutrient) => nutrient === existing ? {
+              ...nutrient, value: internal.value, unit: internal.unit,
+            } : structuredClone(nutrient)),
+          },
+          now: input.now,
+        });
       },
     },
     connections: {
@@ -425,5 +639,11 @@ export function createMemoryStore(): MemoryStore {
     outboxRows() {
       return outbox.map(cloneOutbox);
     },
-  });
+    currentMealSnapshots() {
+      return [...currentMeals.values()].map(cloneCurrentMeal);
+    },
+    mealSyncPoints() {
+      return [];
+    },
+  }) as MemoryStore;
 }
