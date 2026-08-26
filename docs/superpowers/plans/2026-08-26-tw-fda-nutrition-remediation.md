@@ -4,7 +4,7 @@
 
 **Goal:** Version the Taiwan FDA food-composition snapshot in Git, use it as the only V1 local nutrition authority, safely process meal photos, and deliver queued Google Health nutrition logs through an independent worker.
 
-**Architecture:** `data/tw-fda/<snapshot-id>/source.json.zip` is the immutable, official downloaded artifact and is committed with a small manifest containing source URL, retrieved time, SHA-256, licence and parser version. An import command validates that artifact and loads normalised foods, aliases and canonical nutrient amounts into PostgreSQL. Meal confirmation uses only that local catalogue; it never asks Google Food to perform a name search. A separate nutrition worker claims leased outbox rows, obtains a server-side token for the owning user, and sends the already-stored anonymous `nutrition-log` payload exactly once unless recovery proves the request's final state.
+**Architecture:** `data/tw-fda/food-composition.json.zip` is the one current, immutable official source artifact in the repository; its sibling `manifest.json` records source URL, retrieved time, SHA-256, licence and parser version. A source refresh replaces those two files in one commit, so Git history is the only archive of earlier versions. An import command validates the committed artifact and loads normalised foods, aliases and canonical nutrient amounts into PostgreSQL. Meal confirmation uses only that local catalogue; it never asks Google Food to perform a name search. A separate nutrition worker claims leased outbox rows, obtains a server-side token for the owning user, and sends the already-stored anonymous `nutrition-log` payload exactly once unless recovery proves the request's final state.
 
 **Tech Stack:** Next.js App Router, TypeScript, PostgreSQL/`pg`, node:test/tsx, `sharp` for server-side decoded-image validation and metadata removal, Docker Compose, Google Health REST.
 
@@ -12,7 +12,7 @@
 - `docs/superpowers/specs/2026-08-26-photo-nutrition-google-health-design.md`
 - Taiwan FDA official dataset: `https://data.fda.gov.tw/data/opendata/export/20/json`
 
-**Safety and provenance rules:** The raw Taiwan FDA source snapshot and manifest are versioned in Git; do not commit an OAuth token, DeepSeek key, meal photo, derived user record or third-party data. The importer verifies the raw SHA-256 before it mutates a database. A failed or ambiguous food match is `unknown`, never an estimate. The image service decodes/re-encodes in memory and does not log or persist original bytes.
+**Safety and provenance rules:** The one current Taiwan FDA source file and manifest are maintained in Git; Git history preserves prior revisions. Do not commit an OAuth token, DeepSeek key, meal photo, derived user record or third-party data. The importer verifies the raw SHA-256 before it mutates a database. A failed or ambiguous food match is `unknown`, never an estimate. The image service decodes/re-encodes in memory and does not log or persist original bytes.
 
 ---
 
@@ -20,9 +20,9 @@
 
 | Path | Responsibility |
 | --- | --- |
-| `data/tw-fda/<snapshot-id>/source.json.zip` | Unmodified official Taiwan FDA download, committed if under the repository's 25 MiB artifact limit |
-| `data/tw-fda/<snapshot-id>/manifest.json` | URL, licence, retrieval time, SHA-256, source-record count and parser version |
-| `data/tw-fda/<snapshot-id>/README.md` | Attribution, licence, refresh procedure and Git artifact policy |
+| `data/tw-fda/food-composition.json.zip` | One current, unmodified official Taiwan FDA download, maintained in Git |
+| `data/tw-fda/manifest.json` | URL, licence, retrieval time, SHA-256, source-record count, parser version and Git revision |
+| `data/tw-fda/README.md` | Attribution, licence and single-file Git refresh procedure |
 | `scripts/import-tw-fda-food-composition.ts` | Offline, idempotent importer; it accepts an explicit committed snapshot path only |
 | `src/server/nutrition/tw-fda.ts` | Normalisation, nutrient-code/unit mapping, exact alias candidate lookup and fact scaling |
 | `db/migrations/007_food_composition.sql` | Food snapshot, food, nutrient and alias tables plus source-referencing columns |
@@ -42,7 +42,7 @@
 ## Task 1: Commit a reproducible Taiwan FDA source snapshot
 
 **Files:**
-- Create: `data/tw-fda/<snapshot-id>/source.json.zip`, `data/tw-fda/<snapshot-id>/manifest.json`, `data/tw-fda/<snapshot-id>/README.md`
+- Create: `data/tw-fda/food-composition.json.zip`, `data/tw-fda/manifest.json`, `data/tw-fda/README.md`
 - Create: `scripts/import-tw-fda-food-composition.ts`
 - Create: `tests/fixtures/tw-fda-small.json`, `tests/server/tw-fda-import.test.ts`
 
@@ -54,7 +54,7 @@ Run: `pnpm test tests/server/tw-fda-import.test.ts`
 
 Expected: FAIL because no importer or snapshot parser exists.
 
-- [ ] **Step 3: Obtain and validate the official file without changing it.** Download only `https://data.fda.gov.tw/data/opendata/export/20/json`; record the final URL, SHA-256, retrieval timestamp in UTC, Open Government Data License 1.0 attribution and top-level record count. Store the original archive at the versioned path. If the archive exceeds 25 MiB, stop before adding it and ask the user whether to use Git LFS; do not silently omit raw data or rewrite history.
+- [ ] **Step 3: Obtain and validate the one official file without changing it.** Download only `https://data.fda.gov.tw/data/opendata/export/20/json`; record the final URL, SHA-256, retrieval timestamp in UTC, Open Government Data License 1.0 attribution and top-level record count. Store it at `data/tw-fda/food-composition.json.zip` with `manifest.json`; future refreshes replace those two files in the same commit. If the archive exceeds 25 MiB, stop before adding it and ask the user whether to use Git LFS; do not silently omit raw data or rewrite history.
 
 - [ ] **Step 4: Implement the offline importer.** It must accept the snapshot path as an argument, compute SHA-256 before extraction, parse JSON without network access, validate required Taiwan FDA fields (`整合編號`, sample name, nutrient name, unit and per-100g value), and produce only parameterised inserts. Source values that cannot be parsed are reported as counters and never converted to zero.
 
@@ -80,7 +80,7 @@ Run: `pnpm test tests/server/tw-fda.test.ts tests/server/meal-http.test.ts`
 
 Expected: FAIL because confirmation currently resolves through `createGoogleFoodCatalog`.
 
-- [ ] **Step 3: Add forward-only schema and store interfaces.** Create source snapshot, foods, nutrients and aliases tables. Food rows have `(snapshot_id, official_food_id)` uniqueness; nutrient rows preserve the official nutrient label, raw unit and canonical code/unit. Meal ingredients record `tw_fda` plus official food ID and snapshot ID. Do not modify migrations `005` or `006`.
+- [ ] **Step 3: Add forward-only schema and store interfaces.** Create source-version, foods, nutrients and aliases tables. Food rows have `(source_revision, official_food_id)` uniqueness; `source_revision` is the committed file's SHA-256 and Git commit. Nutrient rows preserve the official nutrient label, raw unit and canonical code/unit. Meal ingredients record `tw_fda` plus official food ID and source revision. Do not modify migrations `005` or `006`.
 
 - [ ] **Step 4: Implement conservative code/unit mapping.** Map only known Taiwan FDA nutrient labels to the existing Google-supported codes and explicit local extensions. Energy is stored in kcal; weight values are converted to grams only for unambiguous g/mg/µg source units. Preserve raw unit/basis for audit and omit values whose unit or basis cannot safely map.
 
