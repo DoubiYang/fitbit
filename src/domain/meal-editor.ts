@@ -9,7 +9,7 @@ const nonNegativeFiniteNumber = z.number().finite().gte(0);
 export const editableIngredientSchema = z.object({
   nameZh: z.string().trim().min(1).max(80),
   grams: positiveFiniteNumber,
-});
+}).strict();
 
 export const editableDishSchema = z.object({
   id: z.string().trim().min(1).max(120),

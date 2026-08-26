@@ -32,6 +32,15 @@ test('rejects replacing ingredients when the list is empty or grams are invalid'
   }
 });
 
+test('rejects unexpected ingredient fields in a replace patch', () => {
+  assert.throws(() => mealPatchSchema.parse({
+    kind: 'replace_ingredients',
+    dishId: 'dish-1',
+    nameZh: '菜',
+    ingredients: [{ nameZh: '盐', grams: 1, unexpected: true }],
+  }));
+});
+
 test('accepts nutrient patches and rejects invalid energy and mass units', () => {
   assert.deepEqual(
     mealPatchSchema.parse({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'ENERGY', value: 420, unit: 'kcal' }),
