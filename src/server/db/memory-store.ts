@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
-import { confirmDraftRows } from '../meals/confirm-draft';
-import type { MealDraftRow, MealVersionRow } from '../meals/types';
+import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
+import type { MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealVersionRow, OutboxRow } from '../meals/types';
 
 export type MemoryStore = AuthStore & {
   deletedHealthSnapshotUserIds: string[];
@@ -41,6 +41,10 @@ export function createMemoryStore(): MemoryStore {
   const writebackEnabled = new Map<string, boolean>();
   const drafts = new Map<string, MealDraftRow>();
   const versions: MealVersionRow[] = [];
+  const dishes: MealDishRow[] = [];
+  const ingredients: MealIngredientRow[] = [];
+  const nutrients: MealNutrientRow[] = [];
+  const outbox: OutboxRow[] = [];
   const connections = new Map<string, ConnectionRow>();
   const sessions = new Map<string, SessionRow>();
   const transactions = new Map<string, OauthTransactionRow>();
@@ -88,16 +92,29 @@ export function createMemoryStore(): MemoryStore {
           return { ok: false as const, reason: '草稿不存在' };
         }
         const enabled = writebackEnabled.get(input.userId) === true;
-        const result = confirmDraftRows(draft, input, enabled);
+        const resolved = await resolveDraftNutrition(draft, input.catalog);
+        const result = confirmDraftRows(draft, input, enabled, resolved);
         if (!result.ok) {
           return result;
         }
         versions.push(result.version);
+        dishes.push(...result.dishes);
+        ingredients.push(...result.ingredients);
+        nutrients.push(...result.nutrients);
+        outbox.push(...result.outbox);
         drafts.delete(draft.id);
         return result;
       },
       async listVersions(userId): Promise<MealVersionRow[]> {
         return versions.filter((row) => row.userId === userId).map((row) => ({ ...row }));
+      },
+      async listIngredients(userId, versionId) {
+        const dishIds = new Set(dishes.filter((row) => row.userId === userId && row.versionId === versionId).map((row) => row.id));
+        return ingredients.filter((row) => row.userId === userId && dishIds.has(row.dishId)).map((row) => ({ ...row }));
+      },
+      async listNutrients(userId, versionId) {
+        const dishIds = new Set(dishes.filter((row) => row.userId === userId && row.versionId === versionId).map((row) => row.id));
+        return nutrients.filter((row) => row.userId === userId && dishIds.has(row.dishId)).map((row) => ({ ...row }));
       },
     },
     connections: {

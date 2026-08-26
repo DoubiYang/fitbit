@@ -1,4 +1,5 @@
 import type { VisionMeal } from '../../domain/meal-vision';
+import type { GoogleFoodCatalog } from './google-food';
 
 export type MealType = 'BREAKFAST' | 'LUNCH' | 'DINNER' | 'SNACK';
 
@@ -41,6 +42,24 @@ export type MealDishRow = {
   source: string;
 };
 
+export type MealIngredientRow = {
+  id: string;
+  dishId: string;
+  userId: string;
+  foodName: string;
+  grams: number;
+};
+
+export type MealNutrientRow = {
+  dishId: string;
+  userId: string;
+  nutrientCode: string;
+  grams: number | undefined;
+  kcal: number | undefined;
+  source: string;
+  confidence: number | undefined;
+};
+
 export type OutboxRow = {
   id: string;
   userId: string;
@@ -58,8 +77,16 @@ export type ConfirmMealInput = {
   canWriteNutrition: boolean;
   connectionSyncable: boolean;
   now: Date;
+  catalog?: GoogleFoodCatalog;
 };
 
 export type ConfirmMealResult =
-  | { ok: true; version: MealVersionRow; dishes: MealDishRow[]; outbox: OutboxRow[] }
+  | {
+      ok: true;
+      version: MealVersionRow;
+      dishes: MealDishRow[];
+      ingredients: MealIngredientRow[];
+      nutrients: MealNutrientRow[];
+      outbox: OutboxRow[];
+    }
   | { ok: false; reason: string };

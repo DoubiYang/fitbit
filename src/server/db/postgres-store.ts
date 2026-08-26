@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 import { parseVisionMeal } from '../../domain/meal-vision';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
-import { confirmDraftRows } from '../meals/confirm-draft';
+import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
 import type { MealDraftRow, MealVersionRow } from '../meals/types';
 import type { ConnectionStatus } from '../auth/scopes';
 
@@ -319,7 +319,8 @@ function storeFor(queryable: Queryable): AuthStore {
           return { ok: false as const, reason: '草稿不存在' };
         }
         const enabled = await store.users.nutritionWritebackEnabled(input.userId);
-        const result = confirmDraftRows(draft, input, enabled);
+        const resolved = await resolveDraftNutrition(draft, input.catalog);
+        const result = confirmDraftRows(draft, input, enabled, resolved);
         if (!result.ok) {
           return result;
         }
@@ -350,6 +351,20 @@ function storeFor(queryable: Queryable): AuthStore {
             [item.id, item.userId, item.dishId, item.operation, item.dataPointName, item.payloadHash ?? null, item.status],
           );
         }
+        for (const item of result.ingredients) {
+          await queryable.query(
+            `INSERT INTO meal_ingredients (id, dish_id, user_id, food_name, grams)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [item.id, item.dishId, item.userId, item.foodName, item.grams],
+          );
+        }
+        for (const item of result.nutrients) {
+          await queryable.query(
+            `INSERT INTO meal_nutrients (dish_id, user_id, nutrient_code, grams, kcal, source, confidence)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [item.dishId, item.userId, item.nutrientCode, item.grams ?? null, item.kcal ?? null, item.source, item.confidence ?? null],
+          );
+        }
         await queryable.query('DELETE FROM meal_drafts WHERE id = $1 AND user_id = $2', [input.draftId, input.userId]);
         return result;
       },
@@ -359,6 +374,40 @@ function storeFor(queryable: Queryable): AuthStore {
           [userId],
         );
         return result.rows.map(mapVersion);
+      },
+      async listIngredients(userId, versionId) {
+        const result = await queryable.query(
+          `SELECT ingredient.*
+           FROM meal_ingredients AS ingredient
+           JOIN meal_dishes AS dish ON dish.id = ingredient.dish_id
+           WHERE ingredient.user_id = $1 AND dish.version_id = $2`,
+          [userId, versionId],
+        );
+        return result.rows.map((row) => ({
+          id: row.id,
+          dishId: row.dish_id,
+          userId: row.user_id,
+          foodName: row.food_name,
+          grams: Number(row.grams),
+        }));
+      },
+      async listNutrients(userId, versionId) {
+        const result = await queryable.query(
+          `SELECT nutrient.*
+           FROM meal_nutrients AS nutrient
+           JOIN meal_dishes AS dish ON dish.id = nutrient.dish_id
+           WHERE nutrient.user_id = $1 AND dish.version_id = $2`,
+          [userId, versionId],
+        );
+        return result.rows.map((row) => ({
+          dishId: row.dish_id,
+          userId: row.user_id,
+          nutrientCode: row.nutrient_code,
+          grams: row.grams === null ? undefined : Number(row.grams),
+          kcal: row.kcal === null ? undefined : Number(row.kcal),
+          source: row.source,
+          confidence: row.confidence === null ? undefined : Number(row.confidence),
+        }));
       },
     },
     connections,
