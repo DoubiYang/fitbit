@@ -107,26 +107,24 @@ test('confirm persists micronutrients and can read them back', async () => {
     connectionSyncable: false,
     now,
     catalog: {
-      async search(query) {
+      async findExact(query) {
         if (query !== '西兰花') {
-          return [];
+          return undefined;
         }
-        return [
-          {
-            name: 'users/me/dataTypes/food/dataPoints/broccoli-1',
-            displayName: '西兰花',
-            energyKcal: 34,
-            carbGrams: 6.64,
-            fatGrams: 0.37,
-            proteinGrams: 2.82,
-            servingGrams: 100,
-            nutrients: {
-              PROTEIN: 2.82,
-              VITAMIN_C: 0.0894,
-              CALCIUM: 0.05,
-            },
-          },
-        ];
+        return {
+          sourceRevision: 'tw-fda-test-sha',
+          officialFoodId: 'V0100101',
+          nameZh: '花椰菜',
+          aliases: ['西兰花'],
+          nutrients: [
+            { officialName: '熱量', rawUnit: 'kcal', per100gValue: 34 },
+            { officialName: '粗蛋白', rawUnit: 'g', per100gValue: 2.82 },
+            { officialName: '總碳水化合物', rawUnit: 'g', per100gValue: 6.64 },
+            { officialName: '粗脂肪', rawUnit: 'g', per100gValue: 0.37 },
+            { officialName: '維生素C', rawUnit: 'mg', per100gValue: 89.4 },
+            { officialName: '鈣', rawUnit: 'mg', per100gValue: 50 },
+          ],
+        };
       },
     },
   });

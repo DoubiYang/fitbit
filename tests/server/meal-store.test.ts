@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import type { VisionMeal } from '../../src/domain/meal-vision';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import type { GoogleFoodCatalog } from '../../src/server/meals/google-food';
+import type { TwFdaFoodCatalog } from '../../src/server/nutrition/tw-fda';
 
 const now = new Date('2026-08-26T12:00:00.000Z');
 
@@ -59,21 +59,42 @@ function readyVision(): VisionMeal {
   };
 }
 
-function resolvedCatalog(): GoogleFoodCatalog {
+function resolvedCatalog(): TwFdaFoodCatalog {
   return {
-    async search(query) {
-      return [
-        {
-          name: `users/me/dataTypes/food/dataPoints/${query}`,
-          displayName: query,
-          energyKcal: 100,
-          carbGrams: 20,
-          fatGrams: 2,
-          proteinGrams: 4,
-          servingGrams: 100,
-          nutrients: { PROTEIN: 4, VITAMIN_C: 0.02 },
-        },
-      ];
+    async findExact(nameZh) {
+      return {
+        sourceRevision: 'tw-fda-test-sha',
+        officialFoodId: `test-${nameZh}`,
+        nameZh,
+        aliases: [],
+        nutrients: [
+          { officialName: '熱量', rawUnit: 'kcal', per100gValue: 100 },
+          { officialName: '粗蛋白', rawUnit: 'g', per100gValue: 4 },
+          { officialName: '總碳水化合物', rawUnit: 'g', per100gValue: 20 },
+          { officialName: '粗脂肪', rawUnit: 'g', per100gValue: 2 },
+          { officialName: '維生素C', rawUnit: 'mg', per100gValue: 20 },
+        ],
+      };
+    },
+  };
+}
+
+function localCatalog(): TwFdaFoodCatalog {
+  return {
+    async findExact(nameZh) {
+      return {
+        sourceRevision: 'tw-fda-test-sha',
+        officialFoodId: `test-${nameZh}`,
+        nameZh,
+        aliases: [],
+        nutrients: [
+          { officialName: '熱量', rawUnit: 'kcal', per100gValue: 100 },
+          { officialName: '粗蛋白', rawUnit: 'g', per100gValue: 4 },
+          { officialName: '總碳水化合物', rawUnit: 'g', per100gValue: 20 },
+          { officialName: '粗脂肪', rawUnit: 'g', per100gValue: 2 },
+          { officialName: '維生素C', rawUnit: 'mg', per100gValue: 20 },
+        ],
+      };
     },
   };
 }
@@ -185,4 +206,32 @@ test('confirm stores local_only outbox when writeback is off', async () => {
     return;
   }
   assert.ok(result.outbox.every((row) => row.status === 'local_only'));
+});
+
+test('confirm uses local Taiwan FDA facts without requiring an OAuth connection', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const draft = await store.meals.insertDraft({
+    userId: 'u1',
+    mealType: 'LUNCH',
+    eatenAt: now,
+    vision: readyVision(),
+    now,
+  });
+  const result = await store.meals.confirmDraft({
+    userId: 'u1',
+    draftId: draft.id,
+    writebackThisMeal: false,
+    canWriteNutrition: false,
+    connectionSyncable: false,
+    catalog: localCatalog(),
+    now,
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) {
+    return;
+  }
+  assert.ok(result.nutrients.some((row) => row.nutrientCode === 'VITAMIN_C'));
+  assert.ok(result.ingredients.every((row) => row.foodSource === 'tw_fda'));
+  assert.ok(result.ingredients.every((row) => row.foodSourceVersion === 'tw-fda-test-sha'));
 });

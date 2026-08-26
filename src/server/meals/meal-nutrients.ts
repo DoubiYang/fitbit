@@ -4,7 +4,7 @@ import type { ResolvedDish } from './ingredient-nutrition';
 import type { MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow } from './types';
 
 const GOOGLE_FOOD_SOURCE_VERSION = 'google-health-v4';
-const RESOLVER_VERSION = 'google-health-food-v1';
+const RESOLVER_VERSION = 'tw-fda-local-v1';
 
 export function factsFromResolvedDish(input: {
   dishId: string;
@@ -18,9 +18,9 @@ export function factsFromResolvedDish(input: {
     dishId: input.dishId,
     userId: input.userId,
     foodName: item.nameZh,
-    foodSource: item.foodName ? 'google_health_food' : 'unmatched',
+    foodSource: item.foodSource ?? (item.foodName ? 'google_health_food' : 'unmatched'),
     foodSourceId: item.foodName,
-    foodSourceVersion: item.foodName ? GOOGLE_FOOD_SOURCE_VERSION : undefined,
+    foodSourceVersion: item.foodSourceVersion ?? (item.foodName ? GOOGLE_FOOD_SOURCE_VERSION : undefined),
     grams: item.grams,
   }));
   const nutrients: MealNutrientRow[] = [];
@@ -54,9 +54,12 @@ export function factsFromResolvedDish(input: {
   }
   push('PROTEIN', { grams: input.resolved.totals.proteinGrams });
   const totalIngredientGrams = ingredients.reduce((total, item) => total + item.grams, 0);
-  const matchedIngredientGrams = ingredients
-    .filter((item) => item.foodSource === 'google_health_food')
+  const matched = ingredients.filter((item) => item.foodSource !== 'unmatched');
+  const matchedIngredientGrams = matched
     .reduce((total, item) => total + item.grams, 0);
+  const matchedSources = new Set(matched.map((item) => item.foodSource));
+  const matchedVersions = new Set(matched.map((item) => item.foodSourceVersion).filter((value): value is string => Boolean(value)));
+  const foodSource = matchedSources.size === 1 ? [...matchedSources][0]! : 'unmatched';
   return {
     ingredients,
     nutrients,
@@ -64,8 +67,8 @@ export function factsFromResolvedDish(input: {
       dishId: input.dishId,
       userId: input.userId,
       resolverVersion: RESOLVER_VERSION,
-      foodSource: matchedIngredientGrams > 0 ? 'google_health_food' : 'unmatched',
-      foodSourceVersion: matchedIngredientGrams > 0 ? GOOGLE_FOOD_SOURCE_VERSION : undefined,
+      foodSource: matchedIngredientGrams > 0 && foodSource !== 'unmatched' ? foodSource : 'unmatched',
+      foodSourceVersion: matchedIngredientGrams > 0 && matchedVersions.size === 1 ? [...matchedVersions][0] : undefined,
       visionConfidence: input.visionConfidence,
       totalIngredientGrams,
       matchedIngredientGrams,

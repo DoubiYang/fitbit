@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "source": {
+    "publisher": "Taiwan Food and Drug Administration",
+    "dataset": "Nutrition Information Database",
+    "url": "https://data.fda.gov.tw/data/opendata/export/20/json",
+    "license": "Government Open Data License, version 1.0",
+    "retrieved_at": "2026-08-26T07:58:00Z"
+  },
+  "artifact": {
+    "path": "data/tw-fda/food-composition.json.zip",
+    "sha256": "c1ef5502ceceead6d5ce3b7ee21fe544702b1e508be73b196fce2cf0e61985cb",
+    "bytes": 4489506,
+    "members": [
+      {
+        "path": "20_5.json",
+        "uncompressed_bytes": 127897218
+      }
+    ]
+  },
+  "content": {
+    "record_count": 226720,
+    "food_count": 2180,
+    "nutrient_count": 160045,
+    "skipped_nutrient_count": 66675
+  },
+  "parser_version": "tw-fda-import-v1"
+}

@@ -1,6 +1,6 @@
 import type { VisionMeal } from '../../domain/meal-vision';
-import type { GoogleFoodCatalog } from './google-food';
 import type { GoogleNutritionDataPoint } from './google-nutrition';
+import type { TwFdaFoodCatalog } from '../nutrition/tw-fda';
 
 export type MealType = 'BREAKFAST' | 'LUNCH' | 'DINNER' | 'SNACK';
 
@@ -48,7 +48,7 @@ export type MealIngredientRow = {
   dishId: string;
   userId: string;
   foodName: string;
-  foodSource: 'google_health_food' | 'unmatched';
+  foodSource: 'google_health_food' | 'tw_fda' | 'unmatched';
   foodSourceId: string | undefined;
   foodSourceVersion: string | undefined;
   grams: number;
@@ -68,7 +68,7 @@ export type MealNutritionProvenanceRow = {
   dishId: string;
   userId: string;
   resolverVersion: string;
-  foodSource: 'google_health_food' | 'unmatched';
+  foodSource: 'google_health_food' | 'tw_fda' | 'unmatched';
   foodSourceVersion: string | undefined;
   visionConfidence: number;
   totalIngredientGrams: number;
@@ -84,6 +84,12 @@ export type OutboxRow = {
   payload: GoogleNutritionDataPoint | undefined;
   payloadHash: string | undefined;
   status: OutboxStatus;
+  attemptCount?: number;
+  nextAttemptAt?: Date;
+  leaseUntil?: Date;
+  lastAttemptAt?: Date;
+  lastErrorCode?: string;
+  googleOperationName?: string;
 };
 
 export type ConfirmMealInput = {
@@ -93,7 +99,7 @@ export type ConfirmMealInput = {
   canWriteNutrition: boolean;
   connectionSyncable: boolean;
   now: Date;
-  catalog?: GoogleFoodCatalog;
+  catalog?: TwFdaFoodCatalog;
 };
 
 export type ConfirmMealResult =

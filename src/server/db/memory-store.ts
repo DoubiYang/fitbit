@@ -3,9 +3,12 @@ import { randomUUID } from 'node:crypto';
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
 import type { MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealVersionRow, OutboxRow } from '../meals/types';
+import { resolveExactTwFdaFood, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
 export type MemoryStore = AuthStore & {
   deletedHealthSnapshotUserIds: string[];
+  seedFoodComposition(foods: LocalTwFdaFood[]): void;
+  outboxRows(): OutboxRow[];
 };
 
 function envelopesEqual(left: Buffer | undefined, right: Buffer | undefined): boolean {
@@ -36,6 +39,20 @@ function cloneConnection(row: ConnectionRow): ConnectionRow {
   };
 }
 
+function cloneOutbox(row: OutboxRow): OutboxRow {
+  return {
+    ...row,
+    payload: row.payload ? structuredClone(row.payload) : undefined,
+    nextAttemptAt: row.nextAttemptAt ? new Date(row.nextAttemptAt) : undefined,
+    leaseUntil: row.leaseUntil ? new Date(row.leaseUntil) : undefined,
+    lastAttemptAt: row.lastAttemptAt ? new Date(row.lastAttemptAt) : undefined,
+  };
+}
+
+function ownsOutboxLease(row: OutboxRow | undefined, input: { userId: string; leaseUntil: Date }): row is OutboxRow {
+  return Boolean(row && row.userId === input.userId && row.leaseUntil?.getTime() === input.leaseUntil.getTime());
+}
+
 export function createMemoryStore(): MemoryStore {
   const users = new Set<string>();
   const writebackEnabled = new Map<string, boolean>();
@@ -50,6 +67,7 @@ export function createMemoryStore(): MemoryStore {
   const sessions = new Map<string, SessionRow>();
   const transactions = new Map<string, OauthTransactionRow>();
   const deletedHealthSnapshotUserIds: string[] = [];
+  let foodComposition: LocalTwFdaFood[] = [];
 
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
@@ -297,6 +315,87 @@ export function createMemoryStore(): MemoryStore {
         deletedHealthSnapshotUserIds.push(userId);
       },
     },
+    foodComposition: {
+      async findExactFood(nameZh: string): Promise<LocalTwFdaFood | undefined> {
+        return resolveExactTwFdaFood(nameZh, foodComposition);
+      },
+    },
+    nutritionOutbox: {
+      async claimDue(input) {
+        const due = outbox
+          .filter(
+            (row) =>
+              (row.status === 'write_pending' || row.status === 'retrying' || row.status === 'operation_pending') &&
+              (!row.nextAttemptAt || row.nextAttemptAt.getTime() <= input.now.getTime()) &&
+              (!row.leaseUntil || row.leaseUntil.getTime() <= input.now.getTime()),
+          )
+          .sort((left, right) => (left.nextAttemptAt?.getTime() ?? 0) - (right.nextAttemptAt?.getTime() ?? 0) || left.id.localeCompare(right.id))
+          .slice(0, input.limit);
+        for (const row of due) {
+          row.leaseUntil = new Date(input.leaseUntil);
+          row.lastAttemptAt = new Date(input.now);
+          row.attemptCount = (row.attemptCount ?? 0) + 1;
+          row.nextAttemptAt = undefined;
+        }
+        return due.map(cloneOutbox);
+      },
+      async markSynced(input) {
+        const row = outbox.find((item) => item.id === input.id);
+        if (!ownsOutboxLease(row, input)) {
+          return false;
+        }
+        row.status = 'synced';
+        row.leaseUntil = undefined;
+        row.nextAttemptAt = undefined;
+        row.lastErrorCode = undefined;
+        return true;
+      },
+      async markRetrying(input) {
+        const row = outbox.find((item) => item.id === input.id);
+        if (!ownsOutboxLease(row, input)) {
+          return false;
+        }
+        row.status = 'retrying';
+        row.leaseUntil = undefined;
+        row.nextAttemptAt = new Date(input.nextAttemptAt);
+        row.lastErrorCode = input.errorCode;
+        return true;
+      },
+      async markFailedActionRequired(input) {
+        const row = outbox.find((item) => item.id === input.id);
+        if (!ownsOutboxLease(row, input)) {
+          return false;
+        }
+        row.status = 'failed_action_required';
+        row.leaseUntil = undefined;
+        row.nextAttemptAt = undefined;
+        row.lastErrorCode = input.errorCode;
+        return true;
+      },
+      async markUnknown(input) {
+        const row = outbox.find((item) => item.id === input.id);
+        if (!ownsOutboxLease(row, input)) {
+          return false;
+        }
+        row.status = 'unknown';
+        row.leaseUntil = undefined;
+        row.nextAttemptAt = undefined;
+        row.lastErrorCode = input.errorCode;
+        return true;
+      },
+      async markOperationPending(input) {
+        const row = outbox.find((item) => item.id === input.id);
+        if (!ownsOutboxLease(row, input)) {
+          return false;
+        }
+        row.status = 'operation_pending';
+        row.leaseUntil = undefined;
+        row.googleOperationName = input.operationName;
+        row.nextAttemptAt = new Date(input.nextAttemptAt);
+        row.lastErrorCode = undefined;
+        return true;
+      },
+    },
     transactions: {
       async insert(row: OauthTransactionRow): Promise<void> {
         transactions.set(row.id, { ...row });
@@ -318,5 +417,13 @@ export function createMemoryStore(): MemoryStore {
     },
   };
 
-  return Object.assign(store, { deletedHealthSnapshotUserIds });
+  return Object.assign(store, {
+    deletedHealthSnapshotUserIds,
+    seedFoodComposition(foods: LocalTwFdaFood[]) {
+      foodComposition = structuredClone(foods);
+    },
+    outboxRows() {
+      return outbox.map(cloneOutbox);
+    },
+  });
 }

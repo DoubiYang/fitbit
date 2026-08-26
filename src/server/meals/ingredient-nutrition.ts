@@ -35,6 +35,8 @@ export type ResolvedIngredient = {
   grams: number;
   matchedDisplayName: string | undefined;
   foodName: string | undefined;
+  foodSource?: 'google_health_food' | 'tw_fda' | 'unmatched';
+  foodSourceVersion?: string;
   energyKcal: number | undefined;
   proteinGrams: number | undefined;
   carbGrams: number | undefined;

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import sharp from 'sharp';
+
 import { completeGoogleOAuth, startGoogleOAuth } from '../../src/server/auth/oauth-service';
 import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
 import type { GoogleOAuthClient } from '../../src/server/auth/types';
 import { loadConfig, type OAuthConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import type { GoogleFoodCatalog } from '../../src/server/meals/google-food';
 import { handleMealConfirm, handleMealDraft, handleMealPhoto } from '../../src/server/meals/http';
+import type { TwFdaFoodCatalog } from '../../src/server/nutrition/tw-fda';
 
 const now = new Date('2026-08-26T12:00:00.000Z');
 const encryptionKey = Buffer.alloc(32, 4).toString('base64');
@@ -67,14 +69,14 @@ async function signedInStore() {
   return { store, sessionToken: completed.sessionToken!, userId: completed.userId! };
 }
 
-function photoRequest(input: { sessionToken?: string; consent?: boolean } = {}): Request {
+async function photoRequest(input: { sessionToken?: string; consent?: boolean } = {}): Promise<Request> {
   const form = new FormData();
   form.set('aiPhotoConsent', input.consent === false ? 'false' : 'true');
   form.set('mealType', 'LUNCH');
   form.set('eatenAt', now.toISOString());
   form.set(
     'photo',
-    new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00])], {
+    new Blob([await sharp({ create: { width: 16, height: 16, channels: 3, background: 'red' } }).jpeg().toBuffer()], {
       type: 'image/jpeg',
     }),
     'meal.jpg',
@@ -126,28 +128,30 @@ function readyVision() {
   };
 }
 
-function catalog(): GoogleFoodCatalog {
+function catalog(): TwFdaFoodCatalog {
   return {
-    async search() {
-      return [
-        {
-          name: 'users/me/dataTypes/food/dataPoints/broccoli-1',
-          displayName: '西兰花',
-          energyKcal: 34,
-          carbGrams: 6.64,
-          fatGrams: 0.37,
-          proteinGrams: 2.82,
-          servingGrams: 100,
-          nutrients: { PROTEIN: 2.82, VITAMIN_C: 0.0894, CALCIUM: 0.05 },
-        },
-      ];
+    async findExact() {
+      return {
+        sourceRevision: 'tw-fda-test-sha',
+        officialFoodId: 'V0100101',
+        nameZh: '花椰菜',
+        aliases: ['西兰花'],
+        nutrients: [
+          { officialName: '熱量', rawUnit: 'kcal', per100gValue: 34 },
+          { officialName: '粗蛋白', rawUnit: 'g', per100gValue: 2.82 },
+          { officialName: '總碳水化合物', rawUnit: 'g', per100gValue: 6.64 },
+          { officialName: '粗脂肪', rawUnit: 'g', per100gValue: 0.37 },
+          { officialName: '維生素C', rawUnit: 'mg', per100gValue: 89.4 },
+          { officialName: '鈣', rawUnit: 'mg', per100gValue: 50 },
+        ],
+      };
     },
   };
 }
 
 test('meal photo rejects an unauthenticated request before calling vision', async () => {
   let calls = 0;
-  const response = await handleMealPhoto(photoRequest(), {
+  const response = await handleMealPhoto(await photoRequest(), {
     config: config(),
     store: createMemoryStore(),
     now: () => now,
@@ -165,7 +169,7 @@ test('meal photo rejects an unauthenticated request before calling vision', asyn
 test('meal photo requires explicit consent before sending image to vision', async () => {
   const signedIn = await signedInStore();
   let calls = 0;
-  const response = await handleMealPhoto(photoRequest({ sessionToken: signedIn.sessionToken, consent: false }), {
+  const response = await handleMealPhoto(await photoRequest({ sessionToken: signedIn.sessionToken, consent: false }), {
     config: config(),
     store: signedIn.store,
     now: () => now,
@@ -182,7 +186,7 @@ test('meal photo requires explicit consent before sending image to vision', asyn
 
 test('meal photo persists a caller-owned validated draft without returning image bytes', async () => {
   const signedIn = await signedInStore();
-  const response = await handleMealPhoto(photoRequest({ sessionToken: signedIn.sessionToken }), {
+  const response = await handleMealPhoto(await photoRequest({ sessionToken: signedIn.sessionToken }), {
     config: config(),
     store: signedIn.store,
     now: () => now,
@@ -203,7 +207,7 @@ test('meal photo persists a caller-owned validated draft without returning image
 test('meal photo does not send an image when the DeepSeek key is absent', async () => {
   const signedIn = await signedInStore();
   let calls = 0;
-  const response = await handleMealPhoto(photoRequest({ sessionToken: signedIn.sessionToken }), {
+  const response = await handleMealPhoto(await photoRequest({ sessionToken: signedIn.sessionToken }), {
     config: config(''),
     store: signedIn.store,
     now: () => now,
