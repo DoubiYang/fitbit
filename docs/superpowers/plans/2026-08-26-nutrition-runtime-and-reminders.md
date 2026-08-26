@@ -43,10 +43,10 @@
 - Create: `src/server/meals/http.ts`, `app/api/meals/photo/route.ts`, `app/api/meals/drafts/[id]/route.ts`
 - Create: `tests/server/meal-http.test.ts`
 
-- [ ] **Step 1: Write failing tests.** Cover unauthenticated `401`; a valid multipart JPEG reaching an injected `VisionClient`; a missing `DEEPSEEK_APIKEY` returning a non-secret `503`; and caller A being unable to read caller B's draft.
-- [ ] **Step 2: Run the focused test.** `pnpm test tests/server/meal-http.test.ts`; observe failures because the handler does not exist.
-- [ ] **Step 3: Add the minimal configuration and handler.** Add an optional, trimmed `deepseekApiKey` only to the OAuth server config; reject a non-POST, cross-origin, oversized, wrong MIME or unauthenticated request before invoking Vision; use `request.formData()` only after a content-length guard; pass bytes to `ingestMealPhoto` and `recognizeMealPhoto`; insert the validated draft. Return candidates and estimates only, never image bytes or raw provider output.
-- [ ] **Step 4: Add thin routes and rerun focused tests.** Confirm both valid path and reject paths are green.
+- [x] **Step 1: Write failing tests.** Covered unauthenticated `401`, explicit consent, a valid multipart JPEG reaching an injected `VisionClient`, a missing `DEEPSEEK_APIKEY` returning a non-secret `503`, and caller-owned draft reads.
+- [x] **Step 2: Run the focused test.** Observed the expected missing-handler failure.
+- [x] **Step 3: Add the minimal configuration and handler.** Added optional server-only configuration, session/origin/consent checks, in-memory JPEG/WebP ingestion, EXIF stripping, validation, Vision invocation and draft persistence. The response has no image bytes or raw provider output.
+- [x] **Step 4: Add thin routes and rerun focused tests.** Focused tests and full type-check are green.
 - [ ] **Step 5: Commit.** `feat: add protected meal photo drafts`.
 
 ## Task 2: Confirm drafts with a real catalog and preserve complete local facts
@@ -111,4 +111,3 @@
 - [ ] **Step 3: Complete the existing OAuth sign-in in the browser.** This is required before the session-protected photo route can store a user draft or query that user's Food catalog.
 - [ ] **Step 4: Send `../test.jpg` once through the protected photo route.** Record only response metadata, schema validity, candidate count and latency. Do not log image bytes, data URL, API key or raw Vision response.
 - [ ] **Step 5: Report the real result and any live API contract discrepancy before enabling repeated or automatic uploads.**
-

@@ -7,6 +7,7 @@ export type OAuthConfig = {
   googleClientId: string;
   googleClientSecret: string;
   syncSecret: string | undefined;
+  deepseekApiKey?: string;
   appOrigin: string;
   appBasePath: typeof APP_BASE_PATH;
   tokenEncryptionKey: Buffer;
@@ -121,6 +122,7 @@ export function loadConfig(env: NodeJS.Dict<string> = process.env): AppConfig {
     googleClientId: env.GOOGLE_HEALTH_CLIENT_ID!.trim(),
     googleClientSecret: env.GOOGLE_HEALTH_CLIENT_SECRET!.trim(),
     syncSecret: present(env.SYNC_SECRET) ? env.SYNC_SECRET.trim() : undefined,
+    deepseekApiKey: present(env.DEEPSEEK_APIKEY) ? env.DEEPSEEK_APIKEY.trim() : undefined,
     appOrigin,
     appBasePath: APP_BASE_PATH,
     tokenEncryptionKey,
