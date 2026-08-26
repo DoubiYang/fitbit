@@ -137,7 +137,7 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 
 重量类营养以 `grams NUMERIC(20,9)` 存储，能量以 `kcal NUMERIC(12,3)` 存储。写入 Google 时转到克，微量营养素设置 `userProvidedUnit`（维生素 A/D 等用 `MICROGRAM`）。额外本地代码：`ADDED_SUGAR`、`FREE_SUGAR`、`OMEGA_3`、`ALA`、`EPA`、`DHA`、`CHOLINE`、`FLUORIDE`。
 
-标签命名对齐 `GB 28050-2025`。个人目标与「是否偏低」提醒用《中国居民膳食营养素参考摄入量（2023）》的 RNI、AI、UL，不用统一 NRV；规则见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。不断言医学缺乏。 Google 写回仍只带能量与宏量；微量只进 `meal_nutrients`。
+标签命名对齐 `GB 28050-2025`。个人目标与「是否偏低」提醒用《中国居民膳食营养素参考摄入量（2023）》的 RNI、AI、UL，不用统一 NRV；规则见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。不断言医学缺乏。Google Health 支持的微量营养素与脂肪细分也写入 `nutrition-log.nutrients[]`；仅 API 不支持的本地扩展代码留在 `meal_nutrients`。
 
 **菜与食材：**
 
@@ -182,8 +182,9 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 ### 6.1 映射
 
 1. **一道确认的菜 = 一条 anonymous `nutrition-log`。** 禁止整桌一个 `foodDisplayName`。
-2. Payload 来自该菜的 `finalize` 结果：顶层 `energy`、`energyFromFat`、`totalCarbohydrate`、`totalFat`；`CARBOHYDRATES` 不进 `nutrients[]`。
-3. 本地独有代码不进 payload。
+2. Payload 来自该菜的 `finalize` 结果：顶层 `energy`、`energyFromFat`、`totalCarbohydrate`、`totalFat`；`CARBOHYDRATES` 不进 `nutrients[]`，避免双计。
+3. 除 `CARBOHYDRATES` 外，Google 支持且值已知的营养代码全部写进 `nutrients[]`，包括维生素、矿物质、纤维、糖、胆固醇和脂肪细分。未知值省略；只有用户确认的零值才写 0。
+4. `ADDED_SUGAR`、`FREE_SUGAR`、`OMEGA_3`、`ALA`、`EPA`、`DHA`、`CHOLINE`、`FLUORIDE` 等无 Google 枚举的本地独有代码不进 payload。
 
 ### 6.2 何时建 outbox
 
