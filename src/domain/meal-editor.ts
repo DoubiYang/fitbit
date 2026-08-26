@@ -7,18 +7,20 @@ const positiveFiniteNumber = z.number().finite().gt(0);
 const nonNegativeFiniteNumber = z.number().finite().gte(0);
 
 export const editableIngredientSchema = z.object({
-  name: z.string().trim().min(1).max(80),
+  nameZh: z.string().trim().min(1).max(80),
   grams: positiveFiniteNumber,
 });
 
 export const editableDishSchema = z.object({
   id: z.string().trim().min(1).max(120),
-  name: z.string().trim().min(1).max(120),
+  nameZh: z.string().trim().min(1).max(120),
   ingredients: z.array(editableIngredientSchema).min(1).max(40),
+  portionGrams: positiveFiniteNumber,
 });
 
 export const editableNutrientSchema = z
   .object({
+    dishId: z.string().trim().min(1).max(120),
     nutrientCode: z.string().trim().min(1).max(120),
     value: nonNegativeFiniteNumber,
     unit: nutritionUnitSchema,
@@ -38,20 +40,21 @@ export type EditableDish = z.infer<typeof editableDishSchema>;
 export type EditableNutrient = z.infer<typeof editableNutrientSchema>;
 
 export const replaceIngredientsPatchSchema = z.object({
-  action: z.literal('replace_ingredients'),
+  kind: z.literal('replace_ingredients'),
   dishId: z.string().trim().min(1).max(120),
-  name: z.string().trim().min(1).max(120),
+  nameZh: z.string().trim().min(1).max(120),
   ingredients: z.array(editableIngredientSchema).min(1).max(40),
-});
+}).strict();
 
 export const setNutrientPatchSchema = z
   .object({
-    action: z.literal('set_nutrient'),
+    kind: z.literal('set_nutrient'),
     dishId: z.string().trim().min(1).max(120),
     nutrientCode: z.string().trim().min(1).max(120),
     value: nonNegativeFiniteNumber,
     unit: nutritionUnitSchema,
   })
+  .strict()
   .superRefine((patch, context) => {
     const isEnergy = patch.nutrientCode === 'ENERGY';
     if (isEnergy && patch.unit !== 'kcal') {
@@ -62,13 +65,15 @@ export const setNutrientPatchSchema = z
     }
   });
 
-export const mealPatchSchema = z.discriminatedUnion('action', [replaceIngredientsPatchSchema, setNutrientPatchSchema]);
+export const mealPatchSchema = z.discriminatedUnion('kind', [replaceIngredientsPatchSchema, setNutrientPatchSchema]);
 export type ReplaceIngredientsPatch = z.infer<typeof replaceIngredientsPatchSchema>;
 export type SetNutrientPatch = z.infer<typeof setNutrientPatchSchema>;
 export type MealPatch = z.infer<typeof mealPatchSchema>;
 
 const editableMealViewFields = {
   mealId: z.string().trim().min(1).max(120),
+  mealType: z.string().trim().min(1).max(40),
+  eatenAt: z.string().datetime({ offset: true }),
   dishes: z.array(editableDishSchema).max(20),
   nutrients: z.array(editableNutrientSchema).max(200),
 };
@@ -95,7 +100,10 @@ function assertNutrientUnit(nutrientCode: string, unit: NutritionUnit): void {
   }
 }
 
-export function toInternalNutrientAmount(nutrientCode: string, value: number, unit: NutritionUnit): EditableNutrient {
+export type NutrientAmount = { nutrientCode: string; value: number; unit: NutritionUnit };
+export type InternalNutrientAmount = { nutrientCode: string; value: number; unit: 'kcal' | 'g' };
+
+export function toInternalNutrientAmount(nutrientCode: string, value: number, unit: NutritionUnit): InternalNutrientAmount {
   if (!Number.isFinite(value) || value < 0) throw new Error('nutrient value must be finite and non-negative');
   assertNutrientUnit(nutrientCode, unit);
   return { nutrientCode, value: unit === 'kcal' ? value : value / MASS_FACTORS[unit], unit: unit === 'kcal' ? 'kcal' : 'g' };
@@ -105,7 +113,7 @@ export function fromInternalNutrientAmount(
   nutrientCode: string,
   value: number,
   displayUnit: NutritionUnit,
-): EditableNutrient {
+): NutrientAmount {
   if (!Number.isFinite(value) || value < 0) throw new Error('nutrient value must be finite and non-negative');
   assertNutrientUnit(nutrientCode, displayUnit === 'kcal' ? 'kcal' : displayUnit);
   if (nutrientCode === 'ENERGY') return { nutrientCode, value, unit: 'kcal' };
