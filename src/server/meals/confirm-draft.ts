@@ -5,7 +5,8 @@ import { isPortionRange } from '../../domain/meal-vision';
 import type { GoogleFoodCatalog } from './google-food';
 import { resolveDishIngredients, type ResolvedDish } from './ingredient-nutrition';
 import { factsFromResolvedDish } from './meal-nutrients';
-import type { ConfirmMealInput, ConfirmMealResult, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, OutboxRow } from './types';
+import { buildGoogleNutritionDataPoint } from './google-nutrition';
+import type { ConfirmMealInput, ConfirmMealResult, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealVersionRow, OutboxRow } from './types';
 
 export function nutritionDataPointName(shortId: string): string {
   return `users/me/dataTypes/nutrition-log/dataPoints/${shortId}`;
@@ -37,9 +38,19 @@ export function confirmDraftRows(
   const writePending =
     writebackEnabled && input.writebackThisMeal && input.canWriteNutrition && input.connectionSyncable;
   const versionId = randomUUID();
+  const version: MealVersionRow = {
+    id: versionId,
+    userId: draft.userId,
+    previousVersionId: undefined,
+    mealType: draft.mealType,
+    eatenAt: draft.eatenAt,
+    writebackThisMeal: input.writebackThisMeal,
+    confirmedAt: input.now,
+  };
   const dishes: MealDishRow[] = [];
   const ingredients: MealIngredientRow[] = [];
   const nutrients: MealNutrientRow[] = [];
+  const provenance: MealNutritionProvenanceRow[] = [];
   const outbox: OutboxRow[] = [];
   for (const [index, food] of draft.vision.foods.entries()) {
     if (isPortionRange(food.portionGrams)) {
@@ -58,40 +69,38 @@ export function confirmDraftRows(
       source,
     });
     const resolved = resolvedDishes[index];
+    let payload: ReturnType<typeof buildGoogleNutritionDataPoint>;
     if (resolved) {
       const facts = factsFromResolvedDish({
         dishId,
         userId: draft.userId,
         source,
+        visionConfidence: food.confidence,
         resolved,
       });
       ingredients.push(...facts.ingredients);
       nutrients.push(...facts.nutrients);
+      provenance.push(facts.provenance);
+      payload = buildGoogleNutritionDataPoint({ dish: dishes[dishes.length - 1]!, version, nutrients: facts.nutrients });
     }
     outbox.push({
       id: randomUUID(),
       userId: draft.userId,
       dishId,
       operation: 'create',
-      dataPointName: nutritionDataPointName(shortId),
-      payloadHash: undefined,
-      status: writePending ? 'write_pending' : 'local_only',
+      dataPointName: payload?.dataPoint.name ?? nutritionDataPointName(shortId),
+      payload: payload?.dataPoint,
+      payloadHash: payload?.payloadHash,
+      status: writePending && payload ? 'write_pending' : 'local_only',
     });
   }
   return {
     ok: true,
-    version: {
-      id: versionId,
-      userId: draft.userId,
-      previousVersionId: undefined,
-      mealType: draft.mealType,
-      eatenAt: draft.eatenAt,
-      writebackThisMeal: input.writebackThisMeal,
-      confirmedAt: input.now,
-    },
+    version,
     dishes,
     ingredients,
     nutrients,
+    provenance,
     outbox,
   };
 }

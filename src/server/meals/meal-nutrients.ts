@@ -1,19 +1,26 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ResolvedDish } from './ingredient-nutrition';
-import type { MealIngredientRow, MealNutrientRow } from './types';
+import type { MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow } from './types';
+
+const GOOGLE_FOOD_SOURCE_VERSION = 'google-health-v4';
+const RESOLVER_VERSION = 'google-health-food-v1';
 
 export function factsFromResolvedDish(input: {
   dishId: string;
   userId: string;
   source: string;
+  visionConfidence: number;
   resolved: ResolvedDish;
-}): { ingredients: MealIngredientRow[]; nutrients: MealNutrientRow[] } {
-  const ingredients = input.resolved.ingredients.map((item) => ({
+}): { ingredients: MealIngredientRow[]; nutrients: MealNutrientRow[]; provenance: MealNutritionProvenanceRow } {
+  const ingredients: MealIngredientRow[] = input.resolved.ingredients.map((item) => ({
     id: randomUUID(),
     dishId: input.dishId,
     userId: input.userId,
     foodName: item.nameZh,
+    foodSource: item.foodName ? 'google_health_food' : 'unmatched',
+    foodSourceId: item.foodName,
+    foodSourceVersion: item.foodName ? GOOGLE_FOOD_SOURCE_VERSION : undefined,
     grams: item.grams,
   }));
   const nutrients: MealNutrientRow[] = [];
@@ -33,7 +40,7 @@ export function factsFromResolvedDish(input: {
       grams: values.grams,
       kcal: values.kcal,
       source: input.source,
-      confidence: 1,
+      confidence: input.visionConfidence,
     });
   };
   push('ENERGY', { kcal: input.resolved.totals.energyKcal });
@@ -46,5 +53,22 @@ export function factsFromResolvedDish(input: {
     push(code, { grams });
   }
   push('PROTEIN', { grams: input.resolved.totals.proteinGrams });
-  return { ingredients, nutrients };
+  const totalIngredientGrams = ingredients.reduce((total, item) => total + item.grams, 0);
+  const matchedIngredientGrams = ingredients
+    .filter((item) => item.foodSource === 'google_health_food')
+    .reduce((total, item) => total + item.grams, 0);
+  return {
+    ingredients,
+    nutrients,
+    provenance: {
+      dishId: input.dishId,
+      userId: input.userId,
+      resolverVersion: RESOLVER_VERSION,
+      foodSource: matchedIngredientGrams > 0 ? 'google_health_food' : 'unmatched',
+      foodSourceVersion: matchedIngredientGrams > 0 ? GOOGLE_FOOD_SOURCE_VERSION : undefined,
+      visionConfidence: input.visionConfidence,
+      totalIngredientGrams,
+      matchedIngredientGrams,
+    },
+  };
 }

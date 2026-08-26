@@ -346,16 +346,16 @@ function storeFor(queryable: Queryable): AuthStore {
         }
         for (const item of result.outbox) {
           await queryable.query(
-            `INSERT INTO nutrition_write_outbox (id, user_id, dish_id, operation, data_point_name, payload_hash, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [item.id, item.userId, item.dishId, item.operation, item.dataPointName, item.payloadHash ?? null, item.status],
+            `INSERT INTO nutrition_write_outbox (id, user_id, dish_id, operation, data_point_name, payload, payload_hash, status)
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
+            [item.id, item.userId, item.dishId, item.operation, item.dataPointName, item.payload ? JSON.stringify(item.payload) : null, item.payloadHash ?? null, item.status],
           );
         }
         for (const item of result.ingredients) {
           await queryable.query(
-            `INSERT INTO meal_ingredients (id, dish_id, user_id, food_name, grams)
-             VALUES ($1,$2,$3,$4,$5)`,
-            [item.id, item.dishId, item.userId, item.foodName, item.grams],
+            `INSERT INTO meal_ingredients (id, dish_id, user_id, food_name, food_source, food_source_id, food_source_version, grams)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [item.id, item.dishId, item.userId, item.foodName, item.foodSource, item.foodSourceId ?? null, item.foodSourceVersion ?? null, item.grams],
           );
         }
         for (const item of result.nutrients) {
@@ -363,6 +363,24 @@ function storeFor(queryable: Queryable): AuthStore {
             `INSERT INTO meal_nutrients (dish_id, user_id, nutrient_code, grams, kcal, source, confidence)
              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
             [item.dishId, item.userId, item.nutrientCode, item.grams ?? null, item.kcal ?? null, item.source, item.confidence ?? null],
+          );
+        }
+        for (const item of result.provenance) {
+          await queryable.query(
+            `INSERT INTO meal_nutrition_provenance (
+              dish_id, user_id, resolver_version, food_source, food_source_version,
+              vision_confidence, total_ingredient_grams, matched_ingredient_grams
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [
+              item.dishId,
+              item.userId,
+              item.resolverVersion,
+              item.foodSource,
+              item.foodSourceVersion ?? null,
+              item.visionConfidence,
+              item.totalIngredientGrams,
+              item.matchedIngredientGrams,
+            ],
           );
         }
         await queryable.query('DELETE FROM meal_drafts WHERE id = $1 AND user_id = $2', [input.draftId, input.userId]);
@@ -388,6 +406,9 @@ function storeFor(queryable: Queryable): AuthStore {
           dishId: row.dish_id,
           userId: row.user_id,
           foodName: row.food_name,
+          foodSource: row.food_source,
+          foodSourceId: row.food_source_id ?? undefined,
+          foodSourceVersion: row.food_source_version ?? undefined,
           grams: Number(row.grams),
         }));
       },

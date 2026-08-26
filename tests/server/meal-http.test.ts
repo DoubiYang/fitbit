@@ -6,7 +6,8 @@ import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
 import type { GoogleOAuthClient } from '../../src/server/auth/types';
 import { loadConfig, type OAuthConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import { handleMealDraft, handleMealPhoto } from '../../src/server/meals/http';
+import type { GoogleFoodCatalog } from '../../src/server/meals/google-food';
+import { handleMealConfirm, handleMealDraft, handleMealPhoto } from '../../src/server/meals/http';
 
 const now = new Date('2026-08-26T12:00:00.000Z');
 const encryptionKey = Buffer.alloc(32, 4).toString('base64');
@@ -105,6 +106,45 @@ const visionJson = JSON.stringify({
   globalUncertainties: [],
 });
 
+function readyVision() {
+  return {
+    foods: [
+      {
+        nameZh: '西兰花',
+        ingredients: ['西兰花'],
+        portionGrams: 100,
+        visibleFraction: 'full' as const,
+        confidence: 0.9,
+        needsConfirmation: [],
+        eatFraction: 1,
+        barcode: null,
+        labelText: null,
+      },
+    ],
+    photoQuality: 'usable' as const,
+    globalUncertainties: [],
+  };
+}
+
+function catalog(): GoogleFoodCatalog {
+  return {
+    async search() {
+      return [
+        {
+          name: 'users/me/dataTypes/food/dataPoints/broccoli-1',
+          displayName: '西兰花',
+          energyKcal: 34,
+          carbGrams: 6.64,
+          fatGrams: 0.37,
+          proteinGrams: 2.82,
+          servingGrams: 100,
+          nutrients: { PROTEIN: 2.82, VITAMIN_C: 0.0894, CALCIUM: 0.05 },
+        },
+      ];
+    },
+  };
+}
+
 test('meal photo rejects an unauthenticated request before calling vision', async () => {
   let calls = 0;
   const response = await handleMealPhoto(photoRequest(), {
@@ -176,4 +216,34 @@ test('meal photo does not send an image when the DeepSeek key is absent', async 
   });
   assert.equal(response.status, 503);
   assert.equal(calls, 0);
+});
+
+test('meal confirm resolves caller-owned food facts and queues only that caller writeback', async () => {
+  const signedIn = await signedInStore();
+  await signedIn.store.users.setNutritionWritebackEnabled(signedIn.userId, true);
+  const draft = await signedIn.store.meals.insertDraft({
+    userId: signedIn.userId,
+    mealType: 'LUNCH',
+    eatenAt: now,
+    vision: readyVision(),
+    now,
+  });
+  const response = await handleMealConfirm(
+    new Request(`http://localhost:3000/rhythm/api/meals/drafts/${draft.id}/confirm`, {
+      method: 'POST',
+      headers: { Origin: 'http://localhost:3000', Cookie: `rhythm_session=${signedIn.sessionToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ writebackThisMeal: true }),
+    }),
+    draft.id,
+    {
+      config: config(),
+      store: signedIn.store,
+      now: () => now,
+      catalogForUser: async () => ({ catalog: catalog(), canWriteNutrition: true, connectionSyncable: true }),
+    },
+  );
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { nutrients?: Array<{ nutrientCode: string }>; outbox?: Array<{ status: string }> };
+  assert.ok(body.nutrients?.some((nutrient) => nutrient.nutrientCode === 'VITAMIN_C'));
+  assert.deepEqual(body.outbox?.map((item) => item.status), ['write_pending']);
 });

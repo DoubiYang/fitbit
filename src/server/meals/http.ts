@@ -1,11 +1,14 @@
 import { checkPostOrigin } from '../auth/http';
 import { readCookie, SESSION_COOKIE } from '../auth/cookies';
 import { readSessionUserId } from '../auth/oauth-service';
+import { canWriteNutrition } from '../auth/scopes';
 import type { AuthStore } from '../auth/types';
 import type { OAuthConfig } from '../config/env';
+import { createGoogleTokenRefresher, resolveAccessToken } from '../health/access-token';
 
 import { estimateDish } from './nutrition-resolver';
 import { recognizeMealPhoto, type VisionClient } from './deepseek-vision';
+import { createGoogleFoodCatalog, type GoogleFoodCatalog } from './google-food';
 import { ingestMealPhoto } from './photo-ingest';
 import type { MealType } from './types';
 
@@ -17,6 +20,13 @@ export type MealHttpDeps = {
   store: AuthStore;
   vision?: VisionClient;
   now?: () => Date;
+  catalogForUser?: (userId: string) => Promise<ConfirmCatalog>;
+};
+
+type ConfirmCatalog = {
+  catalog: GoogleFoodCatalog | undefined;
+  canWriteNutrition: boolean;
+  connectionSyncable: boolean;
 };
 
 function response(body: Record<string, unknown>, status = 200): Response {
@@ -25,6 +35,29 @@ function response(body: Record<string, unknown>, status = 200): Response {
 
 async function sessionUserId(request: Request, deps: MealHttpDeps): Promise<string | undefined> {
   return readSessionUserId(deps.store, readCookie(request.headers.get('Cookie'), SESSION_COOKIE), deps.now?.());
+}
+
+function syncable(status: string): boolean {
+  return status === 'active' || status === 'partial';
+}
+
+async function defaultCatalogForUser(userId: string, deps: MealHttpDeps): Promise<ConfirmCatalog> {
+  const connection = await deps.store.connections.findByUserId(userId);
+  if (!connection || !syncable(connection.status)) {
+    return { catalog: undefined, canWriteNutrition: false, connectionSyncable: false };
+  }
+  const accessToken = await resolveAccessToken({
+    config: deps.config,
+    store: deps.store,
+    connection,
+    refresher: createGoogleTokenRefresher(deps.config),
+    now: deps.now?.(),
+  });
+  return {
+    catalog: createGoogleFoodCatalog(accessToken),
+    canWriteNutrition: canWriteNutrition(connection.grantedScopes),
+    connectionSyncable: true,
+  };
 }
 
 function parseMealType(value: FormDataEntryValue | null): MealType | undefined {
@@ -127,4 +160,55 @@ export async function handleMealDraft(request: Request, draftId: string, deps: M
     foods: draft.vision.foods,
     estimates: draft.vision.foods.map((dish) => estimateDish(dish)),
   });
+}
+
+export async function handleMealConfirm(request: Request, draftId: string, deps: MealHttpDeps): Promise<Response> {
+  if (request.method !== 'POST') {
+    return new Response(null, { status: 405, headers: { Allow: 'POST', 'Cache-Control': 'no-store' } });
+  }
+  const originError = checkPostOrigin(request, deps.config);
+  if (originError) {
+    return response({ error: originError }, 403);
+  }
+  const userId = await sessionUserId(request, deps);
+  if (!userId) {
+    return response({ error: 'unauthorized' }, 401);
+  }
+  let body: { writebackThisMeal?: unknown };
+  try {
+    body = (await request.json()) as { writebackThisMeal?: unknown };
+  } catch {
+    return response({ error: 'invalid_confirm_request' }, 400);
+  }
+  if (typeof body.writebackThisMeal !== 'boolean') {
+    return response({ error: 'invalid_confirm_request' }, 400);
+  }
+  let catalog: ConfirmCatalog;
+  try {
+    catalog = await (deps.catalogForUser?.(userId) ?? defaultCatalogForUser(userId, deps));
+  } catch {
+    return response({ error: 'nutrition_catalog_unavailable' }, 502);
+  }
+  try {
+    const result = await deps.store.meals.confirmDraft({
+      userId,
+      draftId,
+      writebackThisMeal: body.writebackThisMeal,
+      canWriteNutrition: catalog.canWriteNutrition,
+      connectionSyncable: catalog.connectionSyncable,
+      catalog: catalog.catalog,
+      now: deps.now?.() ?? new Date(),
+    });
+    if (!result.ok) {
+      return response({ error: 'meal_not_ready', reason: result.reason }, 400);
+    }
+    return response({
+      version: result.version,
+      dishes: result.dishes,
+      nutrients: result.nutrients,
+      outbox: result.outbox,
+    });
+  } catch {
+    return response({ error: 'nutrition_catalog_unavailable' }, 502);
+  }
 }

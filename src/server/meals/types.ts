@@ -1,5 +1,6 @@
 import type { VisionMeal } from '../../domain/meal-vision';
 import type { GoogleFoodCatalog } from './google-food';
+import type { GoogleNutritionDataPoint } from './google-nutrition';
 
 export type MealType = 'BREAKFAST' | 'LUNCH' | 'DINNER' | 'SNACK';
 
@@ -47,6 +48,9 @@ export type MealIngredientRow = {
   dishId: string;
   userId: string;
   foodName: string;
+  foodSource: 'google_health_food' | 'unmatched';
+  foodSourceId: string | undefined;
+  foodSourceVersion: string | undefined;
   grams: number;
 };
 
@@ -60,12 +64,24 @@ export type MealNutrientRow = {
   confidence: number | undefined;
 };
 
+export type MealNutritionProvenanceRow = {
+  dishId: string;
+  userId: string;
+  resolverVersion: string;
+  foodSource: 'google_health_food' | 'unmatched';
+  foodSourceVersion: string | undefined;
+  visionConfidence: number;
+  totalIngredientGrams: number;
+  matchedIngredientGrams: number;
+};
+
 export type OutboxRow = {
   id: string;
   userId: string;
   dishId: string;
   operation: 'create' | 'delete';
   dataPointName: string;
+  payload: GoogleNutritionDataPoint | undefined;
   payloadHash: string | undefined;
   status: OutboxStatus;
 };
@@ -87,6 +103,7 @@ export type ConfirmMealResult =
       dishes: MealDishRow[];
       ingredients: MealIngredientRow[];
       nutrients: MealNutrientRow[];
+      provenance: MealNutritionProvenanceRow[];
       outbox: OutboxRow[];
     }
   | { ok: false; reason: string };

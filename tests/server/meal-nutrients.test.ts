@@ -53,6 +53,7 @@ test('records energy, macros and micronutrients from a resolved dish', () => {
     dishId: 'dish-1',
     userId: 'u1',
     source: 'user_confirmed',
+    visionConfidence: 0.9,
     resolved: broccoliResolved(),
   });
   const byCode = Object.fromEntries(facts.nutrients.map((row) => [row.nutrientCode, row]));
@@ -67,7 +68,10 @@ test('records energy, macros and micronutrients from a resolved dish', () => {
   assert.equal(byCode.DIETARY_FIBER?.grams, 1.3);
   assert.equal(facts.ingredients.length, 1);
   assert.equal(facts.ingredients[0]?.foodName, '西兰花');
+  assert.equal(facts.ingredients[0]?.foodSource, 'google_health_food');
+  assert.equal(facts.ingredients[0]?.foodSourceId, 'users/me/dataTypes/food/dataPoints/broccoli-1');
   assert.equal(facts.ingredients[0]?.grams, 50);
+  assert.equal(byCode.VITAMIN_C?.confidence, 0.9);
 });
 
 test('confirm persists micronutrients and can read them back', async () => {

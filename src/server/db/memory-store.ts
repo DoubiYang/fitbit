@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealVersionRow, OutboxRow } from '../meals/types';
+import type { MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealVersionRow, OutboxRow } from '../meals/types';
 
 export type MemoryStore = AuthStore & {
   deletedHealthSnapshotUserIds: string[];
@@ -44,6 +44,7 @@ export function createMemoryStore(): MemoryStore {
   const dishes: MealDishRow[] = [];
   const ingredients: MealIngredientRow[] = [];
   const nutrients: MealNutrientRow[] = [];
+  const provenance: MealNutritionProvenanceRow[] = [];
   const outbox: OutboxRow[] = [];
   const connections = new Map<string, ConnectionRow>();
   const sessions = new Map<string, SessionRow>();
@@ -101,6 +102,7 @@ export function createMemoryStore(): MemoryStore {
         dishes.push(...result.dishes);
         ingredients.push(...result.ingredients);
         nutrients.push(...result.nutrients);
+        provenance.push(...result.provenance);
         outbox.push(...result.outbox);
         drafts.delete(draft.id);
         return result;
