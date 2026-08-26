@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
@@ -16,6 +17,13 @@ export type MemoryStore = Omit<AuthStore, 'currentMeals'> & {
   currentMealNutrients(mealId: string): CurrentMealNutrientRow[];
   mealSyncPoints(): MealSyncPointRow[];
 };
+
+export class MemoryStoreTransactionConflictError extends Error {
+  constructor() {
+    super('MemoryStore transaction conflict: root state changed before commit');
+    this.name = 'MemoryStoreTransactionConflictError';
+  }
+}
 
 type MemoryStoreInternals = {
   snapshotState(): unknown;
@@ -221,11 +229,15 @@ export function createMemoryStore(): MemoryStore {
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
       return serializeRootTransaction(async () => {
+        const parentSnapshot = snapshotState();
         const child = createMemoryStore();
         const childInternals = memoryStoreInternals.get(child);
         if (!childInternals) throw new Error('memory transaction child is unavailable');
-        childInternals.restoreState(snapshotState());
+        childInternals.restoreState(parentSnapshot);
         const result = await fn(child);
+        if (!isDeepStrictEqual(snapshotState(), parentSnapshot)) {
+          throw new MemoryStoreTransactionConflictError();
+        }
         restoreState(childInternals.snapshotState() as ReturnType<typeof snapshotState>);
         return result;
       });

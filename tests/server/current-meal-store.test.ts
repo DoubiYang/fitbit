@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { EditableMealDraft } from '../../src/domain/meal-editor';
-import { createMemoryStore } from '../../src/server/db/memory-store';
+import { createMemoryStore, MemoryStoreTransactionConflictError } from '../../src/server/db/memory-store';
 
 const now = new Date('2026-08-26T12:00:00.000Z');
 
@@ -216,6 +216,37 @@ test('overlapping successful root transactions serialize commits without losing 
 
   await Promise.all([first, second]);
   assert.deepEqual(store.currentMealSnapshots().map((meal) => meal.id).sort(), ['draft-1', 'draft-2']);
+});
+
+test('a root transaction rejects instead of overwriting direct parent writes made while it runs', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.currentMeals.insertEditorDraft({
+    id: 'draft-1', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: editorDraft(), now,
+  });
+  let transactionSaved!: () => void;
+  let releaseTransaction!: () => void;
+  const saved = new Promise<void>((resolve) => { transactionSaved = resolve; });
+  const release = new Promise<void>((resolve) => { releaseTransaction = resolve; });
+
+  const transaction = store.withTransaction(async (tx) => {
+    if (!tx.currentMeals) throw new Error('memory store must expose current meals');
+    await tx.currentMeals.saveEditorDraft({ userId: 'u1', draftId: 'draft-1', now });
+    transactionSaved();
+    await release;
+  });
+  await saved;
+  await store.currentMeals.insertEditorDraft({
+    id: 'draft-2', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: editorDraft('draft-2'), now,
+  });
+  releaseTransaction();
+
+  await assert.rejects(transaction, MemoryStoreTransactionConflictError);
+  assert.deepEqual(await store.currentMeals.findEditorDraft('u1', 'draft-1'), editorDraft());
+  assert.deepEqual(await store.currentMeals.findEditorDraft('u1', 'draft-2'), editorDraft('draft-2'));
+  assert.equal(await store.currentMeals.findCurrentMeal('u1', 'draft-1'), undefined);
 });
 
 test('current ingredient rows retain explicit matched and unmatched resolver provenance', async () => {
