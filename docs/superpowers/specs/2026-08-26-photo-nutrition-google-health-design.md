@@ -6,9 +6,9 @@
 
 ## 1. 目标与非目标
 
-用户拍摄或上传**一张**餐食照片后，产品给出可编辑的多道菜候选（菜品、食材与份量范围）；由版本化食物成分数据计算完整营养素。用户确认后，每一道确认的菜写入一条 Google Health `nutrition-log`；其余营养事实、估算依据与置信度只保存在本产品。
+用户拍摄或上传**一张**餐食照片后，产品给出可编辑的多道菜候选（菜品、食材与份量范围）；由版本化食物成分数据计算完整营养素。用户确认后，本产品持久化每道菜的全部已知营养事实、食物成分数据版本、估算依据与置信度；每一道确认的菜再投影为一条 Google Health `nutrition-log`。Google 不支持的本地扩展营养代码只留在本产品，Google 支持且值已知的代码全部写回。
 
-一期目标是可靠的餐食记录与可解释的营养估算，而不是医疗诊断、缺乏确诊或无确认的自动写入。相对中国 DRI 的微量摄入提醒见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)：只对照参考摄入量，不断言临床缺乏。模型不持有 Google 凭证、不会调用写接口，也不能绕过用户确认。本产品不持久化原图。 Google Health App 不展示微量元素，微量事实只保存在本产品。
+一期目标是可靠的餐食记录与可解释的营养估算，而不是医疗诊断、缺乏确诊或无确认的自动写入。相对中国 DRI 的微量摄入提醒见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)：只对照参考摄入量，不断言临床缺乏。模型不持有 Google 凭证、不会调用写接口，也不能绕过用户确认。本产品不持久化原图。Google Health App 的展示范围不作为事实或提醒依据；本地完整事实始终是权威来源。
 
 ## 2. 已核实的 Google Health API 契约
 
@@ -153,8 +153,9 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 | `meal_drafts` | 候选 JSON、estimate 区间、餐次/时间 | 确认前工作区；无照片 |
 | `meal_versions` | 用户、餐次、时间、确认时间、前一版本、该次是否请求写回 | 「这一餐」的一次确认 |
 | `meal_dishes` | 名称、进食克数、来源、client 短 ID | 一餐多道；每道新 version 都分配新的 `d-{uuid}` |
-| `meal_ingredients` | 食物/菜谱 ID、缩放克数、版本 | 重算 |
-| `meal_nutrients` | 菜级 nutrient_code、grams/kcal、来源、置信度 | 事实 |
+| `meal_ingredients` | 食物/菜谱稳定 ID、名称、缩放克数、食物成分库来源与版本、菜谱版本 | 重算、可复现 |
+| `meal_nutrients` | 菜级 nutrient_code、canonical grams/kcal、来源、营养值置信度 | 冻结的本地事实；保留 Google 不支持的扩展代码 |
+| `meal_nutrition_provenance` | 菜级 Resolver 版本、成分库来源/版本、菜谱版本、视觉置信度、每营养素可用性与覆盖说明 | 审计与提醒可解释性；不得把用户确认份量等同于营养值置信度 1 |
 | `nutrition_write_outbox` | 一道菜、操作、完整 data point name、nutritionLog hash、状态 | 一道菜一条任务 |
 | `google_nutrition_links` | 菜（该 version 的 dish）与 Google `name` | 删除时定位 |
 
@@ -194,8 +195,9 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 2. 该次 `confirm` / `revise` body 的 `writebackThisMeal === true`
 3. 连接 `active` 或 `partial`，且 `canWriteNutrition(grantedScopes)`
 4. 该菜已通过第 4.4 节确认
+5. `finalize` 至少得到一个可写入 Google 的已知营养字段
 
-缺开关或缺写 scope → 餐食仍保存，outbox 为 `local_only`。Google 已授 `nutrition.writeonly` 不等于可以写回。
+缺开关、缺写 scope 或没有可写营养字段 → 餐食仍保存，outbox 为 `local_only`；不得创建空的 Google nutrition log。Google 已授 `nutrition.writeonly` 不等于可以写回。
 
 ### 6.3 client-provided name 与 hash
 
@@ -281,7 +283,7 @@ GET /v4/users/me/dataTypes/nutrition-log/dataPoints/d-550e8400-e29b-41d4-a716-44
 7. **超时 GET 不到则为 `unknown`，不自动重放。** create 使用完整 DataPoint name。
 8. **编辑给每道菜换新 `d-{uuid}`，** 未改动的菜也删再建。
 9. **写回 worker 与健康同步分开**；条码/标签走同一 Vision JSON。
-10. **微量营养素本地记账，提醒对照中国 DRI，不依赖 Google Health App。** 见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。
+10. **本地完整记账，Google 写入受支持字段的投影；** 提醒只读本地事实、对照中国 DRI，不依赖 Google Health App。见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。
 
 ## 10. 实施前置与验收
 
@@ -297,9 +299,10 @@ GET /v4/users/me/dataTypes/nutrition-log/dataPoints/d-550e8400-e29b-41d4-a716-44
 2. 同一 `d-{uuid}` 在超时、重启、重复 tick 后最多一条 Google data point。
 3. 一餐两道确认菜 → 两条 log、两个 name；删除只影响对应那条。
 4. 留下未确认菜时 `confirm` 返回 400，无 `meal_version`。
-5. 微量营养素为 grams + `userProvidedUnit`；本地独有字段不写 Google。确认后 `meal_nutrients` 含目录给出的维生素和矿物质；提醒不把缺项当 0。
-6. 不 PATCH 匿名 log；删旧建新与「恢复中」可观察。
-7. 账户关写回或该次不勾选或无写 scope → `local_only`，无 Google 请求。
-8. 跨用户读不到他人草稿、餐食、outbox。
-9. 原图不落盘、不进日志；请求结束后不保留 buffer。
-10. 共享菜未确认食用比例时 estimate 不预填 kcal；未删该菜则无法 confirm。
+5. 微量营养素为 grams + `userProvidedUnit`；所有 Google 支持且已知的维生素、矿物质、纤维、糖、胆固醇和脂肪细分均在 payload 中，本地独有字段不写 Google。确认后本地事实含所有已知营养代码；提醒不把缺项当 0。
+6. 每道菜均保留食物/菜谱 ID、食物成分库和 Resolver 版本，以及视觉置信度与营养可用性；食品库更新后，历史餐食和历史提醒仍可复现。
+7. 不 PATCH 匿名 log；删旧建新与「恢复中」可观察。
+8. 账户关写回、该次不勾选、无写 scope 或无可写营养字段 → `local_only`，无 Google 请求。
+9. 跨用户读不到他人草稿、餐食、outbox。
+10. 原图不落盘、不进日志；请求结束后不保留 buffer。
+11. 共享菜未确认食用比例时 estimate 不预填 kcal；未删该菜则无法 confirm。
