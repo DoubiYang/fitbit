@@ -1,3 +1,5 @@
+import type { VisionMeal } from '../../domain/meal-vision';
+import type { ConfirmMealInput, ConfirmMealResult, MealDraftRow, MealType, MealVersionRow } from '../meals/types';
 import type { ConnectionStatus } from './scopes';
 
 export type TokenEnvelopeFields = {
@@ -101,6 +103,14 @@ export type AuthStore = {
   withTransaction<T>(fn: (store: AuthStore) => Promise<T>): Promise<T>;
   users: {
     insert(id: string): Promise<void>;
+    setNutritionWritebackEnabled(id: string, enabled: boolean): Promise<void>;
+    nutritionWritebackEnabled(id: string): Promise<boolean>;
+  };
+  meals: {
+    insertDraft(input: { userId: string; mealType: MealType; eatenAt: Date; vision: VisionMeal; now: Date }): Promise<MealDraftRow>;
+    findDraft(userId: string, id: string): Promise<MealDraftRow | undefined>;
+    confirmDraft(input: ConfirmMealInput): Promise<ConfirmMealResult>;
+    listVersions(userId: string): Promise<MealVersionRow[]>;
   };
   connections: {
     findByHealthUserId(healthUserId: string): Promise<ConnectionRow | undefined>;

@@ -1,6 +1,11 @@
 import pg from 'pg';
 
+import { randomUUID } from 'node:crypto';
+
+import { parseVisionMeal } from '../../domain/meal-vision';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
+import { confirmDraftRows } from '../meals/confirm-draft';
+import type { MealDraftRow, MealVersionRow } from '../meals/types';
 import type { ConnectionStatus } from '../auth/scopes';
 
 const pools = new Map<string, pg.Pool>();
@@ -22,6 +27,30 @@ function asBuffer(value: unknown): Buffer | undefined {
     return undefined;
   }
   return Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
+}
+
+function mapDraft(row: pg.QueryResult['rows'][number]): MealDraftRow {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    mealType: row.meal_type,
+    eatenAt: row.eaten_at,
+    vision: parseVisionMeal(row.vision),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapVersion(row: pg.QueryResult['rows'][number]): MealVersionRow {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    previousVersionId: row.previous_version_id ?? undefined,
+    mealType: row.meal_type,
+    eatenAt: row.eaten_at,
+    writebackThisMeal: row.writeback_this_meal,
+    confirmedAt: row.confirmed_at,
+  };
 }
 
 function mapConnection(row: pg.QueryResult['rows'][number]): ConnectionRow {
@@ -257,6 +286,79 @@ function storeFor(queryable: Queryable): AuthStore {
     users: {
       async insert(id: string): Promise<void> {
         await queryable.query('INSERT INTO users (id) VALUES ($1)', [id]);
+      },
+      async setNutritionWritebackEnabled(id: string, enabled: boolean): Promise<void> {
+        await queryable.query('UPDATE users SET nutrition_writeback_enabled = $2, updated_at = now() WHERE id = $1', [id, enabled]);
+      },
+      async nutritionWritebackEnabled(id: string): Promise<boolean> {
+        const result = await queryable.query('SELECT nutrition_writeback_enabled FROM users WHERE id = $1', [id]);
+        return result.rows[0]?.nutrition_writeback_enabled === true;
+      },
+    },
+    meals: {
+      async insertDraft(input): Promise<MealDraftRow> {
+        const id = randomUUID();
+        const result = await queryable.query(
+          `INSERT INTO meal_drafts (id, user_id, meal_type, eaten_at, vision, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6)
+           RETURNING *`,
+          [id, input.userId, input.mealType, input.eatenAt, JSON.stringify(input.vision), input.now],
+        );
+        return mapDraft(result.rows[0]);
+      },
+      async findDraft(userId, id): Promise<MealDraftRow | undefined> {
+        const result = await queryable.query('SELECT * FROM meal_drafts WHERE id = $1 AND user_id = $2', [id, userId]);
+        return result.rows[0] ? mapDraft(result.rows[0]) : undefined;
+      },
+      async confirmDraft(input) {
+        if (queryable instanceof pg.Pool) {
+          return store.withTransaction((inner) => inner.meals.confirmDraft(input));
+        }
+        const draft = await store.meals.findDraft(input.userId, input.draftId);
+        if (!draft) {
+          return { ok: false as const, reason: '草稿不存在' };
+        }
+        const enabled = await store.users.nutritionWritebackEnabled(input.userId);
+        const result = confirmDraftRows(draft, input, enabled);
+        if (!result.ok) {
+          return result;
+        }
+        await queryable.query(
+          `INSERT INTO meal_versions (id, user_id, previous_version_id, meal_type, eaten_at, writeback_this_meal, confirmed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            result.version.id,
+            result.version.userId,
+            result.version.previousVersionId ?? null,
+            result.version.mealType,
+            result.version.eatenAt,
+            result.version.writebackThisMeal,
+            result.version.confirmedAt,
+          ],
+        );
+        for (const dish of result.dishes) {
+          await queryable.query(
+            `INSERT INTO meal_dishes (id, version_id, user_id, client_short_id, name_zh, portion_grams, source)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [dish.id, dish.versionId, dish.userId, dish.clientShortId, dish.nameZh, dish.portionGrams, dish.source],
+          );
+        }
+        for (const item of result.outbox) {
+          await queryable.query(
+            `INSERT INTO nutrition_write_outbox (id, user_id, dish_id, operation, data_point_name, payload_hash, status)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [item.id, item.userId, item.dishId, item.operation, item.dataPointName, item.payloadHash ?? null, item.status],
+          );
+        }
+        await queryable.query('DELETE FROM meal_drafts WHERE id = $1 AND user_id = $2', [input.draftId, input.userId]);
+        return result;
+      },
+      async listVersions(userId): Promise<MealVersionRow[]> {
+        const result = await queryable.query(
+          'SELECT * FROM meal_versions WHERE user_id = $1 ORDER BY confirmed_at DESC',
+          [userId],
+        );
+        return result.rows.map(mapVersion);
       },
     },
     connections,

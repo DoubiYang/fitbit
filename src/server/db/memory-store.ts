@@ -1,4 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
+import { confirmDraftRows } from '../meals/confirm-draft';
+import type { MealDraftRow, MealVersionRow } from '../meals/types';
 
 export type MemoryStore = AuthStore & {
   deletedHealthSnapshotUserIds: string[];
@@ -34,6 +38,9 @@ function cloneConnection(row: ConnectionRow): ConnectionRow {
 
 export function createMemoryStore(): MemoryStore {
   const users = new Set<string>();
+  const writebackEnabled = new Map<string, boolean>();
+  const drafts = new Map<string, MealDraftRow>();
+  const versions: MealVersionRow[] = [];
   const connections = new Map<string, ConnectionRow>();
   const sessions = new Map<string, SessionRow>();
   const transactions = new Map<string, OauthTransactionRow>();
@@ -46,6 +53,51 @@ export function createMemoryStore(): MemoryStore {
     users: {
       async insert(id: string): Promise<void> {
         users.add(id);
+      },
+      async setNutritionWritebackEnabled(id: string, enabled: boolean): Promise<void> {
+        writebackEnabled.set(id, enabled);
+      },
+      async nutritionWritebackEnabled(id: string): Promise<boolean> {
+        return writebackEnabled.get(id) === true;
+      },
+    },
+    meals: {
+      async insertDraft(input): Promise<MealDraftRow> {
+        const row: MealDraftRow = {
+          id: randomUUID(),
+          userId: input.userId,
+          mealType: input.mealType,
+          eatenAt: new Date(input.eatenAt),
+          vision: structuredClone(input.vision),
+          createdAt: input.now,
+          updatedAt: input.now,
+        };
+        drafts.set(row.id, row);
+        return structuredClone(row);
+      },
+      async findDraft(userId, id): Promise<MealDraftRow | undefined> {
+        const row = drafts.get(id);
+        if (!row || row.userId !== userId) {
+          return undefined;
+        }
+        return structuredClone(row);
+      },
+      async confirmDraft(input) {
+        const draft = drafts.get(input.draftId);
+        if (!draft || draft.userId !== input.userId) {
+          return { ok: false as const, reason: '草稿不存在' };
+        }
+        const enabled = writebackEnabled.get(input.userId) === true;
+        const result = confirmDraftRows(draft, input, enabled);
+        if (!result.ok) {
+          return result;
+        }
+        versions.push(result.version);
+        drafts.delete(draft.id);
+        return result;
+      },
+      async listVersions(userId): Promise<MealVersionRow[]> {
+        return versions.filter((row) => row.userId === userId).map((row) => ({ ...row }));
       },
     },
     connections: {
