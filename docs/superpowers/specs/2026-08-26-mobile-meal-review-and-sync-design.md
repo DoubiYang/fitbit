@@ -154,7 +154,13 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 1. 事务冻结 `content_revision`，读取上个 active generation 的全部 point name，并将它们写为当前 generation 的 `delete` targets；同时为当前 dishes 建立新的唯一 `create` point 和不可变 payload。
 2. 先完成所有旧 point 的 delete outbox；尚有任一 delete 未完成时不发送新的 create。
 3. 所有 delete 成功后才运行新 point 的 create。所有新 create 成功才将新 generation 设为 active、删除旧 point 记录并显示“已同步”。
-4. 任一 delete 或 create 失败/超时/未知即转为 `recovery`。保留已知的旧/新 point names 与未完成 outbox，页面显示“同步恢复中”，不自动创建额外 log。用户只能重试这一餐；重试复用该 generation 内尚未成功的 name 和 payload，而不另生成一批 name。
+4. 任一 delete 或 create 失败/超时/未知即转为 `recovery`。保留已知的旧/新 point names 与未完成 outbox，页面显示“同步恢复中”，不自动创建额外 log。
+
+`recovery` 中“重试这一餐”的行为由最不安全的 outbox 状态决定：
+
+- `retrying`（429/5xx）沿用退避后重试；`failed_action_required` 在用户完成重新授权/开启写回后才可恢复。
+- `unknown` create 或 delete 绝不再次发送 create/delete。按钮只能再次执行该 point name 的精确 GET 恢复：若 create GET 返回相同 payload hash，则标记成功；若 delete GET 确认资源已不存在，则标记删除成功；否则仍为 `unknown` 并保持“待确认”。
+- 一个 generation 含任何未解决的 `unknown` 时，页面禁用新的写入重试与编辑，不会分配新 name 或重新 POST。只有未来的同名安全重放合同测试明确通过后，才可以改变这条规则。
 
 写入沿用既有 outbox 的 payload hash、两分钟 lease、30 秒请求 deadline 与精确名称 GET 恢复规则。编辑在 active generation 结束前被锁定；因此不能把新编辑误写到旧 generation。页面只显示聚合状态，不显示 token、payload 或原图。
 
@@ -167,7 +173,7 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 | 食材未命中或营养缺失 | 显示“未知”；用户可补填单项，不用模型或宏量推断为 0。 |
 | 食材编辑后重算 | 明确提示会覆盖该菜当前营养值；确认后替换。 |
 | 未登录/缺写权限/账户写回关闭 | 同步按钮说明原因并引导到账户页；不创建 outbox。 |
-| 同步超时或状态未知 | 显示“同步恢复中/待确认”，不自动重复 create。 |
+| 同步超时或状态未知 | 显示“同步恢复中/待确认”；只允许精确名称 GET 恢复，绝不重复 create/delete。 |
 
 ## 8. 验收与测试
 
@@ -176,5 +182,5 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 - 手改一个营养项只变该项；食材或克数更改会重算并覆盖该菜所有当前营养。
 - AI 建议未经“应用”不会改变草稿；服务端拒绝未知 kind、非当前 dishId、非法单位/数值和冲突的批量建议；刷新不恢复对话，已保存后的新对话没有原图。
 - “保存修改”从不调用 Google；只有“同步这一餐”会为该餐入队。
-- 已同步餐食编辑后回到未同步状态；下一次同步先删旧 point、再建新 point，编辑锁定至 generation 结束，失败重试不新增 name，旧、新 Google log 不会双计。
+- 已同步餐食编辑后回到未同步状态；下一次同步先删旧 point、再建新 point，编辑锁定至 generation 结束。`unknown` 只可 GET 恢复、不重发写请求；失败重试不新增 name，旧、新 Google log 不会双计。
 - 不持久化照片、原始识别值、营养修正历史或聊天消息；日志不含图片、token 或 payload。
