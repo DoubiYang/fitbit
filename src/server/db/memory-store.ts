@@ -118,6 +118,19 @@ export function createMemoryStore(): MemoryStore {
   const transactions = new Map<string, OauthTransactionRow>();
   const deletedHealthSnapshotUserIds: string[] = [];
   let foodComposition: LocalTwFdaFood[] = [];
+  let rootTransactionTail = Promise.resolve();
+
+  async function serializeRootTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const previous = rootTransactionTail;
+    rootTransactionTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
 
   function replaceCurrentChildren(snapshot: CurrentMealSnapshot): void {
     currentDishes.set(snapshot.id, snapshot.dishes.map((dish) => ({
@@ -207,17 +220,15 @@ export function createMemoryStore(): MemoryStore {
 
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
-      const child = createMemoryStore();
-      const childInternals = memoryStoreInternals.get(child);
-      if (!childInternals) throw new Error('memory transaction child is unavailable');
-      childInternals.restoreState(snapshotState());
-      try {
+      return serializeRootTransaction(async () => {
+        const child = createMemoryStore();
+        const childInternals = memoryStoreInternals.get(child);
+        if (!childInternals) throw new Error('memory transaction child is unavailable');
+        childInternals.restoreState(snapshotState());
         const result = await fn(child);
         restoreState(childInternals.snapshotState() as ReturnType<typeof snapshotState>);
         return result;
-      } catch (error) {
-        throw error;
-      }
+      });
     },
     users: {
       async insert(id: string): Promise<void> {

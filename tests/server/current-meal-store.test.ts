@@ -187,6 +187,37 @@ test('a failed memory transaction preserves independently written parent state',
   assert.equal(await store.currentMeals.findCurrentMeal('u1', 'draft-1'), undefined);
 });
 
+test('overlapping successful root transactions serialize commits without losing either saved meal', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  for (const id of ['draft-1', 'draft-2']) {
+    await store.currentMeals.insertEditorDraft({
+      id, userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+      vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: editorDraft(id), now,
+    });
+  }
+  let firstSaved!: () => void;
+  let releaseFirst!: () => void;
+  const saved = new Promise<void>((resolve) => { firstSaved = resolve; });
+  const release = new Promise<void>((resolve) => { releaseFirst = resolve; });
+
+  const first = store.withTransaction(async (tx) => {
+    if (!tx.currentMeals) throw new Error('memory store must expose current meals');
+    await tx.currentMeals.saveEditorDraft({ userId: 'u1', draftId: 'draft-1', now });
+    firstSaved();
+    await release;
+  });
+  await saved;
+  const second = store.withTransaction(async (tx) => {
+    if (!tx.currentMeals) throw new Error('memory store must expose current meals');
+    await tx.currentMeals.saveEditorDraft({ userId: 'u1', draftId: 'draft-2', now });
+  });
+  releaseFirst();
+
+  await Promise.all([first, second]);
+  assert.deepEqual(store.currentMealSnapshots().map((meal) => meal.id).sort(), ['draft-1', 'draft-2']);
+});
+
 test('current ingredient rows retain explicit matched and unmatched resolver provenance', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
