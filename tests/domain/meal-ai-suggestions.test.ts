@@ -75,5 +75,6 @@ test('marks same-dish replacement combinations as apply-all conflicts only', () 
   assert.equal(hasMealAiSuggestionConflict([replacement, { ...replacement, nameZh: '另一版' }]), true);
   assert.equal(hasMealAiSuggestionConflict([replacement, energy]), true);
   assert.equal(hasMealAiSuggestionConflict([energy, protein]), false);
+  assert.equal(hasMealAiSuggestionConflict([protein, { ...protein, value: 22 }]), true);
   assert.equal(hasMealAiSuggestionConflict([replacement, { ...energy, dishId: 'dish-2' }]), false);
 });

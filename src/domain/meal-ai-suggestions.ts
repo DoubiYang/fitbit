@@ -79,7 +79,7 @@ export function hasMealAiSuggestionConflict(suggestions: MealAiSuggestion[]): bo
       if (state.hasReplacement || state.nutrientCodes.size > 0) return true;
       state.hasReplacement = true;
     } else {
-      if (state.hasReplacement) return true;
+      if (state.hasReplacement || state.nutrientCodes.has(suggestion.nutrientCode)) return true;
       state.nutrientCodes.add(suggestion.nutrientCode);
     }
     byDish.set(suggestion.dishId, state);

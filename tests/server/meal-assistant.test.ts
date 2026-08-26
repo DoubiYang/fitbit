@@ -154,3 +154,51 @@ test('DeepSeek text request uses JSON-only messages with no image or token in it
   const messages = requestBody?.messages as Array<{ content?: unknown }>;
   assert.ok(messages.every((message) => typeof message.content === 'string'));
 });
+
+test('maps malformed DeepSeek bodies to ai_response_invalid in both helper and suggestion paths', async () => {
+  const originalFetch = globalThis.fetch;
+  let responseBody: unknown = null;
+  globalThis.fetch = (async () => new Response(JSON.stringify(responseBody), { status: 200 })) as typeof fetch;
+  try {
+    for (const invalidBody of [null, [], {}, { choices: null }, { choices: [] }, { choices: [{}] }]) {
+      responseBody = invalidBody;
+      assert.equal(await errorCode(fetchDeepSeekMealAssistant({
+        apiKey: 'server-only-key', prompt: 'prompt', question: 'question',
+        meal: { mealType: 'LUNCH', eatenAt: meal.eatenAt, dishes: [], nutrients: [] },
+      })), 'ai_response_invalid');
+    }
+
+    responseBody = null;
+    assert.equal(await errorCode(suggestMealEdits({
+      apiKey: 'server-only-key', question: '给一个建议', meal, catalog,
+    })), 'ai_response_invalid');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('maps a controlled request timeout abort to ai_model_unavailable', async () => {
+  let triggerTimeout: (() => void) | undefined;
+  let cleared = false;
+  const request = fetchDeepSeekMealAssistant({
+    apiKey: 'server-only-key', prompt: 'prompt', question: 'question',
+    meal: { mealType: 'LUNCH', eatenAt: meal.eatenAt, dishes: [], nutrients: [] },
+  }, {
+    timeoutMs: 123,
+    scheduleTimeout(callback, timeoutMs) {
+      assert.equal(timeoutMs, 123);
+      triggerTimeout = callback;
+      return () => { cleared = true; };
+    },
+    async fetch(_url, init) {
+      return new Promise<Response>((_resolve, reject) => {
+        (init?.signal as AbortSignal).addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    },
+  });
+
+  assert.ok(triggerTimeout);
+  triggerTimeout();
+  assert.equal(await errorCode(request), 'ai_model_unavailable');
+  assert.equal(cleared, true);
+});

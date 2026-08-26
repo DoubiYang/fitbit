@@ -20,6 +20,12 @@ const candidateResponseSchema = z.object({
   suggestions: z.array(z.unknown()).max(20),
 }).strict();
 
+const deepSeekResponseSchema = z.object({
+  choices: z.array(z.object({
+    message: z.object({ content: z.string().min(1) }),
+  })).min(1),
+});
+
 const questionSchema = z.string().trim().min(1).max(2_000);
 
 export type MealAssistantPromptMeal = {
@@ -41,6 +47,21 @@ export type MealAssistantClient = {
     meal: MealAssistantPromptMeal;
     question: string;
   }): Promise<string>;
+};
+
+type TimeoutScheduler = (callback: () => void, timeoutMs: number) => () => void;
+
+export type MealAssistantRequestDependencies = {
+  fetch?: typeof fetch;
+  timeoutMs?: number;
+  scheduleTimeout?: TimeoutScheduler;
+};
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+const defaultTimeoutScheduler: TimeoutScheduler = (callback, timeoutMs) => {
+  const timer = setTimeout(callback, timeoutMs);
+  return () => clearTimeout(timer);
 };
 
 export class MealAssistantError extends Error {
@@ -94,15 +115,22 @@ export async function fetchDeepSeekMealAssistant(input: {
   prompt: string;
   meal: MealAssistantPromptMeal;
   question: string;
-}): Promise<string> {
+}, dependencies: MealAssistantRequestDependencies = {}): Promise<string> {
+  const controller = new AbortController();
+  const requestTimeoutMs = dependencies.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const clearRequestTimeout = (dependencies.scheduleTimeout ?? defaultTimeoutScheduler)(
+    () => controller.abort(),
+    requestTimeoutMs,
+  );
   let response: Response;
   try {
-    response = await fetch(DEEPSEEK_CHAT_URL, {
+    response = await (dependencies.fetch ?? globalThis.fetch)(DEEPSEEK_CHAT_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${input.apiKey}`,
         'Content-Type': 'application/json',
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model: DEEPSEEK_MEAL_ASSISTANT_MODEL,
         thinking: { type: 'disabled' },
@@ -115,23 +143,25 @@ export async function fetchDeepSeekMealAssistant(input: {
     });
   } catch {
     throw new MealAssistantError('ai_model_unavailable');
+  } finally {
+    clearRequestTimeout();
   }
 
   if (!response.ok) {
     throw new MealAssistantError('ai_model_unavailable');
   }
 
-  let body: { choices?: Array<{ message?: { content?: string | null } }> };
+  let body: unknown;
   try {
-    body = await response.json() as { choices?: Array<{ message?: { content?: string | null } }> };
+    body = await response.json();
   } catch {
     throw new MealAssistantError('ai_response_invalid');
   }
-  const content = body.choices?.[0]?.message?.content;
-  if (!content) {
+  const parsed = deepSeekResponseSchema.safeParse(body);
+  if (!parsed.success) {
     throw new MealAssistantError('ai_response_invalid');
   }
-  return content;
+  return parsed.data.choices[0]!.message.content;
 }
 
 async function isApplicableSuggestion(
