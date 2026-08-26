@@ -8,7 +8,7 @@
 
 用户拍摄或上传**一张**餐食照片后，产品给出可编辑的多道菜候选（菜品、食材与份量范围）；由版本化食物成分数据计算完整营养素。用户确认后，每一道确认的菜写入一条 Google Health `nutrition-log`；其余营养事实、估算依据与置信度只保存在本产品。
 
-一期目标是可靠的餐食记录与可解释的营养估算，而不是医疗诊断、维生素缺乏判断或无确认的自动写入。模型不持有 Google 凭证、不会调用写接口，也不能绕过用户确认。本产品不持久化原图。
+一期目标是可靠的餐食记录与可解释的营养估算，而不是医疗诊断、缺乏确诊或无确认的自动写入。相对中国 DRI 的微量摄入提醒见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)：只对照参考摄入量，不断言临床缺乏。模型不持有 Google 凭证、不会调用写接口，也不能绕过用户确认。本产品不持久化原图。 Google Health App 不展示微量元素，微量事实只保存在本产品。
 
 ## 2. 已核实的 Google Health API 契约
 
@@ -137,7 +137,7 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 
 重量类营养以 `grams NUMERIC(20,9)` 存储，能量以 `kcal NUMERIC(12,3)` 存储。写入 Google 时转到克，微量营养素设置 `userProvidedUnit`（维生素 A/D 等用 `MICROGRAM`）。额外本地代码：`ADDED_SUGAR`、`FREE_SUGAR`、`OMEGA_3`、`ALA`、`EPA`、`DHA`、`CHOLINE`、`FLUORIDE`。
 
-标签命名对齐 `GB 28050-2025`；个人目标用《中国居民膳食营养素参考摄入量（2023）》的 RNI、AI、UL，不用统一 NRV，不作医学缺乏判断。
+标签命名对齐 `GB 28050-2025`。个人目标与「是否偏低」提醒用《中国居民膳食营养素参考摄入量（2023）》的 RNI、AI、UL，不用统一 NRV；规则见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。不断言医学缺乏。 Google 写回仍只带能量与宏量；微量只进 `meal_nutrients`。
 
 **菜与食材：**
 
@@ -280,6 +280,7 @@ GET /v4/users/me/dataTypes/nutrition-log/dataPoints/d-550e8400-e29b-41d4-a716-44
 7. **超时 GET 不到则为 `unknown`，不自动重放。** create 使用完整 DataPoint name。
 8. **编辑给每道菜换新 `d-{uuid}`，** 未改动的菜也删再建。
 9. **写回 worker 与健康同步分开**；条码/标签走同一 Vision JSON。
+10. **微量营养素本地记账，提醒对照中国 DRI，不依赖 Google Health App。** 见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。
 
 ## 10. 实施前置与验收
 
@@ -295,7 +296,7 @@ GET /v4/users/me/dataTypes/nutrition-log/dataPoints/d-550e8400-e29b-41d4-a716-44
 2. 同一 `d-{uuid}` 在超时、重启、重复 tick 后最多一条 Google data point。
 3. 一餐两道确认菜 → 两条 log、两个 name；删除只影响对应那条。
 4. 留下未确认菜时 `confirm` 返回 400，无 `meal_version`。
-5. 微量营养素为 grams + `userProvidedUnit`；本地独有字段不写 Google。
+5. 微量营养素为 grams + `userProvidedUnit`；本地独有字段不写 Google。确认后 `meal_nutrients` 含目录给出的维生素和矿物质；提醒不把缺项当 0。
 6. 不 PATCH 匿名 log；删旧建新与「恢复中」可观察。
 7. 账户关写回或该次不勾选或无写 scope → `local_only`，无 Google 请求。
 8. 跨用户读不到他人草稿、餐食、outbox。
