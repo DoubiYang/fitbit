@@ -3,6 +3,7 @@
 **状态：** 草案，待用户审阅
 **日期：** 2026-08-23
 **对应工作项：** 3. 验证 DeepSeek Vision 的中餐识别效果、成本与稳定性
+**运行时以哪份为准：** 照片不落盘、一餐一张图、Vision JSON、营养计算时机与 Google 写回，以 [2026-08-26-photo-nutrition-google-health-design.md](2026-08-26-photo-nutrition-google-health-design.md) 为准。本文第 3.7 节的 24 小时 / 30 天存图和第 4 节 `meal_candidates` 示例已被取代。评测集、holdout 门槛、成本与隐私审阅仍然有效。
 
 ## 1. 目标
 
