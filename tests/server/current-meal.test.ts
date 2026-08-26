@@ -19,6 +19,7 @@ const foods: Record<string, LocalTwFdaFood> = {
     nutrients: [
       { officialName: '熱量', rawUnit: 'kcal', per100gValue: 200 },
       { officialName: '粗蛋白', rawUnit: 'g', per100gValue: 20 },
+      { officialName: '粗脂肪', rawUnit: 'g', per100gValue: 10 },
       { officialName: '膽鹼', rawUnit: 'mg', per100gValue: 80 },
     ],
   },
@@ -51,26 +52,32 @@ function sourceDish(nameZh: string, ingredients: string[], portionGrams: number 
   };
 }
 
-test('uses a vision range midpoint only to create the initial explicit ingredient grams', async () => {
+test('uses UUID dish IDs and a vision range midpoint only to create initial explicit ingredient grams', async () => {
   const draft = await draftFromVision({
     mealId: 'meal-1',
     mealType: 'LUNCH',
     eatenAt: '2026-08-26T12:00:00.000+08:00',
-    vision: vision([sourceDish('雞肉飯', ['雞肉', '白飯'], { min: 100, max: 200 })]),
+    vision: vision([
+      sourceDish('雞肉飯', ['雞肉', '白飯'], { min: 100, max: 200 }),
+      sourceDish('白飯', ['白飯'], 30),
+    ]),
   }, catalog);
 
-  assert.equal(draft.dishes[0]?.id, 'dish:0');
+  const dishId = draft.dishes[0]!.id;
+  assert.match(dishId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu);
+  assert.notEqual(draft.dishes[0]?.id, draft.dishes[1]?.id);
   assert.equal(draft.dishes[0]?.portionGrams, 150);
   assert.deepEqual(draft.dishes[0]?.ingredients, [{ nameZh: '雞肉', grams: 75 }, { nameZh: '白飯', grams: 75 }]);
 
   const replaced = await replaceDishIngredients(draft, {
     kind: 'replace_ingredients',
-    dishId: 'dish:0',
+    dishId,
     nameZh: '改過的雞肉飯',
     ingredients: [{ nameZh: '雞肉', grams: 35 }, { nameZh: '白飯', grams: 10 }],
   }, catalog);
 
   assert.equal(replaced.dishes[0]?.portionGrams, 45);
+  assert.equal(replaced.dishes[0]?.id, dishId);
   assert.deepEqual(replaced.dishes[0]?.ingredients, [{ nameZh: '雞肉', grams: 35 }, { nameZh: '白飯', grams: 10 }]);
 });
 
@@ -84,24 +91,26 @@ test('replacing one dish discards all of only that dish’s prior nutrient value
       sourceDish('白飯', ['白飯'], 40),
     ]),
   }, catalog);
+  const firstDishId = draft.dishes[0]!.id;
+  const secondDishId = draft.dishes[1]!.id;
   const edited = setDishNutrient(draft, {
-    kind: 'set_nutrient', dishId: 'dish:0', nutrientCode: 'ENERGY', value: 999, unit: 'kcal',
+    kind: 'set_nutrient', dishId: firstDishId, nutrientCode: 'ENERGY', value: 999, unit: 'kcal',
   });
-  const otherBefore = edited.nutrients.filter((item) => item.dishId === 'dish:1');
+  const otherBefore = edited.nutrients.filter((item) => item.dishId === secondDishId);
 
   const replaced = await replaceDishIngredients(edited, {
     kind: 'replace_ingredients',
-    dishId: 'dish:0',
+    dishId: firstDishId,
     nameZh: '白飯',
     ingredients: [{ nameZh: '白飯', grams: 30 }],
   }, catalog);
 
-  const current = replaced.nutrients.filter((item) => item.dishId === 'dish:0');
+  const current = replaced.nutrients.filter((item) => item.dishId === firstDishId);
   assert.deepEqual(current, [
-    { dishId: 'dish:0', nutrientCode: 'ENERGY', value: 30, unit: 'kcal' },
-    { dishId: 'dish:0', nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g' },
+    { dishId: firstDishId, nutrientCode: 'ENERGY', value: 30, unit: 'kcal' },
+    { dishId: firstDishId, nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g' },
   ]);
-  assert.deepEqual(replaced.nutrients.filter((item) => item.dishId === 'dish:1'), otherBefore);
+  assert.deepEqual(replaced.nutrients.filter((item) => item.dishId === secondDishId), otherBefore);
 });
 
 test('edits exactly one existing nutrient and rejects unknown nutrients or dishes', async () => {
@@ -111,18 +120,19 @@ test('edits exactly one existing nutrient and rejects unknown nutrients or dishe
     eatenAt: '2026-08-26T12:00:00.000+08:00',
     vision: vision([sourceDish('雞肉飯', ['雞肉'], 50)]),
   }, catalog);
+  const dishId = draft.dishes[0]!.id;
   const updated = setDishNutrient(draft, {
-    kind: 'set_nutrient', dishId: 'dish:0', nutrientCode: 'PROTEIN', value: 12_500, unit: 'mg',
+    kind: 'set_nutrient', dishId, nutrientCode: 'PROTEIN', value: 12_500, unit: 'mg',
   });
 
-  assert.equal(updated.nutrients.find((item) => item.nutrientCode === 'PROTEIN')?.value, 12_500);
-  assert.equal(updated.nutrients.find((item) => item.nutrientCode === 'PROTEIN')?.unit, 'mg');
+  assert.equal(updated.nutrients.find((item) => item.nutrientCode === 'PROTEIN')?.value, 12.5);
+  assert.equal(updated.nutrients.find((item) => item.nutrientCode === 'PROTEIN')?.unit, 'g');
   assert.deepEqual(
     updated.nutrients.filter((item) => item.nutrientCode !== 'PROTEIN'),
     draft.nutrients.filter((item) => item.nutrientCode !== 'PROTEIN'),
   );
   assert.throws(() => setDishNutrient(draft, {
-    kind: 'set_nutrient', dishId: 'dish:0', nutrientCode: 'ZINC', value: 1, unit: 'mg',
+    kind: 'set_nutrient', dishId, nutrientCode: 'ZINC', value: 1, unit: 'mg',
   }), /unknown nutrient/);
   assert.throws(() => setDishNutrient(draft, {
     kind: 'set_nutrient', dishId: 'missing', nutrientCode: 'PROTEIN', value: 1, unit: 'g',
@@ -140,6 +150,6 @@ test('projects Google-supported nutrients without removing local-only draft fact
   const projection = googlePayloadProjection(draft);
 
   assert.deepEqual(projection.dishes, draft.dishes);
-  assert.deepEqual(projection.nutrients.map((item) => item.nutrientCode), ['ENERGY', 'PROTEIN']);
+  assert.deepEqual(projection.nutrients.map((item) => item.nutrientCode), ['ENERGY', 'PROTEIN', 'FAT']);
   assert.ok(draft.nutrients.some((item) => item.nutrientCode === 'TW_FDA:膽鹼'));
 });

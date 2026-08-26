@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   editableMealDraftSchema,
-  fromInternalNutrientAmount,
   setNutrientPatchSchema,
   toInternalNutrientAmount,
   type EditableDish,
@@ -16,6 +17,7 @@ import type { ResolvedDish } from './ingredient-nutrition';
 
 const GOOGLE_SUPPORTED_NUTRIENTS = new Set([
   'ENERGY',
+  'FAT',
   'BIOTIN',
   'CAFFEINE',
   'CALCIUM',
@@ -99,10 +101,10 @@ function assertDishExists(draft: EditableMealDraft, dishId: string): void {
 }
 
 export async function draftFromVision(input: DraftFromVisionInput, catalog: TwFdaFoodCatalog): Promise<EditableMealDraft> {
-  const dishes = input.vision.foods.map((visionDish, index): EditableDish => {
+  const dishes = input.vision.foods.map((visionDish): EditableDish => {
     const portionGrams = initialDishGrams(visionDish);
     return {
-      id: `dish:${index}`,
+      id: randomUUID(),
       nameZh: visionDish.nameZh,
       ingredients: allocateIngredientGrams(visionDish.ingredients, portionGrams),
       portionGrams,
@@ -150,11 +152,10 @@ export function setDishNutrient(draft: EditableMealDraft, patch: SetNutrientPatc
     throw new Error(`unknown nutrient: ${validatedPatch.nutrientCode}`);
   }
   const internal = toInternalNutrientAmount(validatedPatch.nutrientCode, validatedPatch.value, validatedPatch.unit);
-  const replacement = fromInternalNutrientAmount(validatedPatch.nutrientCode, internal.value, validatedPatch.unit);
   return editableMealDraftSchema.parse({
     ...draft,
     nutrients: draft.nutrients.map((nutrient) => (
-      nutrient === existing ? { ...nutrient, value: replacement.value, unit: replacement.unit } : nutrient
+      nutrient === existing ? { ...nutrient, value: internal.value, unit: internal.unit } : nutrient
     )),
   });
 }
