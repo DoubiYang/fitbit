@@ -163,8 +163,7 @@ export type AuthStore = {
     listIngredients(userId: string, versionId: string): Promise<MealIngredientRow[]>;
     listNutrients(userId: string, versionId: string): Promise<MealNutrientRow[]>;
   };
-  // TODO(Task 4): make these required once the Postgres store persists 009's tables.
-  currentMeals?: CurrentMealStore;
+  currentMeals: CurrentMealStore;
   mealSync?: MealSyncStore;
   connections: {
     findByHealthUserId(healthUserId: string): Promise<ConnectionRow | undefined>;

@@ -2,10 +2,11 @@ import pg from 'pg';
 
 import { randomUUID } from 'node:crypto';
 
+import { editableMealDraftSchema, fromInternalNutrientAmount, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import { parseVisionMeal } from '../../domain/meal-vision';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { MealDraftRow, MealVersionRow, OutboxRow } from '../meals/types';
+import type { CurrentMealSnapshot, CurrentMealStore, CurrentMealSyncState, MealDraftRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
 import type { ConnectionStatus } from '../auth/scopes';
 import { twFdaLookupKeys, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
@@ -21,7 +22,17 @@ function poolFor(databaseUrl: string): pg.Pool {
   return created;
 }
 
-type Queryable = pg.Pool | pg.PoolClient;
+export type PostgresQueryable = {
+  query(text: string, values?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
+};
+
+type Queryable = PostgresQueryable;
+type TransactionClient = PostgresQueryable & { release(): void };
+type TransactionStarter = PostgresQueryable & { connect(): Promise<TransactionClient> };
+
+function canStartTransaction(queryable: Queryable): queryable is TransactionStarter {
+  return typeof (queryable as { connect?: unknown }).connect === 'function';
+}
 
 function asBuffer(value: unknown): Buffer | undefined {
   if (!value) {
@@ -96,6 +107,126 @@ function mapConnection(row: pg.QueryResult['rows'][number]): ConnectionRow {
     syncLeaseUntil: row.sync_lease_until ?? undefined,
     lastSyncAttemptAt: row.last_sync_attempt_at ?? undefined,
   };
+}
+
+const mealTypes = new Set<MealType>(['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']);
+const currentMealSyncStates = new Set<CurrentMealSyncState>(['unsynced', 'syncing', 'synced', 'recovery']);
+
+function parsedEditorForMeal(editor: unknown, mealId: string): EditableMealDraft & { mealType: MealType } {
+  const parsed = editableMealDraftSchema.parse(editor);
+  if (parsed.mealId !== mealId) throw new Error('editor meal id must match current meal id');
+  if (!mealTypes.has(parsed.mealType as MealType)) throw new Error('editor meal type is invalid');
+  return parsed as EditableMealDraft & { mealType: MealType };
+}
+
+function currentMealSnapshotFromEditor(input: {
+  id: string;
+  userId: string;
+  editor: EditableMealDraft;
+  contentRevision: number;
+  syncState: CurrentMealSyncState;
+  lastSyncedGenerationId: string | undefined;
+  createdAt: Date;
+  updatedAt: Date;
+}): CurrentMealSnapshot {
+  const editor = parsedEditorForMeal(input.editor, input.id);
+  return {
+    id: input.id,
+    userId: input.userId,
+    mealType: editor.mealType,
+    eatenAt: new Date(editor.eatenAt),
+    contentRevision: input.contentRevision,
+    syncState: input.syncState,
+    lastSyncedGenerationId: input.lastSyncedGenerationId,
+    dishes: structuredClone(editor.dishes),
+    nutrients: structuredClone(editor.nutrients),
+    createdAt: new Date(input.createdAt),
+    updatedAt: new Date(input.updatedAt),
+  };
+}
+
+function hasMeaningfulCurrentContentChange(current: CurrentMealSnapshot, editor: EditableMealDraft): boolean {
+  return JSON.stringify({
+    mealType: current.mealType,
+    eatenAt: current.eatenAt.toISOString(),
+    dishes: current.dishes,
+    nutrients: current.nutrients,
+  }) !== JSON.stringify({
+    mealType: editor.mealType,
+    eatenAt: editor.eatenAt,
+    dishes: editor.dishes,
+    nutrients: editor.nutrients,
+  });
+}
+
+function asDate(value: unknown, column: string): Date {
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) throw new Error(`invalid ${column}`);
+  return date;
+}
+
+function mapCurrentMealSnapshot(
+  meal: Record<string, unknown>,
+  dishes: Array<Record<string, unknown>>,
+  ingredients: Array<Record<string, unknown>>,
+  nutrients: Array<Record<string, unknown>>,
+): CurrentMealSnapshot {
+  const id = String(meal.id);
+  const userId = String(meal.user_id);
+  const syncState = String(meal.sync_state) as CurrentMealSyncState;
+  if (!mealTypes.has(String(meal.meal_type) as MealType)) throw new Error('invalid current meal type');
+  if (!currentMealSyncStates.has(syncState)) throw new Error('invalid current meal sync state');
+
+  const ingredientsByDish = new Map<string, Array<Record<string, unknown>>>();
+  for (const ingredient of ingredients) {
+    const dishKey = String(ingredient.dish_key);
+    const rows = ingredientsByDish.get(dishKey) ?? [];
+    rows.push(ingredient);
+    ingredientsByDish.set(dishKey, rows);
+  }
+  const nutrientEditorRows = nutrients.map((nutrient) => {
+    const nutrientCode = String(nutrient.nutrient_code);
+    const currentUnit = nutrient.current_unit === 'kcal' ? 'kcal' : nutrient.current_unit === 'g' ? 'g' : undefined;
+    if (!currentUnit) throw new Error('invalid current nutrient unit');
+    const internalValue = currentUnit === 'kcal' ? Number(nutrient.kcal) : Number(nutrient.grams);
+    const amount = fromInternalNutrientAmount(nutrientCode, internalValue, String(nutrient.source_unit) as 'kcal' | 'g' | 'mg' | 'μg');
+    return {
+      dishId: String(nutrient.dish_key),
+      nutrientCode,
+      value: amount.value,
+      unit: amount.unit,
+      source: nutrient.source,
+    };
+  });
+  const editor = parsedEditorForMeal({
+    view: 'draft',
+    mealId: id,
+    mealType: String(meal.meal_type),
+    eatenAt: asDate(meal.eaten_at, 'current_meals.eaten_at').toISOString(),
+    dishes: dishes.map((dish) => ({
+      id: String(dish.dish_key),
+      nameZh: String(dish.name_zh),
+      portionGrams: Number(dish.portion_grams),
+      ingredients: (ingredientsByDish.get(String(dish.dish_key)) ?? []).map((ingredient) => ({
+        nameZh: String(ingredient.name_zh),
+        grams: Number(ingredient.grams),
+        foodSource: ingredient.food_source,
+        foodSourceId: ingredient.food_source_id ?? undefined,
+        foodSourceVersion: ingredient.food_source_version ?? undefined,
+      })),
+    })),
+    nutrients: nutrientEditorRows,
+  }, id);
+  return currentMealSnapshotFromEditor({
+    id,
+    userId,
+    editor,
+    contentRevision: Number(meal.content_revision),
+    syncState,
+    lastSyncedGenerationId: meal.last_synced_generation_id ? String(meal.last_synced_generation_id) : undefined,
+    createdAt: asDate(meal.created_at, 'current_meals.created_at'),
+    updatedAt: asDate(meal.updated_at, 'current_meals.updated_at'),
+  });
 }
 
 function storeFor(queryable: Queryable): AuthStore {
@@ -364,7 +495,7 @@ function storeFor(queryable: Queryable): AuthStore {
       return result.rows.map(mapOutbox);
     },
     async markSynced(input: NutritionOutboxLease) {
-      if (queryable instanceof pg.Pool) {
+      if (canStartTransaction(queryable)) {
         return store.withTransaction((inner) => inner.nutritionOutbox.markSynced(input));
       }
       const result = await queryable.query(
@@ -429,9 +560,232 @@ function storeFor(queryable: Queryable): AuthStore {
     },
   };
 
-  const store: AuthStore = {
+  async function readCurrentMeal(userId: string, mealId: string, lock = false): Promise<CurrentMealSnapshot | undefined> {
+    const meal = await queryable.query(
+      `SELECT * FROM current_meals
+       WHERE id = $1 AND user_id = $2${lock ? ' FOR UPDATE' : ''}`,
+      [mealId, userId],
+    );
+    const row = meal.rows[0];
+    if (!row) return undefined;
+    const dishes = await queryable.query(
+      `SELECT * FROM current_meal_dishes
+       WHERE meal_id = $1 AND user_id = $2
+       ORDER BY dish_key ASC`,
+      [mealId, userId],
+    );
+    const ingredients = await queryable.query(
+      `SELECT * FROM current_meal_ingredients
+       WHERE meal_id = $1 AND user_id = $2
+       ORDER BY dish_key ASC, id ASC`,
+      [mealId, userId],
+    );
+    const nutrients = await queryable.query(
+      `SELECT * FROM current_meal_nutrients
+       WHERE meal_id = $1 AND user_id = $2
+       ORDER BY dish_key ASC, nutrient_code ASC`,
+      [mealId, userId],
+    );
+    return mapCurrentMealSnapshot(row, dishes.rows, ingredients.rows, nutrients.rows);
+  }
+
+  async function writeCurrentChildren(snapshot: CurrentMealSnapshot): Promise<void> {
+    for (const dish of snapshot.dishes) {
+      await queryable.query(
+        `INSERT INTO current_meal_dishes (meal_id, user_id, dish_key, name_zh, portion_grams)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [snapshot.id, snapshot.userId, dish.id, dish.nameZh, dish.portionGrams],
+      );
+      for (const ingredient of dish.ingredients) {
+        await queryable.query(
+          `INSERT INTO current_meal_ingredients (
+            id, meal_id, dish_key, user_id, name_zh, grams, food_source, food_source_id, food_source_version
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          [
+            randomUUID(), snapshot.id, dish.id, snapshot.userId, ingredient.nameZh, ingredient.grams,
+            ingredient.foodSource, ingredient.foodSourceId ?? null, ingredient.foodSourceVersion ?? null,
+          ],
+        );
+      }
+    }
+    for (const nutrient of snapshot.nutrients) {
+      const internal = toInternalNutrientAmount(nutrient.nutrientCode, nutrient.value, nutrient.unit);
+      await queryable.query(
+        `INSERT INTO current_meal_nutrients (
+          meal_id, user_id, dish_key, nutrient_code, grams, kcal, source, source_unit, current_unit
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          snapshot.id,
+          snapshot.userId,
+          nutrient.dishId,
+          nutrient.nutrientCode,
+          internal.unit === 'g' ? internal.value : null,
+          internal.unit === 'kcal' ? internal.value : null,
+          nutrient.source,
+          nutrient.unit,
+          internal.unit,
+        ],
+      );
+    }
+  }
+
+  let store: AuthStore;
+  const currentMeals: CurrentMealStore = {
+    async insertEditorDraft(input) {
+      const editor = parsedEditorForMeal(input.editor, input.id);
+      if (editor.mealType !== input.mealType) throw new Error('editor meal type must match draft meal type');
+      if (new Date(editor.eatenAt).getTime() !== input.eatenAt.getTime()) {
+        throw new Error('editor eaten at must match draft eaten at');
+      }
+      await queryable.query(
+        `INSERT INTO meal_drafts (id, user_id, meal_type, eaten_at, vision, editor, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$7)`,
+        [input.id, input.userId, input.mealType, input.eatenAt, JSON.stringify(input.vision), JSON.stringify(editor), input.now],
+      );
+      return structuredClone(editor);
+    },
+    async findEditorDraft(userId, id) {
+      const result = await queryable.query(
+        `SELECT editor FROM meal_drafts
+         WHERE id = $1 AND user_id = $2 AND editor IS NOT NULL`,
+        [id, userId],
+      );
+      const row = result.rows[0];
+      return row ? parsedEditorForMeal(row.editor, id) : undefined;
+    },
+    async replaceEditorDraft(input) {
+      const editor = parsedEditorForMeal(input.editor, input.id);
+      const result = await queryable.query(
+        `UPDATE meal_drafts
+         SET editor = $3::jsonb, updated_at = $4
+         WHERE id = $1 AND user_id = $2 AND editor IS NOT NULL
+         RETURNING editor`,
+        [input.id, input.userId, JSON.stringify(editor), input.now],
+      );
+      const row = result.rows[0];
+      return row ? parsedEditorForMeal(row.editor, input.id) : undefined;
+    },
+    async saveEditorDraft(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.currentMeals.saveEditorDraft(input));
+      }
+      const draft = await queryable.query(
+        `SELECT id, user_id, editor FROM meal_drafts
+         WHERE id = $1 AND user_id = $2 AND editor IS NOT NULL
+         FOR UPDATE`,
+        [input.draftId, input.userId],
+      );
+      const draftRow = draft.rows[0];
+      if (!draftRow) throw new Error('editor draft not found');
+      const editor = parsedEditorForMeal(draftRow.editor, input.draftId);
+      const existing = await queryable.query(
+        `SELECT id FROM current_meals
+         WHERE id = $1 AND user_id = $2
+         FOR UPDATE`,
+        [input.draftId, input.userId],
+      );
+      if (existing.rows[0]) throw new Error('current meal already exists');
+      const snapshot = currentMealSnapshotFromEditor({
+        id: input.draftId,
+        userId: input.userId,
+        editor,
+        contentRevision: 1,
+        syncState: 'unsynced',
+        lastSyncedGenerationId: undefined,
+        createdAt: input.now,
+        updatedAt: input.now,
+      });
+      await queryable.query(
+        `INSERT INTO current_meals (
+          id, user_id, meal_type, eaten_at, content_revision, sync_state, last_synced_generation_id, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)`,
+        [
+          snapshot.id, snapshot.userId, snapshot.mealType, snapshot.eatenAt, snapshot.contentRevision,
+          snapshot.syncState, null, snapshot.createdAt,
+        ],
+      );
+      await writeCurrentChildren(snapshot);
+      await queryable.query('DELETE FROM meal_drafts WHERE id = $1 AND user_id = $2', [input.draftId, input.userId]);
+      return snapshot;
+    },
+    async findCurrentMeal(userId, id) {
+      return readCurrentMeal(userId, id);
+    },
+    async replaceCurrentMealContent(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.currentMeals.replaceCurrentMealContent(input));
+      }
+      const current = await readCurrentMeal(input.userId, input.mealId, true);
+      if (!current) return undefined;
+      const editor = parsedEditorForMeal(input.editor, input.mealId);
+      if (!hasMeaningfulCurrentContentChange(current, editor)) return current;
+      const next = currentMealSnapshotFromEditor({
+        ...current,
+        editor,
+        contentRevision: current.contentRevision + 1,
+        syncState: 'unsynced',
+        updatedAt: input.now,
+      });
+      await queryable.query(
+        `UPDATE current_meals
+         SET meal_type = $3, eaten_at = $4, content_revision = $5, sync_state = $6, updated_at = $7
+         WHERE id = $1 AND user_id = $2`,
+        [next.id, next.userId, next.mealType, next.eatenAt, next.contentRevision, next.syncState, next.updatedAt],
+      );
+      await queryable.query('DELETE FROM current_meal_dishes WHERE meal_id = $1 AND user_id = $2', [next.id, next.userId]);
+      await writeCurrentChildren(next);
+      return next;
+    },
+    async setCurrentMealNutrient(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.currentMeals.setCurrentMealNutrient(input));
+      }
+      const current = await readCurrentMeal(input.userId, input.mealId, true);
+      if (!current) return undefined;
+      const existing = current.nutrients.find((nutrient) => nutrient.dishId === input.dishId && nutrient.nutrientCode === input.nutrientCode);
+      if (!existing) throw new Error(`unknown nutrient: ${input.nutrientCode}`);
+      const internal = toInternalNutrientAmount(input.nutrientCode, input.value, input.unit);
+      const existingInternal = toInternalNutrientAmount(existing.nutrientCode, existing.value, existing.unit);
+      if (existingInternal.value === internal.value && existingInternal.unit === internal.unit) return current;
+      const updatedNutrient = {
+        ...existing,
+        value: internal.value,
+        unit: internal.unit,
+        source: 'user_edit' as const,
+      };
+      const nutrientUpdate = await queryable.query(
+        `UPDATE current_meal_nutrients
+         SET grams = $5, kcal = $6, source = $7, source_unit = $8, current_unit = $9
+         WHERE meal_id = $1 AND user_id = $2 AND dish_key = $3 AND nutrient_code = $4
+         RETURNING meal_id`,
+        [
+          input.mealId, input.userId, input.dishId, input.nutrientCode,
+          internal.unit === 'g' ? internal.value : null,
+          internal.unit === 'kcal' ? internal.value : null,
+          'user_edit', internal.unit, internal.unit,
+        ],
+      );
+      if (!nutrientUpdate.rows[0]) return undefined;
+      const revision = current.contentRevision + 1;
+      await queryable.query(
+        `UPDATE current_meals
+         SET content_revision = $3, sync_state = 'unsynced', updated_at = $4
+         WHERE id = $1 AND user_id = $2`,
+        [input.mealId, input.userId, revision, input.now],
+      );
+      return {
+        ...current,
+        contentRevision: revision,
+        syncState: 'unsynced',
+        updatedAt: new Date(input.now),
+        nutrients: current.nutrients.map((nutrient) => nutrient === existing ? updatedNutrient : nutrient),
+      };
+    },
+  };
+
+  store = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
-      const pool = queryable instanceof pg.Pool ? queryable : undefined;
+      const pool = canStartTransaction(queryable) ? queryable : undefined;
       if (!pool) {
         return fn(store);
       }
@@ -476,7 +830,7 @@ function storeFor(queryable: Queryable): AuthStore {
         return result.rows[0] ? mapDraft(result.rows[0]) : undefined;
       },
       async confirmDraft(input) {
-        if (queryable instanceof pg.Pool) {
+        if (canStartTransaction(queryable)) {
           return store.withTransaction((inner) => inner.meals.confirmDraft(input));
         }
         const draft = await store.meals.findDraft(input.userId, input.draftId);
@@ -596,6 +950,7 @@ function storeFor(queryable: Queryable): AuthStore {
         }));
       },
     },
+    currentMeals,
     connections,
     sessions: {
       async insert(row: SessionRow): Promise<void> {
@@ -682,7 +1037,12 @@ function storeFor(queryable: Queryable): AuthStore {
 }
 
 export function getPostgresStore(databaseUrl: string): AuthStore {
-  return storeFor(poolFor(databaseUrl));
+  return storeFor(poolFor(databaseUrl) as unknown as PostgresQueryable);
+}
+
+/** Keeps SQL mapping and transaction boundaries testable without a networked database. */
+export function createPostgresStoreForTesting(queryable: PostgresQueryable): AuthStore {
+  return storeFor(queryable);
 }
 
 export function getPool(databaseUrl: string): pg.Pool {
