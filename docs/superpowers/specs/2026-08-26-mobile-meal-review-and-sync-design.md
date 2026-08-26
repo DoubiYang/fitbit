@@ -139,6 +139,7 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 | `POST /api/meals/drafts/:id/ai-suggestions` | 以当前结构化草稿请求 AI；只返回 suggestions，不持久化消息或建议。 |
 | `POST /api/meals/drafts/:id/save` | 保存为本地当前餐食，返回稳定的 `mealId` 和 `未同步` 状态；不建写回 outbox。 |
 | `GET/PATCH /api/meals/:id` | 读取或替换已保存餐食当前值。修改后标为 `有未同步修改`。 |
+| `POST /api/meals/:id/ai-suggestions` | 以已保存餐食的当前结构化数据请求 AI；使用与草稿完全相同的 suggestion schema，不读取照片或旧对话。 |
 | `POST /api/meals/:id/sync` | 明确请求同步这一餐。检查权限后为当前快照入队，不接受批量 ID。 |
 
 服务端是唯一的营养计算权威：前端不能自行计算/合并营养，也不能直接构造 Google payload。营养覆盖和食材编辑必须在同一事务内写入当前餐食，避免保存一半数据。
