@@ -11,7 +11,7 @@ import { recognizeMealPhoto, type VisionClient } from './deepseek-vision';
 import { ingestMealPhoto } from './photo-ingest';
 import { draftFromVision, googlePayloadProjection, replaceDishIngredients, setDishNutrient } from './current-meal';
 import { MealAssistantError, suggestMealEdits, type MealAssistantClient } from './meal-assistant';
-import type { CurrentMealSnapshot, MealType } from './types';
+import { CurrentMealEditLockedError, type CurrentMealSnapshot, type MealType } from './types';
 import type { TwFdaFoodCatalog } from '../nutrition/tw-fda';
 import { mealPatchSchema, type EditableMealDraft, type EditableMealSaved, type MealPatch } from '../../domain/meal-editor';
 
@@ -281,24 +281,25 @@ export async function handleCurrentMeal(request: Request, mealId: string, deps: 
   const session = await requireSession(request, deps, request.method === 'PATCH');
   if (isResponse(session)) return session;
   const userId = session;
-  const current = await deps.store.currentMeals.findCurrentMeal(userId, mealId);
-  if (!current) return response({ error: 'not_found' }, 404);
-  if (request.method === 'GET') return currentMealResponse(current);
-  if (current.syncState === 'syncing' || current.syncState === 'recovery') {
-    return response({ error: 'meal_locked_for_sync', reason: 'sync_in_progress' }, 409);
+  if (request.method === 'GET') {
+    const current = await deps.store.currentMeals.findCurrentMeal(userId, mealId);
+    return current ? currentMealResponse(current) : response({ error: 'not_found' }, 404);
   }
 
   const patch = await requestPatch(request);
   if (!patch) return response({ error: 'invalid_meal_patch' }, 400);
+  const resolvedCatalog = patch.kind === 'replace_ingredients' ? await catalogForUser(userId, deps) : undefined;
+  if (patch.kind === 'replace_ingredients' && !resolvedCatalog) return response({ error: 'nutrition_catalog_unavailable' }, 502);
   try {
-    let updated: CurrentMealSnapshot | undefined;
-    if (patch.kind === 'replace_ingredients') {
-      const resolvedCatalog = await catalogForUser(userId, deps);
-      if (!resolvedCatalog) return response({ error: 'nutrition_catalog_unavailable' }, 502);
-      const editor = await replaceDishIngredients(draftEditor(current), patch, resolvedCatalog.catalog);
-      updated = await deps.store.currentMeals.replaceCurrentMealContent({ userId, mealId, editor, now: nowFor(deps) });
-    } else {
-      updated = await deps.store.currentMeals.setCurrentMealNutrient({
+    const updated = await deps.store.withTransaction(async (store) => {
+      const current = await store.currentMeals.lockCurrentMealForEdit(userId, mealId);
+      if (!current) return undefined;
+      if (current.syncState === 'syncing' || current.syncState === 'recovery') throw new CurrentMealEditLockedError();
+      if (patch.kind === 'replace_ingredients') {
+        const editor = await replaceDishIngredients(draftEditor(current), patch, resolvedCatalog!.catalog);
+        return store.currentMeals.replaceCurrentMealContent({ userId, mealId, editor, now: nowFor(deps) });
+      }
+      return store.currentMeals.setCurrentMealNutrient({
         userId,
         mealId,
         dishId: patch.dishId,
@@ -307,9 +308,12 @@ export async function handleCurrentMeal(request: Request, mealId: string, deps: 
         unit: patch.unit,
         now: nowFor(deps),
       });
-    }
+    });
     return updated ? currentMealResponse(updated) : response({ error: 'not_found' }, 404);
-  } catch {
+  } catch (error) {
+    if (error instanceof CurrentMealEditLockedError) {
+      return response({ error: 'meal_locked_for_sync', reason: 'sync_in_progress' }, 409);
+    }
     return response({ error: 'invalid_meal_patch' }, 400);
   }
 }

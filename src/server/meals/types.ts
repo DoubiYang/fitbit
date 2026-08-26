@@ -26,6 +26,18 @@ export type MealDraftRow = {
 
 export type CurrentMealSyncState = 'unsynced' | 'syncing' | 'synced' | 'recovery';
 
+/**
+ * A current meal becomes immutable while its explicitly requested Google sync
+ * generation is active. Stores throw this after locking the meal row so HTTP
+ * callers can report a stable 409 instead of reverting it to unsynced.
+ */
+export class CurrentMealEditLockedError extends Error {
+  constructor() {
+    super('current meal is locked for sync');
+    this.name = 'CurrentMealEditLockedError';
+  }
+}
+
 /** The latest editable meal only. This intentionally contains neither vision nor remote payloads. */
 export type CurrentMealSnapshot = {
   id: string;
@@ -123,6 +135,8 @@ export type CurrentMealStore = {
   replaceEditorDraft(input: { userId: string; id: string; editor: EditableMealDraft; now: Date }): Promise<EditableMealDraft | undefined>;
   saveEditorDraft(input: { userId: string; draftId: string; now: Date }): Promise<CurrentMealSnapshot>;
   findCurrentMeal(userId: string, id: string): Promise<CurrentMealSnapshot | undefined>;
+  /** Must be called inside AuthStore.withTransaction before changing a saved meal. */
+  lockCurrentMealForEdit(userId: string, id: string): Promise<CurrentMealSnapshot | undefined>;
   replaceCurrentMealContent(input: { userId: string; mealId: string; editor: EditableMealDraft; now: Date }): Promise<CurrentMealSnapshot | undefined>;
   setCurrentMealNutrient(input: {
     userId: string; mealId: string; dishId: string; nutrientCode: string; value: number; unit: 'kcal' | 'g' | 'mg' | 'μg'; now: Date;

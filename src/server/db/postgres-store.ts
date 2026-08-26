@@ -6,7 +6,7 @@ import { editableMealDraftSchema, fromInternalNutrientAmount, toInternalNutrient
 import { parseVisionMeal } from '../../domain/meal-vision';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { CurrentMealSnapshot, CurrentMealStore, CurrentMealSyncState, MealDraftRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
+import { CurrentMealEditLockedError, type CurrentMealSnapshot, type CurrentMealStore, type CurrentMealSyncState, type MealDraftRow, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
 import type { ConnectionStatus } from '../auth/scopes';
 import { twFdaLookupKeys, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
@@ -733,12 +733,16 @@ function storeFor(queryable: Queryable): AuthStore {
     async findCurrentMeal(userId, id) {
       return readCurrentMeal(userId, id);
     },
+    async lockCurrentMealForEdit(userId, id) {
+      return readCurrentMeal(userId, id, true);
+    },
     async replaceCurrentMealContent(input) {
       if (canStartTransaction(queryable)) {
         return store.withTransaction((inner) => inner.currentMeals.replaceCurrentMealContent(input));
       }
       const current = await readCurrentMeal(input.userId, input.mealId, true);
       if (!current) return undefined;
+      if (current.syncState === 'syncing' || current.syncState === 'recovery') throw new CurrentMealEditLockedError();
       const editor = parsedEditorForMeal(input.editor, input.mealId);
       if (!hasMeaningfulCurrentContentChange(current, editor)) return current;
       const next = currentMealSnapshotFromEditor({
@@ -764,6 +768,7 @@ function storeFor(queryable: Queryable): AuthStore {
       }
       const current = await readCurrentMeal(input.userId, input.mealId, true);
       if (!current) return undefined;
+      if (current.syncState === 'syncing' || current.syncState === 'recovery') throw new CurrentMealEditLockedError();
       const existing = current.nutrients.find((nutrient) => nutrient.dishId === input.dishId && nutrient.nutrientCode === input.nutrientCode);
       if (!existing) throw new Error(`unknown nutrient: ${input.nutrientCode}`);
       const internal = toInternalNutrientAmount(input.nutrientCode, input.value, input.unit);

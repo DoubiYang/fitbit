@@ -240,12 +240,18 @@ test('writes require origin and ownership, and saved edits are locked while sync
   await input.store.currentMeals.saveEditorDraft({ userId: input.userId, draftId: 'draft-1', now });
   const lockedStore: AuthStore = {
     ...input.store,
-    currentMeals: {
-      ...input.store.currentMeals,
-      async findCurrentMeal(userId, mealId) {
-        const value = await input.store.currentMeals.findCurrentMeal(userId, mealId);
-        return value ? { ...value, syncState: 'syncing' } : undefined;
-      },
+    async withTransaction(fn) {
+      const transactionStore: AuthStore = {
+        ...input.store,
+        currentMeals: {
+          ...input.store.currentMeals,
+          async lockCurrentMealForEdit(userId, mealId) {
+            const value = await input.store.currentMeals.findCurrentMeal(userId, mealId);
+            return value ? { ...value, syncState: 'syncing' } : undefined;
+          },
+        },
+      };
+      return fn(transactionStore);
     },
   };
   const locked = await handleCurrentMeal(
@@ -256,6 +262,48 @@ test('writes require origin and ownership, and saved edits are locked while sync
   );
   assert.equal(locked.status, 409);
   assert.deepEqual(await locked.json(), { error: 'meal_locked_for_sync', reason: 'sync_in_progress' });
+});
+
+test('a generation that activates after the initial read rejects the saved edit without reverting it to unsynced', async () => {
+  const input = await insertDraft();
+  await input.store.currentMeals.saveEditorDraft({ userId: input.userId, draftId: 'draft-1', now });
+  let persisted = (await input.store.currentMeals.findCurrentMeal(input.userId, 'draft-1'))!;
+  let attemptedMutation = false;
+  const currentMeals = {
+    ...input.store.currentMeals,
+    async findCurrentMeal(userId: string, mealId: string) {
+      return userId === input.userId && mealId === 'draft-1' ? structuredClone(persisted) : undefined;
+    },
+    async lockCurrentMealForEdit(userId: string, mealId: string) {
+      return userId === input.userId && mealId === 'draft-1' ? structuredClone(persisted) : undefined;
+    },
+    async setCurrentMealNutrient() {
+      attemptedMutation = true;
+      persisted = { ...persisted, syncState: 'unsynced' };
+      return structuredClone(persisted);
+    },
+  };
+  const activeGenerationStore: AuthStore = {
+    ...input.store,
+    currentMeals,
+    async withTransaction(fn) {
+      persisted = { ...persisted, syncState: 'syncing' };
+      return fn({ ...input.store, currentMeals });
+    },
+  };
+
+  const response = await handleCurrentMeal(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1', {
+      method: 'PATCH', headers: headers(input.sessionToken, true),
+      body: JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }),
+    }), 'draft-1', deps(activeGenerationStore),
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: 'meal_locked_for_sync', reason: 'sync_in_progress' });
+  assert.equal(attemptedMutation, false);
+  assert.equal(persisted.syncState, 'syncing');
+  assert.equal(persisted.nutrients.find((nutrient) => nutrient.nutrientCode === 'PROTEIN')?.value, 2.8);
 });
 
 test('sync enforces writeback preconditions and only accepts a single locally saved meal', async () => {

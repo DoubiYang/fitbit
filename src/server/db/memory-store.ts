@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { CurrentMealDishRow, CurrentMealIngredientRow, CurrentMealNutrientRow, CurrentMealSnapshot, CurrentMealStore, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealSyncPointRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
+import { CurrentMealEditLockedError, type CurrentMealDishRow, type CurrentMealIngredientRow, type CurrentMealNutrientRow, type CurrentMealSnapshot, type CurrentMealStore, type MealDishRow, type MealDraftRow, type MealIngredientRow, type MealNutrientRow, type MealNutritionProvenanceRow, type MealSyncPointRow, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
 import { resolveExactTwFdaFood, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
 export type MemoryStore = Omit<AuthStore, 'currentMeals'> & {
@@ -367,9 +367,14 @@ export function createMemoryStore(): MemoryStore {
         const snapshot = currentMeals.get(id);
         return snapshot && snapshot.userId === userId ? cloneCurrentMeal(snapshot) : undefined;
       },
+      async lockCurrentMealForEdit(userId, id) {
+        const snapshot = currentMeals.get(id);
+        return snapshot && snapshot.userId === userId ? cloneCurrentMeal(snapshot) : undefined;
+      },
       async replaceCurrentMealContent(input) {
         const current = currentMeals.get(input.mealId);
         if (!current || current.userId !== input.userId) return undefined;
+        if (current.syncState === 'syncing' || current.syncState === 'recovery') throw new CurrentMealEditLockedError();
         const editor = parseEditorForCurrentMeal(input.editor, input.mealId);
         if (!hasMeaningfulCurrentContentChange(current, editor)) return cloneCurrentMeal(current);
         const next: CurrentMealSnapshot = {
@@ -389,6 +394,7 @@ export function createMemoryStore(): MemoryStore {
       async setCurrentMealNutrient(input) {
         const current = currentMeals.get(input.mealId);
         if (!current || current.userId !== input.userId) return undefined;
+        if (current.syncState === 'syncing' || current.syncState === 'recovery') throw new CurrentMealEditLockedError();
         const existing = current.nutrients.find((nutrient) => nutrient.dishId === input.dishId && nutrient.nutrientCode === input.nutrientCode);
         if (!existing) throw new Error(`unknown nutrient: ${input.nutrientCode}`);
         const internal = toInternalNutrientAmount(input.nutrientCode, input.value, input.unit);

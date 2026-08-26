@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import type { EditableMealDraft } from '../../src/domain/meal-editor';
 import { createPostgresStoreForTesting } from '../../src/server/db/postgres-store';
+import { CurrentMealEditLockedError } from '../../src/server/meals/types';
 
 type Query = { text: string; values: unknown[] | undefined };
 type QueryResponse = { rows: Array<Record<string, unknown>>; rowCount?: number } | Error;
@@ -386,4 +387,27 @@ test('does not increment revision when a direct nutrient edit is already the cur
   assert.equal(pool.queries.some((query) => /UPDATE current_meal_nutrients/u.test(query.text)), false);
   assert.equal(pool.queries.some((query) => /UPDATE current_meals/u.test(query.text)), false);
   assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+});
+
+test('rejects a saved content replacement after the row lock observes an active sync generation', async () => {
+  const pool = new RecordingPool([
+    { rows: [] },
+    ...[
+      { rows: [mealRow({ sync_state: 'syncing' })] },
+      { rows: [dishRow()] },
+      { rows: [ingredientRow()] },
+      { rows: nutrientRows() },
+    ],
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+
+  await assert.rejects(
+    store.currentMeals.replaceCurrentMealContent({ userId: 'u1', mealId: 'draft-1', editor: editor(), now }),
+    CurrentMealEditLockedError,
+  );
+
+  assert.match(pool.queries[1]?.text ?? '', /FOR UPDATE/u);
+  assert.equal(pool.queries.some((query) => /UPDATE current_meals/u.test(query.text)), false);
+  assert.equal(pool.queries.at(-1)?.text, 'ROLLBACK');
 });
