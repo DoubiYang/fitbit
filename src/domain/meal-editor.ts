@@ -6,9 +6,16 @@ export type NutritionUnit = z.infer<typeof nutritionUnitSchema>;
 const positiveFiniteNumber = z.number().finite().gt(0);
 const nonNegativeFiniteNumber = z.number().finite().gte(0);
 
-export const editableIngredientSchema = z.object({
+const replaceIngredientSchema = z.object({
   nameZh: z.string().trim().min(1).max(80),
   grams: positiveFiniteNumber,
+}).strict();
+
+/** Read-model ingredients carry resolver provenance; PATCH ingredients intentionally do not. */
+export const editableIngredientSchema = replaceIngredientSchema.extend({
+  foodSource: z.enum(['google_health_food', 'tw_fda', 'unmatched']),
+  foodSourceId: z.string().trim().min(1).max(240).optional(),
+  foodSourceVersion: z.string().trim().min(1).max(240).optional(),
 }).strict();
 
 export const editableDishSchema = z.object({
@@ -24,6 +31,7 @@ export const editableNutrientSchema = z
     nutrientCode: z.string().trim().min(1).max(120),
     value: nonNegativeFiniteNumber,
     unit: nutritionUnitSchema,
+    source: z.enum(['tw_fda', 'user_edit']),
   })
   .superRefine((nutrient, context) => {
     const isEnergy = nutrient.nutrientCode === 'ENERGY';
@@ -43,7 +51,7 @@ export const replaceIngredientsPatchSchema = z.object({
   kind: z.literal('replace_ingredients'),
   dishId: z.string().trim().min(1).max(120),
   nameZh: z.string().trim().min(1).max(120),
-  ingredients: z.array(editableIngredientSchema).min(1).max(40),
+  ingredients: z.array(replaceIngredientSchema).min(1).max(40),
 }).strict();
 
 export const setNutrientPatchSchema = z

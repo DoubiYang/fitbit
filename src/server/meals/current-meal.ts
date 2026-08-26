@@ -14,7 +14,7 @@ import {
 import { isPortionRange, type VisionMeal } from '../../domain/meal-vision';
 import { allocateIngredientGrams } from './ingredient-grams';
 import { isGoogleSupportedNutrient } from './google-nutrition';
-import { resolveEditableTwFdaDishIngredients, type TwFdaFoodCatalog } from '../nutrition/tw-fda';
+import { resolveEditableTwFdaDishIngredients, type EditableTwFdaDish, type TwFdaFoodCatalog } from '../nutrition/tw-fda';
 import type { ResolvedDish } from './ingredient-nutrition';
 
 export type DraftFromVisionInput = {
@@ -39,17 +39,35 @@ function initialDishGrams(dish: VisionMeal['foods'][number]): number {
 function nutrientsFromResolvedDish(dishId: string, resolved: ResolvedDish): EditableNutrient[] {
   const nutrients: EditableNutrient[] = [];
   if (resolved.totals.energyKcal !== undefined) {
-    nutrients.push({ dishId, nutrientCode: 'ENERGY', value: resolved.totals.energyKcal, unit: 'kcal' });
+    nutrients.push({ dishId, nutrientCode: 'ENERGY', value: resolved.totals.energyKcal, unit: 'kcal', source: 'tw_fda' });
   }
   for (const [nutrientCode, value] of Object.entries(resolved.totals.nutrients)) {
-    nutrients.push({ dishId, nutrientCode, value, unit: 'g' });
+    nutrients.push({ dishId, nutrientCode, value, unit: 'g', source: 'tw_fda' });
   }
   return nutrients;
 }
 
-async function resolveEditableDish(dish: EditableDish, catalog: TwFdaFoodCatalog): Promise<EditableNutrient[]> {
+type EditableDishForResolution = Pick<EditableDish, 'id' | 'nameZh' | 'portionGrams'> & EditableTwFdaDish;
+
+async function resolveEditableDish(
+  dish: EditableDishForResolution,
+  catalog: TwFdaFoodCatalog,
+): Promise<{ dish: EditableDish; nutrients: EditableNutrient[] }> {
   const resolved = await resolveEditableTwFdaDishIngredients(dish, catalog);
-  return nutrientsFromResolvedDish(dish.id, resolved);
+  const ingredients = resolved.ingredients.map((ingredient) => {
+    if (!ingredient.foodSource) throw new Error(`resolver did not provide provenance for ${ingredient.nameZh}`);
+    return {
+      nameZh: ingredient.nameZh,
+      grams: ingredient.grams,
+      foodSource: ingredient.foodSource,
+      foodSourceId: ingredient.foodName,
+      foodSourceVersion: ingredient.foodSourceVersion,
+    };
+  });
+  return {
+    dish: { ...dish, ingredients },
+    nutrients: nutrientsFromResolvedDish(dish.id, resolved),
+  };
 }
 
 function assertDishExists(draft: EditableMealDraft, dishId: string): void {
@@ -59,7 +77,7 @@ function assertDishExists(draft: EditableMealDraft, dishId: string): void {
 }
 
 export async function draftFromVision(input: DraftFromVisionInput, catalog: TwFdaFoodCatalog): Promise<EditableMealDraft> {
-  const dishes = input.vision.foods.map((visionDish): EditableDish => {
+  const initialDishes = input.vision.foods.map((visionDish): EditableDishForResolution => {
     const portionGrams = initialDishGrams(visionDish);
     return {
       id: randomUUID(),
@@ -68,7 +86,9 @@ export async function draftFromVision(input: DraftFromVisionInput, catalog: TwFd
       portionGrams,
     };
   });
-  const nutrients = (await Promise.all(dishes.map((dish) => resolveEditableDish(dish, catalog)))).flat();
+  const resolvedDishes = await Promise.all(initialDishes.map((dish) => resolveEditableDish(dish, catalog)));
+  const dishes = resolvedDishes.map((resolved) => resolved.dish);
+  const nutrients = resolvedDishes.flatMap((resolved) => resolved.nutrients);
   return editableMealDraftSchema.parse({
     view: 'draft',
     mealId: input.mealId,
@@ -87,17 +107,17 @@ export async function replaceDishIngredients(
   const validatedPatch = replaceIngredientsPatchSchema.parse(patch);
   assertDishExists(draft, validatedPatch.dishId);
   const portionGrams = validatedPatch.ingredients.reduce((total, ingredient) => total + ingredient.grams, 0);
-  const replacement: EditableDish = {
+  const replacement: EditableDishForResolution = {
     id: validatedPatch.dishId,
     nameZh: validatedPatch.nameZh,
     ingredients: validatedPatch.ingredients,
     portionGrams,
   };
-  const nutrients = await resolveEditableDish(replacement, catalog);
+  const resolved = await resolveEditableDish(replacement, catalog);
   return editableMealDraftSchema.parse({
     ...draft,
-    dishes: draft.dishes.map((dish) => dish.id === validatedPatch.dishId ? replacement : dish),
-    nutrients: [...draft.nutrients.filter((nutrient) => nutrient.dishId !== validatedPatch.dishId), ...nutrients],
+    dishes: draft.dishes.map((dish) => dish.id === validatedPatch.dishId ? resolved.dish : dish),
+    nutrients: [...draft.nutrients.filter((nutrient) => nutrient.dishId !== validatedPatch.dishId), ...resolved.nutrients],
   });
 }
 
@@ -114,7 +134,7 @@ export function setDishNutrient(draft: EditableMealDraft, patch: SetNutrientPatc
   return editableMealDraftSchema.parse({
     ...draft,
     nutrients: draft.nutrients.map((nutrient) => (
-      nutrient === existing ? { ...nutrient, value: internal.value, unit: internal.unit } : nutrient
+      nutrient === existing ? { ...nutrient, value: internal.value, unit: internal.unit, source: 'user_edit' } : nutrient
     )),
   });
 }

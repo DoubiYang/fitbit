@@ -16,11 +16,14 @@ function editorDraft(mealId = 'draft-1'): EditableMealDraft {
       id: 'dish-1',
       nameZh: '雞肉飯',
       portionGrams: 150,
-      ingredients: [{ nameZh: '雞肉', grams: 50 }, { nameZh: '白飯', grams: 100 }],
+      ingredients: [
+        { nameZh: '雞肉', grams: 50, foodSource: 'unmatched', foodSourceId: undefined, foodSourceVersion: undefined },
+        { nameZh: '白飯', grams: 100, foodSource: 'unmatched', foodSourceId: undefined, foodSourceVersion: undefined },
+      ],
     }],
     nutrients: [
-      { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 300, unit: 'kcal' },
-      { dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 25, unit: 'g' },
+      { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 300, unit: 'kcal', source: 'user_edit' },
+      { dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 25, unit: 'g', source: 'user_edit' },
     ],
   };
 }
@@ -77,11 +80,11 @@ test('replacing saved content retains only the current dish nutrients and persis
   const replacement = editorDraft('draft-1');
   replacement.dishes[0] = {
     id: 'dish-1', nameZh: '白飯', portionGrams: 30,
-    ingredients: [{ nameZh: '白飯', grams: 30 }],
+    ingredients: [{ nameZh: '白飯', grams: 30, foodSource: 'unmatched', foodSourceId: undefined, foodSourceVersion: undefined }],
   };
   replacement.nutrients = [
-    { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 30, unit: 'kcal' },
-    { dishId: 'dish-1', nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g' },
+    { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 30, unit: 'kcal', source: 'user_edit' },
+    { dishId: 'dish-1', nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g', source: 'user_edit' },
   ];
   replacement.mealType = 'DINNER';
   replacement.eatenAt = '2026-08-26T18:30:00.000Z';
@@ -129,7 +132,7 @@ test('a direct saved nutrient update changes exactly one current nutrient', asyn
   assert.equal(updated?.contentRevision, 2);
   assert.deepEqual(updated?.nutrients, [
     before.nutrients[0],
-    { dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 12.5, unit: 'g' },
+    { dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 12.5, unit: 'g', source: 'user_edit' },
   ]);
 });
 
@@ -150,4 +153,67 @@ test('a failed memory transaction rolls back a draft save without partial curren
   assert.deepEqual(await store.currentMeals.findEditorDraft('u1', 'draft-1'), editorDraft());
   assert.equal(await store.currentMeals.findCurrentMeal('u1', 'draft-1'), undefined);
   assert.equal(store.currentMealSnapshots().length, 0);
+});
+
+test('a failed memory transaction preserves independently written parent state', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.currentMeals.insertEditorDraft({
+    id: 'draft-1', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: editorDraft(), now,
+  });
+  let transactionSaved!: () => void;
+  let releaseTransaction!: () => void;
+  const saved = new Promise<void>((resolve) => { transactionSaved = resolve; });
+  const release = new Promise<void>((resolve) => { releaseTransaction = resolve; });
+
+  const transaction = store.withTransaction(async (tx) => {
+    if (!tx.currentMeals) throw new Error('memory store must expose current meals');
+    await tx.currentMeals.saveEditorDraft({ userId: 'u1', draftId: 'draft-1', now });
+    transactionSaved();
+    await release;
+    throw new Error('force rollback');
+  });
+  await saved;
+  await store.currentMeals.insertEditorDraft({
+    id: 'draft-2', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: editorDraft('draft-2'), now,
+  });
+  releaseTransaction();
+
+  await assert.rejects(transaction, /force rollback/);
+  assert.deepEqual(await store.currentMeals.findEditorDraft('u1', 'draft-1'), editorDraft());
+  assert.deepEqual(await store.currentMeals.findEditorDraft('u1', 'draft-2'), editorDraft('draft-2'));
+  assert.equal(await store.currentMeals.findCurrentMeal('u1', 'draft-1'), undefined);
+});
+
+test('current ingredient rows retain explicit matched and unmatched resolver provenance', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const editor = editorDraft();
+  editor.dishes[0]!.ingredients = [
+    {
+      nameZh: '雞肉', grams: 50, foodSource: 'tw_fda', foodSourceId: 'CHICKEN', foodSourceVersion: 'source-sha',
+    },
+    {
+      nameZh: '未知食材', grams: 100, foodSource: 'unmatched', foodSourceId: undefined, foodSourceVersion: undefined,
+    },
+  ];
+  await store.currentMeals.insertEditorDraft({
+    id: 'draft-1', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor, now,
+  });
+  await store.currentMeals.saveEditorDraft({ userId: 'u1', draftId: 'draft-1', now });
+
+  assert.deepEqual(store.currentMealIngredients('draft-1'), [
+    {
+      mealId: 'draft-1', userId: 'u1', dishKey: 'dish-1', nameZh: '雞肉', grams: 50,
+      foodSource: 'tw_fda', foodSourceId: 'CHICKEN', foodSourceVersion: 'source-sha',
+    },
+    {
+      mealId: 'draft-1', userId: 'u1', dishKey: 'dish-1', nameZh: '未知食材', grams: 100,
+      foodSource: 'unmatched', foodSourceId: undefined, foodSourceVersion: undefined,
+    },
+  ]);
+  assert.equal(store.currentMealNutrients('draft-1').find((row) => row.nutrientCode === 'ENERGY')?.source, 'user_edit');
 });

@@ -112,7 +112,7 @@ CREATE TABLE meal_sync_points (
   recovery_requested_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (data_point_name),
+  UNIQUE (generation_id, data_point_name),
   CHECK (
     (role = 'delete_target' AND payload IS NULL AND payload_hash IS NULL)
     OR (role = 'create_target' AND payload IS NOT NULL AND payload_hash IS NOT NULL)

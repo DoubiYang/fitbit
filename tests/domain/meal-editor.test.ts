@@ -9,14 +9,18 @@ import {
   fromInternalNutrientAmount,
 } from '../../src/domain/meal-editor';
 
-const ingredients = [{ nameZh: '鸡蛋', grams: 80 }, { nameZh: '番茄', grams: 120 }];
+const patchIngredients = [{ nameZh: '鸡蛋', grams: 80 }, { nameZh: '番茄', grams: 120 }];
+const ingredients = [
+  { nameZh: '鸡蛋', grams: 80, foodSource: 'unmatched' as const, foodSourceId: undefined, foodSourceVersion: undefined },
+  { nameZh: '番茄', grams: 120, foodSource: 'unmatched' as const, foodSourceId: undefined, foodSourceVersion: undefined },
+];
 
 test('accepts replacing a dish ingredient list with positive finite grams', () => {
   const patch = mealPatchSchema.parse({
     kind: 'replace_ingredients',
     dishId: 'dish-1',
     nameZh: '番茄炒蛋',
-    ingredients,
+    ingredients: patchIngredients,
   });
   assert.equal(patch.kind, 'replace_ingredients');
   assert.equal(patch.ingredients[0]?.grams, 80);
@@ -39,6 +43,12 @@ test('rejects unexpected ingredient fields in a replace patch', () => {
     nameZh: '菜',
     ingredients: [{ nameZh: '盐', grams: 1, unexpected: true }],
   }));
+  assert.throws(() => mealPatchSchema.parse({
+    kind: 'replace_ingredients',
+    dishId: 'dish-1',
+    nameZh: '菜',
+    ingredients: [{ nameZh: '盐', grams: 1, foodSource: 'tw_fda' }],
+  }));
 });
 
 test('accepts nutrient patches and rejects invalid energy and mass units', () => {
@@ -59,7 +69,7 @@ test('draft and saved views carry dish and nutrient identity without vision or p
     mealType: 'lunch',
     eatenAt: '2026-08-26T12:00:00.000Z',
     dishes: [{ id: 'dish-1', nameZh: '番茄炒蛋', ingredients, portionGrams: 200 }],
-    nutrients: [{ dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 20, unit: 'g' }],
+    nutrients: [{ dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 20, unit: 'g', source: 'user_edit' }],
   });
   const saved = editableMealSavedSchema.parse({ ...draft, view: 'saved', savedAt: '2026-08-26T00:00:00.000Z' });
   assert.equal(draft.dishes[0]?.id, 'dish-1');
@@ -68,7 +78,7 @@ test('draft and saved views carry dish and nutrient identity without vision or p
   assert.equal(saved.eatenAt, '2026-08-26T12:00:00.000Z');
   assert.equal(saved.nutrients[0]?.dishId, 'dish-1');
   assert.throws(() => editableMealDraftSchema.parse({ ...draft, photoBytes: 'nope' }));
-  assert.throws(() => mealPatchSchema.parse({ kind: 'replace_ingredients', dishId: 'dish-1', nameZh: '菜', portionGrams: 100, ingredients }));
+  assert.throws(() => mealPatchSchema.parse({ kind: 'replace_ingredients', dishId: 'dish-1', nameZh: '菜', portionGrams: 100, ingredients: patchIngredients }));
 });
 
 test('converts mass units safely and keeps energy in kcal', () => {

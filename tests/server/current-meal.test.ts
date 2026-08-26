@@ -68,7 +68,11 @@ test('uses UUID dish IDs and a vision range midpoint only to create initial expl
   assert.match(dishId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu);
   assert.notEqual(draft.dishes[0]?.id, draft.dishes[1]?.id);
   assert.equal(draft.dishes[0]?.portionGrams, 150);
-  assert.deepEqual(draft.dishes[0]?.ingredients, [{ nameZh: '雞肉', grams: 75 }, { nameZh: '白飯', grams: 75 }]);
+  assert.deepEqual(draft.dishes[0]?.ingredients, [
+    { nameZh: '雞肉', grams: 75, foodSource: 'tw_fda', foodSourceId: 'CHICKEN', foodSourceVersion: 'source-sha' },
+    { nameZh: '白飯', grams: 75, foodSource: 'tw_fda', foodSourceId: 'RICE', foodSourceVersion: 'source-sha' },
+  ]);
+  assert.ok(draft.nutrients.every((nutrient) => nutrient.source === 'tw_fda'));
 
   const replaced = await replaceDishIngredients(draft, {
     kind: 'replace_ingredients',
@@ -79,7 +83,10 @@ test('uses UUID dish IDs and a vision range midpoint only to create initial expl
 
   assert.equal(replaced.dishes[0]?.portionGrams, 45);
   assert.equal(replaced.dishes[0]?.id, dishId);
-  assert.deepEqual(replaced.dishes[0]?.ingredients, [{ nameZh: '雞肉', grams: 35 }, { nameZh: '白飯', grams: 10 }]);
+  assert.deepEqual(replaced.dishes[0]?.ingredients, [
+    { nameZh: '雞肉', grams: 35, foodSource: 'tw_fda', foodSourceId: 'CHICKEN', foodSourceVersion: 'source-sha' },
+    { nameZh: '白飯', grams: 10, foodSource: 'tw_fda', foodSourceId: 'RICE', foodSourceVersion: 'source-sha' },
+  ]);
 });
 
 test('replacing one dish discards all of only that dish’s prior nutrient values', async () => {
@@ -108,8 +115,8 @@ test('replacing one dish discards all of only that dish’s prior nutrient value
 
   const current = replaced.nutrients.filter((item) => item.dishId === firstDishId);
   assert.deepEqual(current, [
-    { dishId: firstDishId, nutrientCode: 'ENERGY', value: 30, unit: 'kcal' },
-    { dishId: firstDishId, nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g' },
+    { dishId: firstDishId, nutrientCode: 'ENERGY', value: 30, unit: 'kcal', source: 'tw_fda' },
+    { dishId: firstDishId, nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g', source: 'tw_fda' },
   ]);
   assert.deepEqual(replaced.nutrients.filter((item) => item.dishId === secondDishId), otherBefore);
 });
@@ -185,6 +192,7 @@ test('shares the Google support rule with the current-draft projection without r
       nutrientCode: 'VITAMIN_C',
       value: 0.01,
       unit: 'g' as const,
+      source: 'tw_fda' as const,
     }],
   };
   const projection = googlePayloadProjection(withMicronutrient);

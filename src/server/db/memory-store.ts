@@ -12,8 +12,17 @@ export type MemoryStore = Omit<AuthStore, 'currentMeals'> & {
   seedFoodComposition(foods: LocalTwFdaFood[]): void;
   outboxRows(): OutboxRow[];
   currentMealSnapshots(): CurrentMealSnapshot[];
+  currentMealIngredients(mealId: string): CurrentMealIngredientRow[];
+  currentMealNutrients(mealId: string): CurrentMealNutrientRow[];
   mealSyncPoints(): MealSyncPointRow[];
 };
+
+type MemoryStoreInternals = {
+  snapshotState(): unknown;
+  restoreState(state: unknown): void;
+};
+
+const memoryStoreInternals = new WeakMap<MemoryStore, MemoryStoreInternals>();
 
 function envelopesEqual(left: Buffer | undefined, right: Buffer | undefined): boolean {
   if (!left && !right) {
@@ -124,9 +133,9 @@ export function createMemoryStore(): MemoryStore {
       dishKey: dish.id,
       nameZh: ingredient.nameZh,
       grams: ingredient.grams,
-      foodSource: 'unmatched' as const,
-      foodSourceId: undefined,
-      foodSourceVersion: undefined,
+      foodSource: ingredient.foodSource,
+      foodSourceId: ingredient.foodSourceId,
+      foodSourceVersion: ingredient.foodSourceVersion,
     }))));
     currentNutrients.set(snapshot.id, snapshot.nutrients.map((nutrient) => {
       const internal = toInternalNutrientAmount(nutrient.nutrientCode, nutrient.value, nutrient.unit);
@@ -137,7 +146,7 @@ export function createMemoryStore(): MemoryStore {
         nutrientCode: nutrient.nutrientCode,
         grams: internal.unit === 'g' ? internal.value : undefined,
         kcal: internal.unit === 'kcal' ? internal.value : undefined,
-        source: 'editor',
+        source: nutrient.source,
         sourceUnit: nutrient.unit,
         currentUnit: internal.unit,
       };
@@ -198,11 +207,15 @@ export function createMemoryStore(): MemoryStore {
 
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
-      const state = snapshotState();
+      const child = createMemoryStore();
+      const childInternals = memoryStoreInternals.get(child);
+      if (!childInternals) throw new Error('memory transaction child is unavailable');
+      childInternals.restoreState(snapshotState());
       try {
-        return await fn(store);
+        const result = await fn(child);
+        restoreState(childInternals.snapshotState() as ReturnType<typeof snapshotState>);
+        return result;
       } catch (error) {
-        restoreState(state);
         throw error;
       }
     },
@@ -366,7 +379,7 @@ export function createMemoryStore(): MemoryStore {
             eatenAt: current.eatenAt.toISOString(),
             dishes: structuredClone(current.dishes),
             nutrients: current.nutrients.map((nutrient) => nutrient === existing ? {
-              ...nutrient, value: internal.value, unit: internal.unit,
+              ...nutrient, value: internal.value, unit: internal.unit, source: 'user_edit',
             } : structuredClone(nutrient)),
           },
           now: input.now,
@@ -653,7 +666,7 @@ export function createMemoryStore(): MemoryStore {
     },
   };
 
-  return Object.assign(store, {
+  const memoryStore = Object.assign(store, {
     deletedHealthSnapshotUserIds,
     seedFoodComposition(foods: LocalTwFdaFood[]) {
       foodComposition = structuredClone(foods);
@@ -664,8 +677,21 @@ export function createMemoryStore(): MemoryStore {
     currentMealSnapshots() {
       return [...currentMeals.values()].map(cloneCurrentMeal);
     },
+    currentMealIngredients(mealId: string) {
+      return structuredClone(currentIngredients.get(mealId) ?? []);
+    },
+    currentMealNutrients(mealId: string) {
+      return structuredClone(currentNutrients.get(mealId) ?? []);
+    },
     mealSyncPoints() {
       return [];
     },
   }) as MemoryStore;
+  memoryStoreInternals.set(memoryStore, {
+    snapshotState,
+    restoreState(state) {
+      restoreState(state as ReturnType<typeof snapshotState>);
+    },
+  });
+  return memoryStore;
 }
