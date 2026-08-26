@@ -4,7 +4,7 @@
 
 **Goal:** Turn the existing photo-recognition and meal-persistence foundations into a session-protected, testable flow that can recognize `test.jpg`, persist complete local nutrition provenance, write supported nutrients to Google Health, and calculate conservative DRI reminders.
 
-**Architecture:** The photo route sends an in-memory JPEG/WebP buffer to a server-only `VisionProvider`, stores only validated candidates, and returns a draft. Confirm resolves the user's confirmed dishes through the Google Food catalog, freezes all known local nutrition and provenance, and enqueues an immutable Google payload. A separate worker claims outbox jobs. The reminder service reads only local immutable meal facts, only evaluates complete civil days, and returns `unknown`/`not_eligible` rather than inventing a low-intake result.
+**Architecture:** The photo route sends an in-memory JPEG/WebP buffer to a server-only `VisionProvider`, stores only validated candidates, and returns a draft. A versioned local import of Taiwan FDA food-composition data resolves confirmed dishes; Google Food is not a name-search dependency. Confirm freezes all known local nutrition and provenance, and enqueues an immutable Google payload. A separate worker claims outbox jobs. The reminder service reads only local immutable meal facts, only evaluates complete civil days, and returns `unknown`/`not_eligible` rather than inventing a low-intake result.
 
 **Tech Stack:** Next.js App Router, TypeScript, zod, PostgreSQL/`pg`, node:test/tsx, existing Google OAuth token envelope, Compose workers.
 
@@ -26,6 +26,8 @@
 | `app/api/meals/drafts/[id]/route.ts` | Read only the caller's draft |
 | `app/api/meals/drafts/[id]/confirm/route.ts` | Finalize caller-owned draft |
 | `src/server/meals/google-nutrition.ts` | Canonical anonymous `nutrition-log` projection and hash |
+| `src/server/nutrition/food-composition.ts` | Versioned Taiwan FDA snapshot lookup and explicit alias matching |
+| `scripts/import-tw-fda-food-composition.ts` | Validates and imports a downloaded official source snapshot |
 | `src/server/meals/nutrition-outbox.ts` | Claim, create, reconcile and terminal-state policy |
 | `app/api/internal/nutrition-sync/route.ts` | `SYNC_SECRET`-protected worker endpoint |
 | `worker/nutrition-loop.mjs` | Dedicated nutrition tick runner |
@@ -53,13 +55,13 @@
 
 **Files:**
 - Modify: `src/server/meals/types.ts`, `src/server/meals/confirm-draft.ts`, `src/server/meals/meal-nutrients.ts`, `src/server/meals/ingredient-nutrition.ts`, `src/server/db/memory-store.ts`, `src/server/db/postgres-store.ts`, `src/server/auth/types.ts`
-- Create: `app/api/meals/drafts/[id]/confirm/route.ts`, `db/migrations/006_nutrition_runtime.sql`
+- Create: `src/server/nutrition/food-composition.ts`, `scripts/import-tw-fda-food-composition.ts`, `app/api/meals/drafts/[id]/confirm/route.ts`, `db/migrations/006_nutrition_runtime.sql`
 - Modify: `tests/server/meal-store.test.ts`, `tests/server/meal-nutrients.test.ts`, `tests/server/meal-http.test.ts`
 
-- [ ] **Step 1: Write failing tests.** Confirm should resolve with the current user's refreshed Google token and `createGoogleFoodCatalog`; it must persist the ingredient's stable catalog ID/version, resolver version, visual confidence and known nutrient values. A dish with no Google-supported known nutrition must remain local-only and never become a pending Google write.
+- [ ] **Step 1: Write failing tests.** Confirm resolves only through a versioned local Taiwan FDA snapshot and explicit aliases; it must persist the official stable food ID/version, resolver version, visual confidence and known nutrient values. Ambiguous or missing matches remain unknown. A dish with no Google-supported known nutrition must remain local-only and never become a pending Google write.
 - [ ] **Step 2: Run focused tests and observe the expected failures.**
 - [ ] **Step 3: Make migration and type changes.** Add immutable JSON payload storage, a payload hash, source/provenance columns or a narrowly-scoped provenance table, and an outbox claim lease. Do not rewrite migration `005`; add forward-only `006`.
-- [ ] **Step 4: Implement the minimal confirm path.** Obtain the connection only for the current session user; resolve an access token server-side; create the read-only catalog; calculate local facts from confirmed grams; preserve absent values as unknown, not zero. Set nutrition confidence from the source/visual evidence rather than hard-coding `1`.
+- [ ] **Step 4: Implement the minimal confirm path.** Resolve an explicit local Taiwan FDA food match and calculate facts from confirmed grams; persist source-file version and official ID; preserve absent values as unknown, not zero. The confirm path must not require a Google Food lookup or send an OAuth token to a food resolver. Set nutrition confidence from the source/visual evidence rather than hard-coding `1`.
 - [ ] **Step 5: Verify the focused suite and commit.** `feat: persist complete confirmed meal nutrition`.
 
 ## Task 3: Build and queue the complete Google nutrition projection
@@ -108,6 +110,6 @@
 
 - [ ] **Step 1: Run static and unit verification.** `pnpm lint` and `pnpm test` must exit zero.
 - [ ] **Step 2: Build and start the Compose stack.** `docker compose up --build -d`; check health without exposing secrets.
-- [ ] **Step 3: Complete the existing OAuth sign-in in the browser.** This is required before the session-protected photo route can store a user draft or query that user's Food catalog.
+- [ ] **Step 3: Complete the existing OAuth sign-in in the browser.** This is required before the session-protected photo route can store a user draft and, when enabled, enqueue a Google nutrition writeback; it is not a dependency of local nutrition resolution.
 - [ ] **Step 4: Send `../test.jpg` once through the protected photo route.** Record only response metadata, schema validity, candidate count and latency. Do not log image bytes, data URL, API key or raw Vision response.
 - [ ] **Step 5: Report the real result and any live API contract discrepancy before enabling repeated or automatic uploads.**

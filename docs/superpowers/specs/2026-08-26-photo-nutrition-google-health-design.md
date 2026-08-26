@@ -1,6 +1,6 @@
 # 拍照记餐、完整营养与 Google Health 写回设计
 
-**状态：** 草案（按审查修订中）
+**状态：** 已确认数据源，待实现
 **日期：** 2026-08-26
 **取代范围：** 本文细化 `2026-08-23-03-deepseek-vision-validation-design.md` 中营养计算、完整字段、照片生命周期与 Google Health 写回部分；该旧文的视觉模型评测门槛仍然有效。本文第 4 节的 Vision JSON 为运行时唯一 schema，覆盖旧文第 4 节的 `meal_candidates` 示例。
 
@@ -53,7 +53,7 @@ Browser（一张图，客户端压缩并去 EXIF）
                       ──► 每道菜一条 nutrition-log
 ```
 
-`VisionProvider` 允许替换模型；一期候选仍为 DeepSeek Vision。`NutritionResolver` 是唯一计算营养数值的组件，分两拍（见第 4.3 节）。
+`VisionProvider` 允许替换模型；一期候选仍为 DeepSeek Vision。`NutritionResolver` 是唯一计算营养数值的组件，分两拍（见第 4.3 节），且只从本地版本化食物成分库取数；它不使用 Google Food 作为在线名称检索服务。
 
 AI Coach 是独立的只读消费者：仅能读取用户确认的日/周营养汇总、证据来源和置信度；不能读取照片原文、OAuth token 或直接调用 Google 写入服务。
 
@@ -145,7 +145,18 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 - `meal_ingredients`：菜谱拆解，克数按菜的进食克数缩放，只用于重算和解释，不单独写 Google。
 - `meal_nutrients`：挂在**菜**上，等于食材营养缩放后的合计。写回读这一层。
 
-### 5.2 持久化实体
+### 5.2 一期食物成分数据源与匹配
+
+一期唯一的营养数值权威源是**台湾卫生福利部食品药物管理署「食品营养成分资料集」**。该政府开放资料可下载 CSV、JSON、XML，食物名称以中文为主，字段按每 100 g 给出，并包含维生素、矿物质、脂肪酸等营养成分。导入时建立不可变的本地快照，记录官方整合编号、源文件版本（或取得日期）、文件校验和及每个食物的原始名称；历史餐食永远引用当时快照，不能被后来导入覆盖。
+
+- 一期把简繁转换、同义词和人工维护 alias 用于**候选匹配**，例如「西兰花」→「花椰菜」；它们不改变官方数值和来源 ID。
+- 名称有多个可能命中、食材未命中、或该营养素在官方记录中缺失时，保留 `unknown`。不得从另一个食物、模型记忆或宏量营养素反推微量营养素。
+- Google Food 只用于 Google Health 的读写语义：其 API 为 `list` / `get`，不支持满足本产品需求的按名称在线查询，因此不用作解析器或本地事实来源。
+- USDA FoodData Central、加拿大 CNF、Open Food Facts 都不是一期的数值来源：前两者可在后续作为**显式标识的备用来源**补进口食材；Open Food Facts 仅考虑条码包装食品，且须单独遵守 ODbL。不得在一次菜级合计中无标记混合来源。
+
+来源与许可： [台湾食药署食品营养成分资料集](https://data.gov.tw/en/datasets/8543)、[Google Health nutrition guide](https://developers.google.com/health/data-types/nutrition)、[USDA FoodData Central](https://fdc.nal.usda.gov/api-guide/)、[Open Food Facts data reuse terms](https://support.openfoodfacts.org/help/en-gb/12-donnees-api/94-y-a-t-il-des-conditions-to-use-the-api)。
+
+### 5.3 持久化实体
 
 | 实体 | 内容 | 用途 |
 | --- | --- | --- |
@@ -153,6 +164,9 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 | `meal_drafts` | 候选 JSON、estimate 区间、餐次/时间 | 确认前工作区；无照片 |
 | `meal_versions` | 用户、餐次、时间、确认时间、前一版本、该次是否请求写回 | 「这一餐」的一次确认 |
 | `meal_dishes` | 名称、进食克数、来源、client 短 ID | 一餐多道；每道新 version 都分配新的 `d-{uuid}` |
+| `food_composition_snapshots` | 台湾食药署源文件版本、取得时间、校验和、授权标识 | 版本化导入审计 |
+| `food_composition_foods` / `food_composition_nutrients` | 官方整合编号、中文名称、每 100 g 值、原始单位与快照 ID | 本地唯一数值来源；匹配与计算 |
+| `food_composition_aliases` | 用户/人工维护的中文候选名到官方食物 ID | 可审计的名称匹配；不改变官方数据 |
 | `meal_ingredients` | 食物/菜谱稳定 ID、名称、缩放克数、食物成分库来源与版本、菜谱版本 | 重算、可复现 |
 | `meal_nutrients` | 菜级 nutrient_code、canonical grams/kcal、来源、营养值置信度 | 冻结的本地事实；保留 Google 不支持的扩展代码 |
 | `meal_nutrition_provenance` | 菜级 Resolver 版本、成分库来源/版本、菜谱版本、视觉置信度、每营养素可用性与覆盖说明 | 审计与提醒可解释性；不得把用户确认份量等同于营养值置信度 1 |
@@ -161,7 +175,7 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 
 任何查询按 session `user_id` 过滤。编辑生成新 `meal_version` 和新的一组 `meal_dishes`（含未改动的菜也换新 `d-{uuid}`）。匿名 log 不能 PATCH，未改动的菜也走删旧建新，避免跨版本稳定 ID。
 
-### 5.3 HTTP（均需登录 session，前缀 `/rhythm`）
+### 5.4 HTTP（均需登录 session，前缀 `/rhythm`）
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
@@ -289,7 +303,7 @@ GET /v4/users/me/dataTypes/nutrition-log/dataPoints/d-550e8400-e29b-41d4-a716-44
 
 ### 外部前置
 
-1. 商业授权的中国食物成分数据源；未满足时只交付手工记餐。
+1. 导入经校验的台湾食药署食品营养成分资料集快照；导入缺失或校验失败时，确认仍可保存菜和份量，但所有无法从快照取得的营养字段保持 `unknown`，不得写 Google 营养 log。
 2. VisionProvider 通过旧文 holdout（须含一图多菜）。
 3. 真实 Fitbit Air 账户验证：完整字段、client-provided **完整 name**、GET 恢复、Operation、匿名删再建、一餐多 log。在证明可安全重放之前，`unknown` 不得改成自动 create。
 
