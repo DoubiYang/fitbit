@@ -1,5 +1,5 @@
 import type { VisionMeal } from '../../domain/meal-vision';
-import type { ConfirmMealInput, ConfirmMealResult, CurrentMealStore, MealDraftRow, MealIngredientRow, MealNutrientRow, MealSyncGenerationRow, MealSyncPointRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
+import type { ConfirmMealInput, ConfirmMealResult, CurrentMealStore, MealDraftRow, MealIngredientRow, MealNutrientRow, MealSyncGenerationRow, MealSyncPointRow, MealSyncPointStatus, MealType, MealVersionRow, OutboxRow } from '../meals/types';
 import type { LocalTwFdaFood } from '../nutrition/tw-fda';
 import type { ConnectionStatus } from './scopes';
 
@@ -107,6 +107,13 @@ export type MealSyncPointLease = {
   now: Date;
 };
 
+export type MealSyncGenerationState = {
+  generation: MealSyncGenerationRow;
+  pointStatusCounts: Partial<Record<MealSyncPointStatus, number>>;
+  hasUnknownPoint: boolean;
+  recoveryRequestedAt: Date | undefined;
+};
+
 /** Future sync-worker persistence contract. It deliberately does not surface any UI view. */
 export type MealSyncStore = {
   startGeneration(input: { mealId: string; userId: string; now: Date }): Promise<MealSyncGenerationRow | undefined>;
@@ -115,7 +122,10 @@ export type MealSyncStore = {
   finishPoint(input: MealSyncPointLease): Promise<boolean>;
   retryPoint(input: MealSyncPointLease & { nextAttemptAt: Date; errorCode: string }): Promise<boolean>;
   markPointUnknown(input: MealSyncPointLease & { errorCode: string }): Promise<boolean>;
+  markPointFailedActionRequired(input: MealSyncPointLease & { errorCode: string }): Promise<boolean>;
   markPointOperationPending(input: MealSyncPointLease & { operationName: string; nextAttemptAt: Date }): Promise<boolean>;
+  requestUnknownRecovery(input: { generationId: string; pointId: string; userId: string; now: Date }): Promise<boolean>;
+  readGenerationState(input: { mealId: string; userId: string }): Promise<MealSyncGenerationState | undefined>;
 };
 
 export type SessionRow = {

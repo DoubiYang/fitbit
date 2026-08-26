@@ -104,6 +104,7 @@ export type MealSyncPointRow = {
   lastErrorCode: string | undefined;
   googleOperationName: string | undefined;
   recoveryState: string | undefined;
+  recoveryRequestedAt: Date | undefined;
 };
 
 export type InsertEditorDraftInput = {

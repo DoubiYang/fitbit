@@ -66,7 +66,7 @@ test('saving an editor draft removes its raw draft and creates one unsynced curr
   assert.deepEqual(store.mealSyncPoints(), []);
 });
 
-test('replacing saved content retains only the current dish nutrients and increments the revision', async () => {
+test('replacing saved content retains only the current dish nutrients and persists changed meal type/time', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.currentMeals.insertEditorDraft({
@@ -83,14 +83,33 @@ test('replacing saved content retains only the current dish nutrients and increm
     { dishId: 'dish-1', nutrientCode: 'ENERGY', value: 30, unit: 'kcal' },
     { dishId: 'dish-1', nutrientCode: 'CARBOHYDRATES', value: 7.5, unit: 'g' },
   ];
+  replacement.mealType = 'DINNER';
+  replacement.eatenAt = '2026-08-26T18:30:00.000Z';
 
   const updated = await store.currentMeals.replaceCurrentMealContent({ userId: 'u1', mealId: 'draft-1', editor: replacement, now });
 
   assert.equal(updated?.contentRevision, 2);
   assert.equal(updated?.syncState, 'unsynced');
+  assert.equal(updated?.mealType, 'DINNER');
+  assert.equal(updated?.eatenAt.toISOString(), '2026-08-26T18:30:00.000Z');
   assert.deepEqual(updated?.nutrients, replacement.nutrients);
   assert.deepEqual(store.currentMealSnapshots()[0]?.nutrients, replacement.nutrients);
   assert.equal(store.currentMealSnapshots()[0]?.nutrients.some((row) => row.nutrientCode === 'PROTEIN'), false);
+});
+
+test('editor draft identity and meal type must agree with its stored current-meal identity', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+
+  await assert.rejects(store.currentMeals.insertEditorDraft({
+    id: 'draft-1', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: editorDraft('another-meal'), now,
+  }), /editor meal id/);
+  await assert.rejects(store.currentMeals.insertEditorDraft({
+    id: 'draft-1', userId: 'u1', mealType: 'MIDNIGHT' as never, eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] },
+    editor: { ...editorDraft(), mealType: 'MIDNIGHT' }, now,
+  }), /meal type/);
 });
 
 test('a direct saved nutrient update changes exactly one current nutrient', async () => {

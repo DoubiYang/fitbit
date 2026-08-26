@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { CurrentMealDishRow, CurrentMealIngredientRow, CurrentMealNutrientRow, CurrentMealSnapshot, CurrentMealStore, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealSyncPointRow, MealVersionRow, OutboxRow } from '../meals/types';
+import type { CurrentMealDishRow, CurrentMealIngredientRow, CurrentMealNutrientRow, CurrentMealSnapshot, CurrentMealStore, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealSyncPointRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
 import { resolveExactTwFdaFood, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
 export type MemoryStore = Omit<AuthStore, 'currentMeals'> & {
@@ -62,8 +62,24 @@ function cloneCurrentMeal(row: CurrentMealSnapshot): CurrentMealSnapshot {
   };
 }
 
+const mealTypes = new Set<MealType>(['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']);
+
+function parseEditorForCurrentMeal(editor: EditableMealDraft, mealId: string): EditableMealDraft & { mealType: MealType } {
+  const parsed = editableMealDraftSchema.parse(editor);
+  if (parsed.mealId !== mealId) throw new Error('editor meal id must match current meal id');
+  if (!mealTypes.has(parsed.mealType as MealType)) throw new Error('editor meal type is invalid');
+  return parsed as EditableMealDraft & { mealType: MealType };
+}
+
 function hasMeaningfulCurrentContentChange(current: CurrentMealSnapshot, editor: EditableMealDraft): boolean {
-  return JSON.stringify({ dishes: current.dishes, nutrients: current.nutrients }) !== JSON.stringify({
+  return JSON.stringify({
+    mealType: current.mealType,
+    eatenAt: current.eatenAt.toISOString(),
+    dishes: current.dishes,
+    nutrients: current.nutrients,
+  }) !== JSON.stringify({
+    mealType: editor.mealType,
+    eatenAt: editor.eatenAt,
     dishes: editor.dishes,
     nutrients: editor.nutrients,
   });
@@ -256,7 +272,11 @@ export function createMemoryStore(): MemoryStore {
     },
     currentMeals: {
       async insertEditorDraft(input) {
-        const editor = editableMealDraftSchema.parse(input.editor);
+        const editor = parseEditorForCurrentMeal(input.editor, input.id);
+        if (editor.mealType !== input.mealType) throw new Error('editor meal type must match draft meal type');
+        if (new Date(editor.eatenAt).getTime() !== input.eatenAt.getTime()) {
+          throw new Error('editor eaten at must match draft eaten at');
+        }
         const row: MealDraftRow = {
           id: input.id,
           userId: input.userId,
@@ -279,7 +299,7 @@ export function createMemoryStore(): MemoryStore {
       async replaceEditorDraft(input) {
         const draft = drafts.get(input.id);
         if (!draft || draft.userId !== input.userId || !editorDrafts.has(input.id)) return undefined;
-        const editor = editableMealDraftSchema.parse(input.editor);
+        const editor = parseEditorForCurrentMeal(input.editor, input.id);
         drafts.set(input.id, { ...draft, updatedAt: new Date(input.now) });
         editorDrafts.set(input.id, structuredClone(editor));
         return structuredClone(editor);
@@ -291,8 +311,8 @@ export function createMemoryStore(): MemoryStore {
         const snapshot: CurrentMealSnapshot = {
           id: draft.id,
           userId: draft.userId,
-          mealType: draft.mealType,
-          eatenAt: new Date(draft.eatenAt),
+          mealType: parseEditorForCurrentMeal(editor, draft.id).mealType,
+          eatenAt: new Date(editor.eatenAt),
           contentRevision: 1,
           syncState: 'unsynced',
           lastSyncedGenerationId: undefined,
@@ -314,10 +334,12 @@ export function createMemoryStore(): MemoryStore {
       async replaceCurrentMealContent(input) {
         const current = currentMeals.get(input.mealId);
         if (!current || current.userId !== input.userId) return undefined;
-        const editor = editableMealDraftSchema.parse(input.editor);
+        const editor = parseEditorForCurrentMeal(input.editor, input.mealId);
         if (!hasMeaningfulCurrentContentChange(current, editor)) return cloneCurrentMeal(current);
         const next: CurrentMealSnapshot = {
           ...current,
+          mealType: editor.mealType,
+          eatenAt: new Date(editor.eatenAt),
           dishes: structuredClone(editor.dishes),
           nutrients: structuredClone(editor.nutrients),
           contentRevision: current.contentRevision + 1,
