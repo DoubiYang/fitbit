@@ -35,6 +35,27 @@ function editor(mealId = 'draft-1'): EditableMealDraft {
   };
 }
 
+function editorWithTwoDishes(): EditableMealDraft {
+  const draft = editor();
+  draft.dishes[0] = {
+    ...draft.dishes[0]!,
+    ingredients: [
+      draft.dishes[0]!.ingredients[0]!,
+      { nameZh: '白飯', grams: 30, foodSource: 'unmatched', foodSourceId: undefined, foodSourceVersion: undefined },
+    ],
+  };
+  draft.dishes.push({
+    id: 'dish-2',
+    nameZh: '豆腐',
+    portionGrams: 80,
+    ingredients: [{
+      nameZh: '豆腐', grams: 80, foodSource: 'tw_fda', foodSourceId: 'V0200202', foodSourceVersion: 'fda-sha',
+    }],
+  });
+  draft.nutrients.push({ dishId: 'dish-2', nutrientCode: 'ENERGY', value: 60, unit: 'kcal', source: 'tw_fda' });
+  return draft;
+}
+
 function mealRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 'draft-1',
@@ -107,6 +128,31 @@ function currentMealReadResponses(): QueryResponse[] {
     { rows: [dishRow()] },
     { rows: [ingredientRow()] },
     { rows: nutrientRows() },
+  ];
+}
+
+function twoDishCurrentMealReadResponses(): QueryResponse[] {
+  return [
+    { rows: [mealRow()] },
+    { rows: [dishRow(), { meal_id: 'draft-1', user_id: 'u1', dish_key: 'dish-2', name_zh: '豆腐', portion_grams: '80.000' }] },
+    { rows: [
+      ingredientRow(),
+      {
+        meal_id: 'draft-1', user_id: 'u1', dish_key: 'dish-1', name_zh: '白飯', grams: '30.000',
+        food_source: 'unmatched', food_source_id: null, food_source_version: null,
+      },
+      {
+        meal_id: 'draft-1', user_id: 'u1', dish_key: 'dish-2', name_zh: '豆腐', grams: '80.000',
+        food_source: 'tw_fda', food_source_id: 'V0200202', food_source_version: 'fda-sha',
+      },
+    ] },
+    { rows: [
+      ...nutrientRows(),
+      {
+        meal_id: 'draft-1', user_id: 'u1', dish_key: 'dish-2', nutrient_code: 'ENERGY', grams: null, kcal: '60.000',
+        source: 'tw_fda', source_unit: 'kcal', current_unit: 'kcal',
+      },
+    ] },
   ];
 }
 
@@ -195,6 +241,55 @@ test('does not replace children or increment revision when saved content is unch
   const store = createPostgresStoreForTesting(pool);
 
   const unchanged = await store.currentMeals.replaceCurrentMealContent({ userId: 'u1', mealId: 'draft-1', editor: editor(), now });
+
+  assert.equal(unchanged?.contentRevision, 1);
+  assert.equal(pool.queries.some((query) => /DELETE FROM current_meal_dishes/u.test(query.text)), false);
+  assert.equal(pool.queries.some((query) => /UPDATE current_meals/u.test(query.text)), false);
+  assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+});
+
+test('does not replace current content when the editor uses a different offset for the same instant', async () => {
+  const pool = new RecordingPool([
+    { rows: [] },
+    ...currentMealReadResponses(),
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+  const sameInstant = editor();
+  sameInstant.eatenAt = '2026-08-26T20:00:00.000+08:00';
+
+  const unchanged = await store.currentMeals.replaceCurrentMealContent({
+    userId: 'u1', mealId: 'draft-1', editor: sameInstant, now,
+  });
+
+  assert.equal(unchanged?.contentRevision, 1);
+  assert.equal(pool.queries.some((query) => /DELETE FROM current_meal_dishes/u.test(query.text)), false);
+  assert.equal(pool.queries.some((query) => /UPDATE current_meals/u.test(query.text)), false);
+  assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+});
+
+test('does not replace current content when dishes, ingredients, and nutrients are only reordered', async () => {
+  const pool = new RecordingPool([
+    { rows: [] },
+    ...twoDishCurrentMealReadResponses(),
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+  const reordered = editorWithTwoDishes();
+  reordered.dishes = reordered.dishes
+    .map((dish) => ({ ...dish, ingredients: [...dish.ingredients].reverse() }))
+    .reverse();
+  reordered.nutrients = [...reordered.nutrients].reverse();
+
+  const unchanged = await store.currentMeals.replaceCurrentMealContent({
+    userId: 'u1', mealId: 'draft-1', editor: reordered, now,
+  });
 
   assert.equal(unchanged?.contentRevision, 1);
   assert.equal(pool.queries.some((query) => /DELETE FROM current_meal_dishes/u.test(query.text)), false);

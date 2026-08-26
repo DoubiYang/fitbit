@@ -146,17 +146,39 @@ function currentMealSnapshotFromEditor(input: {
 }
 
 function hasMeaningfulCurrentContentChange(current: CurrentMealSnapshot, editor: EditableMealDraft): boolean {
-  return JSON.stringify({
-    mealType: current.mealType,
-    eatenAt: current.eatenAt.toISOString(),
-    dishes: current.dishes,
-    nutrients: current.nutrients,
-  }) !== JSON.stringify({
-    mealType: editor.mealType,
-    eatenAt: editor.eatenAt,
-    dishes: editor.dishes,
-    nutrients: editor.nutrients,
+  const normalize = (meal: Pick<EditableMealDraft, 'mealType' | 'dishes' | 'nutrients'> & { eatenAt: Date | string }) => ({
+    mealType: meal.mealType,
+    eatenAtMs: new Date(meal.eatenAt).getTime(),
+    dishes: meal.dishes
+      .map((dish) => ({
+        id: dish.id,
+        nameZh: dish.nameZh,
+        portionGrams: dish.portionGrams,
+        ingredients: dish.ingredients
+          .map((ingredient) => ({
+            nameZh: ingredient.nameZh,
+            grams: ingredient.grams,
+            foodSource: ingredient.foodSource,
+            foodSourceId: ingredient.foodSourceId ?? null,
+            foodSourceVersion: ingredient.foodSourceVersion ?? null,
+          }))
+          .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    nutrients: meal.nutrients
+      .map((nutrient) => {
+        const internal = toInternalNutrientAmount(nutrient.nutrientCode, nutrient.value, nutrient.unit);
+        return {
+          dishId: nutrient.dishId,
+          nutrientCode: nutrient.nutrientCode,
+          value: internal.value,
+          unit: internal.unit,
+          source: nutrient.source,
+        };
+      })
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
   });
+  return JSON.stringify(normalize(current)) !== JSON.stringify(normalize(editor));
 }
 
 function asDate(value: unknown, column: string): Date {
