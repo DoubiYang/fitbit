@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   editableMealDraftSchema,
+  replaceIngredientsPatchSchema,
   setNutrientPatchSchema,
   toInternalNutrientAmount,
   type EditableDish,
@@ -12,52 +13,9 @@ import {
 } from '../../domain/meal-editor';
 import { isPortionRange, type VisionMeal } from '../../domain/meal-vision';
 import { allocateIngredientGrams } from './ingredient-grams';
+import { isGoogleSupportedNutrient } from './google-nutrition';
 import { resolveEditableTwFdaDishIngredients, type TwFdaFoodCatalog } from '../nutrition/tw-fda';
 import type { ResolvedDish } from './ingredient-nutrition';
-
-const GOOGLE_SUPPORTED_NUTRIENTS = new Set([
-  'ENERGY',
-  'FAT',
-  'BIOTIN',
-  'CAFFEINE',
-  'CALCIUM',
-  'CHLORIDE',
-  'CARBOHYDRATES',
-  'CHOLESTEROL',
-  'CHROMIUM',
-  'COPPER',
-  'DIETARY_FIBER',
-  'FOLIC_ACID',
-  'FOLATE',
-  'IODINE',
-  'IRON',
-  'MAGNESIUM',
-  'MANGANESE',
-  'MOLYBDENUM',
-  'MONOUNSATURATED_FAT',
-  'NIACIN',
-  'PANTOTHENIC_ACID',
-  'PHOSPHORUS',
-  'POLYUNSATURATED_FAT',
-  'POTASSIUM',
-  'PROTEIN',
-  'RIBOFLAVIN',
-  'SATURATED_FAT',
-  'SELENIUM',
-  'SODIUM',
-  'SUGAR',
-  'THIAMIN',
-  'TRANS_FAT',
-  'UNSATURATED_FAT',
-  'VITAMIN_A',
-  'VITAMIN_B12',
-  'VITAMIN_B6',
-  'VITAMIN_C',
-  'VITAMIN_D',
-  'VITAMIN_E',
-  'VITAMIN_K',
-  'ZINC',
-]);
 
 export type DraftFromVisionInput = {
   mealId: string;
@@ -126,19 +84,20 @@ export async function replaceDishIngredients(
   patch: ReplaceIngredientsPatch,
   catalog: TwFdaFoodCatalog,
 ): Promise<EditableMealDraft> {
-  assertDishExists(draft, patch.dishId);
-  const portionGrams = patch.ingredients.reduce((total, ingredient) => total + ingredient.grams, 0);
+  const validatedPatch = replaceIngredientsPatchSchema.parse(patch);
+  assertDishExists(draft, validatedPatch.dishId);
+  const portionGrams = validatedPatch.ingredients.reduce((total, ingredient) => total + ingredient.grams, 0);
   const replacement: EditableDish = {
-    id: patch.dishId,
-    nameZh: patch.nameZh,
-    ingredients: patch.ingredients,
+    id: validatedPatch.dishId,
+    nameZh: validatedPatch.nameZh,
+    ingredients: validatedPatch.ingredients,
     portionGrams,
   };
   const nutrients = await resolveEditableDish(replacement, catalog);
   return editableMealDraftSchema.parse({
     ...draft,
-    dishes: draft.dishes.map((dish) => dish.id === patch.dishId ? replacement : dish),
-    nutrients: [...draft.nutrients.filter((nutrient) => nutrient.dishId !== patch.dishId), ...nutrients],
+    dishes: draft.dishes.map((dish) => dish.id === validatedPatch.dishId ? replacement : dish),
+    nutrients: [...draft.nutrients.filter((nutrient) => nutrient.dishId !== validatedPatch.dishId), ...nutrients],
   });
 }
 
@@ -164,7 +123,7 @@ export function googlePayloadProjection(draft: EditableMealDraft): GooglePayload
   return {
     dishes: draft.dishes.map((dish) => ({ ...dish, ingredients: dish.ingredients.map((ingredient) => ({ ...ingredient })) })),
     nutrients: draft.nutrients
-      .filter((nutrient) => GOOGLE_SUPPORTED_NUTRIENTS.has(nutrient.nutrientCode))
+      .filter((nutrient) => isGoogleSupportedNutrient(nutrient.nutrientCode))
       .map((nutrient) => ({ ...nutrient })),
   };
 }

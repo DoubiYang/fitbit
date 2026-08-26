@@ -8,6 +8,7 @@ import {
   replaceDishIngredients,
   setDishNutrient,
 } from '../../src/server/meals/current-meal';
+import { isGoogleSupportedNutrient } from '../../src/server/meals/google-nutrition';
 import type { LocalTwFdaFood, TwFdaFoodCatalog } from '../../src/server/nutrition/tw-fda';
 
 const foods: Record<string, LocalTwFdaFood> = {
@@ -113,6 +114,36 @@ test('replacing one dish discards all of only that dish’s prior nutrient value
   assert.deepEqual(replaced.nutrients.filter((item) => item.dishId === secondDishId), otherBefore);
 });
 
+test('rejects invalid ingredient replacement patches before reading the food catalog', async () => {
+  const draft = await draftFromVision({
+    mealId: 'meal-1',
+    mealType: 'LUNCH',
+    eatenAt: '2026-08-26T12:00:00.000+08:00',
+    vision: vision([sourceDish('雞肉飯', ['雞肉'], 50)]),
+  }, catalog);
+  let catalogCalls = 0;
+  const countedCatalog: TwFdaFoodCatalog = {
+    async findExact(nameZh) {
+      catalogCalls += 1;
+      return foods[nameZh];
+    },
+  };
+  const invalidIngredient = {
+    kind: 'replace_ingredients',
+    dishId: draft.dishes[0]!.id,
+    nameZh: '雞肉飯',
+    ingredients: [{ nameZh: '雞肉', grams: 50, unexpected: true }],
+  };
+
+  await assert.rejects(
+    replaceDishIngredients(draft, invalidIngredient as never, countedCatalog),
+  );
+  await assert.rejects(
+    replaceDishIngredients(draft, { ...invalidIngredient, kind: 'set_nutrient' } as never, countedCatalog),
+  );
+  assert.equal(catalogCalls, 0);
+});
+
 test('edits exactly one existing nutrient and rejects unknown nutrients or dishes', async () => {
   const draft = await draftFromVision({
     mealId: 'meal-1',
@@ -139,7 +170,7 @@ test('edits exactly one existing nutrient and rejects unknown nutrients or dishe
   }), /unknown dish/);
 });
 
-test('projects Google-supported nutrients without removing local-only draft facts', async () => {
+test('shares the Google support rule with the current-draft projection without removing local-only facts', async () => {
   const draft = await draftFromVision({
     mealId: 'meal-1',
     mealType: 'LUNCH',
@@ -147,9 +178,24 @@ test('projects Google-supported nutrients without removing local-only draft fact
     vision: vision([sourceDish('雞肉飯', ['雞肉'], 50)]),
   }, catalog);
 
-  const projection = googlePayloadProjection(draft);
+  const withMicronutrient = {
+    ...draft,
+    nutrients: [...draft.nutrients, {
+      dishId: draft.dishes[0]!.id,
+      nutrientCode: 'VITAMIN_C',
+      value: 0.01,
+      unit: 'g' as const,
+    }],
+  };
+  const projection = googlePayloadProjection(withMicronutrient);
 
   assert.deepEqual(projection.dishes, draft.dishes);
-  assert.deepEqual(projection.nutrients.map((item) => item.nutrientCode), ['ENERGY', 'PROTEIN', 'FAT']);
+  assert.deepEqual(projection.nutrients.map((item) => item.nutrientCode), ['ENERGY', 'PROTEIN', 'FAT', 'VITAMIN_C']);
+  for (const nutrientCode of ['ENERGY', 'FAT', 'VITAMIN_C', 'TW_FDA:膽鹼']) {
+    assert.equal(
+      projection.nutrients.some((nutrient) => nutrient.nutrientCode === nutrientCode),
+      isGoogleSupportedNutrient(nutrientCode),
+    );
+  }
   assert.ok(draft.nutrients.some((item) => item.nutrientCode === 'TW_FDA:膽鹼'));
 });
