@@ -3,10 +3,11 @@ import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 
 import { parseVisionMeal } from '../../domain/meal-vision';
-import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
+import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import type { MealDraftRow, MealVersionRow } from '../meals/types';
+import type { MealDraftRow, MealVersionRow, OutboxRow } from '../meals/types';
 import type { ConnectionStatus } from '../auth/scopes';
+import { twFdaLookupKeys, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
 const pools = new Map<string, pg.Pool>();
 
@@ -50,6 +51,25 @@ function mapVersion(row: pg.QueryResult['rows'][number]): MealVersionRow {
     eatenAt: row.eaten_at,
     writebackThisMeal: row.writeback_this_meal,
     confirmedAt: row.confirmed_at,
+  };
+}
+
+function mapOutbox(row: pg.QueryResult['rows'][number]): OutboxRow {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    dishId: row.dish_id,
+    operation: row.operation,
+    dataPointName: row.data_point_name,
+    payload: row.payload ?? undefined,
+    payloadHash: row.payload_hash ?? undefined,
+    status: row.status,
+    attemptCount: row.attempt_count ?? 0,
+    nextAttemptAt: row.next_attempt_at ?? undefined,
+    leaseUntil: row.lease_until ?? undefined,
+    lastAttemptAt: row.last_attempt_at ?? undefined,
+    lastErrorCode: row.last_error_code ?? undefined,
+    googleOperationName: row.google_operation_name ?? undefined,
   };
 }
 
@@ -264,6 +284,151 @@ function storeFor(queryable: Queryable): AuthStore {
     },
   };
 
+  const foodComposition = {
+    async findExactFood(nameZh: string): Promise<LocalTwFdaFood | undefined> {
+      const lookupKeys = twFdaLookupKeys(nameZh);
+      if (lookupKeys.length === 0) {
+        return undefined;
+      }
+      const candidates = await queryable.query(
+        `SELECT DISTINCT food.*
+         FROM food_composition_aliases AS alias
+         JOIN food_composition_foods AS food
+           ON food.source_revision = alias.source_revision
+          AND food.official_food_id = alias.official_food_id
+         JOIN food_composition_sources AS source
+           ON source.source_revision = food.source_revision
+         WHERE source.is_current = true
+           AND alias.normalized_alias = ANY($1)
+         ORDER BY food.official_food_id ASC`,
+        [lookupKeys],
+      );
+      if (candidates.rows.length !== 1) {
+        return undefined;
+      }
+      const food = candidates.rows[0]!;
+      const [aliases, nutrients] = await Promise.all([
+        queryable.query(
+          `SELECT display_alias
+           FROM food_composition_aliases
+           WHERE source_revision = $1 AND official_food_id = $2
+           ORDER BY display_alias ASC`,
+          [food.source_revision, food.official_food_id],
+        ),
+        queryable.query(
+          `SELECT official_nutrient_name, raw_unit, per_100g_value
+           FROM food_composition_nutrients
+           WHERE source_revision = $1 AND official_food_id = $2
+           ORDER BY official_nutrient_name ASC`,
+          [food.source_revision, food.official_food_id],
+        ),
+      ]);
+      return {
+        sourceRevision: food.source_revision,
+        officialFoodId: food.official_food_id,
+        nameZh: food.name_zh,
+        aliases: aliases.rows.map((row) => row.display_alias),
+        nutrients: nutrients.rows.map((row) => ({
+          officialName: row.official_nutrient_name,
+          rawUnit: row.raw_unit,
+          per100gValue: Number(row.per_100g_value),
+        })),
+      };
+    },
+  };
+
+  const nutritionOutbox = {
+    async claimDue(input: { now: Date; leaseUntil: Date; limit: number }): Promise<OutboxRow[]> {
+      const result = await queryable.query(
+        `WITH due AS (
+           SELECT id
+           FROM nutrition_write_outbox
+           WHERE status IN ('write_pending', 'retrying', 'operation_pending')
+             AND (next_attempt_at IS NULL OR next_attempt_at <= $1)
+             AND (lease_until IS NULL OR lease_until <= $1)
+           ORDER BY COALESCE(next_attempt_at, created_at) ASC, id ASC
+           FOR UPDATE SKIP LOCKED
+           LIMIT $3
+         )
+         UPDATE nutrition_write_outbox AS outbox
+         SET lease_until = $2,
+             last_attempt_at = $1,
+             next_attempt_at = NULL,
+             attempt_count = outbox.attempt_count + 1,
+             updated_at = $1
+         FROM due
+         WHERE outbox.id = due.id
+         RETURNING outbox.*`,
+        [input.now, input.leaseUntil, input.limit],
+      );
+      return result.rows.map(mapOutbox);
+    },
+    async markSynced(input: NutritionOutboxLease) {
+      if (queryable instanceof pg.Pool) {
+        return store.withTransaction((inner) => inner.nutritionOutbox.markSynced(input));
+      }
+      const result = await queryable.query(
+        `UPDATE nutrition_write_outbox
+         SET status = 'synced', lease_until = NULL, next_attempt_at = NULL,
+             last_error_code = NULL, updated_at = $4
+         WHERE id = $1 AND user_id = $2 AND lease_until = $3
+         RETURNING dish_id, user_id, data_point_name`,
+        [input.id, input.userId, input.leaseUntil, input.now],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        return false;
+      }
+      await queryable.query(
+        `INSERT INTO google_nutrition_links (dish_id, user_id, data_point_name)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (dish_id) DO UPDATE SET data_point_name = EXCLUDED.data_point_name`,
+        [row.dish_id, row.user_id, row.data_point_name],
+      );
+      return true;
+    },
+    async markRetrying(input: NutritionOutboxLease & { nextAttemptAt: Date; errorCode: string }) {
+      const result = await queryable.query(
+        `UPDATE nutrition_write_outbox
+         SET status = 'retrying', lease_until = NULL, next_attempt_at = $4,
+             last_error_code = $5, updated_at = $6
+         WHERE id = $1 AND user_id = $2 AND lease_until = $3`,
+        [input.id, input.userId, input.leaseUntil, input.nextAttemptAt, input.errorCode, input.now],
+      );
+      return result.rowCount === 1;
+    },
+    async markFailedActionRequired(input: NutritionOutboxLease & { errorCode: string }) {
+      const result = await queryable.query(
+        `UPDATE nutrition_write_outbox
+         SET status = 'failed_action_required', lease_until = NULL, next_attempt_at = NULL,
+             last_error_code = $4, updated_at = $5
+         WHERE id = $1 AND user_id = $2 AND lease_until = $3`,
+        [input.id, input.userId, input.leaseUntil, input.errorCode, input.now],
+      );
+      return result.rowCount === 1;
+    },
+    async markUnknown(input: NutritionOutboxLease & { errorCode: string }) {
+      const result = await queryable.query(
+        `UPDATE nutrition_write_outbox
+         SET status = 'unknown', lease_until = NULL, next_attempt_at = NULL,
+             last_error_code = $4, updated_at = $5
+         WHERE id = $1 AND user_id = $2 AND lease_until = $3`,
+        [input.id, input.userId, input.leaseUntil, input.errorCode, input.now],
+      );
+      return result.rowCount === 1;
+    },
+    async markOperationPending(input: NutritionOutboxLease & { operationName: string; nextAttemptAt: Date }) {
+      const result = await queryable.query(
+        `UPDATE nutrition_write_outbox
+         SET status = 'operation_pending', lease_until = NULL, next_attempt_at = $4,
+             google_operation_name = $5, last_error_code = NULL, updated_at = $6
+         WHERE id = $1 AND user_id = $2 AND lease_until = $3`,
+        [input.id, input.userId, input.leaseUntil, input.nextAttemptAt, input.operationName, input.now],
+      );
+      return result.rowCount === 1;
+    },
+  };
+
   const store: AuthStore = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
       const pool = queryable instanceof pg.Pool ? queryable : undefined;
@@ -467,6 +632,8 @@ function storeFor(queryable: Queryable): AuthStore {
         await queryable.query('DELETE FROM health_snapshots WHERE user_id = $1', [userId]);
       },
     },
+    foodComposition,
+    nutritionOutbox,
     transactions: {
       async insert(row: OauthTransactionRow): Promise<void> {
         await queryable.query(

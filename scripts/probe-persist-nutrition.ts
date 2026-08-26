@@ -3,8 +3,10 @@ import path from 'node:path';
 
 import { loadConfig } from '../src/server/config/env';
 import { ensurePostgresReady, getPool } from '../src/server/db/postgres-store';
-import { createGoogleTokenRefresher, resolveAccessToken } from '../src/server/health/access-token';
-import { createGoogleFoodCatalog, displayNutrients } from '../src/server/meals/google-food';
+
+function displayNutrients(nutrients: Record<string, number>): Record<string, number> {
+  return Object.fromEntries(Object.entries(nutrients).map(([code, value]) => [code, Number(value.toFixed(6))]));
+}
 
 function loadEnvFile(filePath: string): void {
   for (const line of readFileSync(filePath, 'utf8').split('\n')) {
@@ -44,16 +46,6 @@ async function main(): Promise<void> {
   if (!userId) {
     throw new Error('no connection');
   }
-  const connection = await store.connections.findByUserId(userId);
-  if (!connection) {
-    throw new Error('connection missing');
-  }
-  const accessToken = await resolveAccessToken({
-    config,
-    store,
-    connection,
-    refresher: createGoogleTokenRefresher(config),
-  });
   const now = new Date();
   const draft = await store.meals.insertDraft({
     userId,
@@ -101,7 +93,7 @@ async function main(): Promise<void> {
     canWriteNutrition: false,
     connectionSyncable: true,
     now,
-    catalog: createGoogleFoodCatalog(accessToken),
+    catalog: { findExact: (nameZh) => store.foodComposition.findExactFood(nameZh) },
   });
   if (!confirmed.ok) {
     throw new Error(confirmed.reason);

@@ -7,7 +7,8 @@
     "build": "next build",
     "lint": "tsc --noEmit",
     "test": "tsx --test",
-    "test:watch": "tsx --test --watch"
+    "test:watch": "tsx --test --watch",
+    "import:tw-fda": "tsx scripts/import-tw-fda-food-composition.ts"
   },
   "dependencies": {
     "google-auth-library": "^11.0.2",
@@ -15,6 +16,7 @@
     "pg": "^8.23.0",
     "react": "latest",
     "react-dom": "latest",
+    "sharp": "^0.35.3",
     "zod": "latest"
   },
   "devDependencies": {

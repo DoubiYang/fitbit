@@ -28,6 +28,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      nutrition-import:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -50,4 +52,30 @@ services:
       SYNC_ENDPOINT: http://app:3000/rhythm/api/internal/sync
     depends_on:
       app:
+        condition: service_healthy
+
+  nutrition-sync:
+    build: .
+    command: ['node', 'worker/nutrition-loop.mjs']
+    restart: unless-stopped
+    env_file: .env.local
+    environment:
+      NUTRITION_SYNC_ENDPOINT: http://app:3000/rhythm/api/internal/nutrition-sync
+    depends_on:
+      app:
+        condition: service_healthy
+
+  nutrition-import:
+    build:
+      context: .
+      target: build
+    command: ['pnpm', 'import:tw-fda', '--', 'data/tw-fda/food-composition.json.zip']
+    restart: 'no'
+    env_file: .env.local
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_USER: rhythm
+      POSTGRES_DB: rhythm
+    depends_on:
+      db:
         condition: service_healthy

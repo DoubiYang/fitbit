@@ -1,5 +1,6 @@
 import type { VisionMeal } from '../../domain/meal-vision';
-import type { ConfirmMealInput, ConfirmMealResult, MealDraftRow, MealIngredientRow, MealNutrientRow, MealType, MealVersionRow } from '../meals/types';
+import type { ConfirmMealInput, ConfirmMealResult, MealDraftRow, MealIngredientRow, MealNutrientRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
+import type { LocalTwFdaFood } from '../nutrition/tw-fda';
 import type { ConnectionStatus } from './scopes';
 
 export type TokenEnvelopeFields = {
@@ -79,6 +80,19 @@ export type SyncLeaseRelease = {
   now: Date;
 };
 
+export type NutritionOutboxClaim = {
+  now: Date;
+  leaseUntil: Date;
+  limit: number;
+};
+
+export type NutritionOutboxLease = {
+  id: string;
+  userId: string;
+  leaseUntil: Date;
+  now: Date;
+};
+
 export type SessionRow = {
   id: string;
   userId: string;
@@ -134,6 +148,17 @@ export type AuthStore = {
   };
   healthSnapshots: {
     deleteForUser(userId: string): Promise<void>;
+  };
+  foodComposition: {
+    findExactFood(nameZh: string): Promise<LocalTwFdaFood | undefined>;
+  };
+  nutritionOutbox: {
+    claimDue(input: NutritionOutboxClaim): Promise<OutboxRow[]>;
+    markSynced(input: NutritionOutboxLease): Promise<boolean>;
+    markRetrying(input: NutritionOutboxLease & { nextAttemptAt: Date; errorCode: string }): Promise<boolean>;
+    markFailedActionRequired(input: NutritionOutboxLease & { errorCode: string }): Promise<boolean>;
+    markUnknown(input: NutritionOutboxLease & { errorCode: string }): Promise<boolean>;
+    markOperationPending(input: NutritionOutboxLease & { operationName: string; nextAttemptAt: Date }): Promise<boolean>;
   };
   transactions: {
     insert(row: OauthTransactionRow): Promise<void>;

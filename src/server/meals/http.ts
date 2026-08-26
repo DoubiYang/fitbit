@@ -4,13 +4,12 @@ import { readSessionUserId } from '../auth/oauth-service';
 import { canWriteNutrition } from '../auth/scopes';
 import type { AuthStore } from '../auth/types';
 import type { OAuthConfig } from '../config/env';
-import { createGoogleTokenRefresher, resolveAccessToken } from '../health/access-token';
 
 import { estimateDish } from './nutrition-resolver';
 import { recognizeMealPhoto, type VisionClient } from './deepseek-vision';
-import { createGoogleFoodCatalog, type GoogleFoodCatalog } from './google-food';
 import { ingestMealPhoto } from './photo-ingest';
 import type { MealType } from './types';
+import type { TwFdaFoodCatalog } from '../nutrition/tw-fda';
 
 const MAX_MULTIPART_BYTES = 4 * 1024 * 1024 + 64 * 1024;
 const MEAL_TYPES = new Set<MealType>(['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']);
@@ -24,7 +23,7 @@ export type MealHttpDeps = {
 };
 
 type ConfirmCatalog = {
-  catalog: GoogleFoodCatalog | undefined;
+  catalog: TwFdaFoodCatalog;
   canWriteNutrition: boolean;
   connectionSyncable: boolean;
 };
@@ -43,20 +42,10 @@ function syncable(status: string): boolean {
 
 async function defaultCatalogForUser(userId: string, deps: MealHttpDeps): Promise<ConfirmCatalog> {
   const connection = await deps.store.connections.findByUserId(userId);
-  if (!connection || !syncable(connection.status)) {
-    return { catalog: undefined, canWriteNutrition: false, connectionSyncable: false };
-  }
-  const accessToken = await resolveAccessToken({
-    config: deps.config,
-    store: deps.store,
-    connection,
-    refresher: createGoogleTokenRefresher(deps.config),
-    now: deps.now?.(),
-  });
   return {
-    catalog: createGoogleFoodCatalog(accessToken),
-    canWriteNutrition: canWriteNutrition(connection.grantedScopes),
-    connectionSyncable: true,
+    catalog: { findExact: (nameZh) => deps.store.foodComposition.findExactFood(nameZh) },
+    canWriteNutrition: Boolean(connection && syncable(connection.status) && canWriteNutrition(connection.grantedScopes)),
+    connectionSyncable: Boolean(connection && syncable(connection.status)),
   };
 }
 
@@ -119,7 +108,7 @@ export async function handleMealPhoto(request: Request, deps: MealHttpDeps): Pro
   }
 
   try {
-    const photo = ingestMealPhoto(bytes);
+    const photo = await ingestMealPhoto(bytes);
     const vision = await recognizeMealPhoto(photo, deps.config.deepseekApiKey, deps.vision);
     const draft = await deps.store.meals.insertDraft({ userId, mealType, eatenAt, vision, now: deps.now?.() ?? new Date() });
     return response(

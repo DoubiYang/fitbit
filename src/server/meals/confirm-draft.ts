@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { dishesReadyToConfirm } from '../../domain/meal-confirm';
 import { isPortionRange } from '../../domain/meal-vision';
-import type { GoogleFoodCatalog } from './google-food';
-import { resolveDishIngredients, type ResolvedDish } from './ingredient-nutrition';
+import type { ResolvedDish } from './ingredient-nutrition';
 import { factsFromResolvedDish } from './meal-nutrients';
 import { buildGoogleNutritionDataPoint } from './google-nutrition';
 import type { ConfirmMealInput, ConfirmMealResult, MealDishRow, MealDraftRow, MealIngredientRow, MealNutrientRow, MealNutritionProvenanceRow, MealVersionRow, OutboxRow } from './types';
+import { resolveTwFdaDishIngredients, type TwFdaFoodCatalog } from '../nutrition/tw-fda';
 
 export function nutritionDataPointName(shortId: string): string {
   return `users/me/dataTypes/nutrition-log/dataPoints/${shortId}`;
@@ -14,12 +14,12 @@ export function nutritionDataPointName(shortId: string): string {
 
 export async function resolveDraftNutrition(
   draft: MealDraftRow,
-  catalog: GoogleFoodCatalog | undefined,
+  catalog: TwFdaFoodCatalog | undefined,
 ): Promise<ResolvedDish[]> {
   if (!catalog) {
     return [];
   }
-  return Promise.all(draft.vision.foods.map((food) => resolveDishIngredients(food, catalog)));
+  return Promise.all(draft.vision.foods.map((food) => resolveTwFdaDishIngredients(food, catalog)));
 }
 
 export function confirmDraftRows(

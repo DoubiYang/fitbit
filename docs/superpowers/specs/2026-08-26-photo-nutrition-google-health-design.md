@@ -139,6 +139,8 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 
 标签命名对齐 `GB 28050-2025`。个人目标与「是否偏低」提醒用《中国居民膳食营养素参考摄入量（2023）》的 RNI、AI、UL，不用统一 NRV；规则见 [微量营养素摄入提醒设计](2026-08-26-micronutrient-intake-reminder-design.md)。不断言医学缺乏。Google Health 支持的微量营养素与脂肪细分也写入 `nutrition-log.nutrients[]`；仅 API 不支持的本地扩展代码留在 `meal_nutrients`。
 
+同一 Google 代码存在台湾资料集的「总量／当量／组成」多种字段时，本地仍保存全部原始事实，但投影只取不重复的一组：维生素 A 优先 `視網醇當量(RE)` 而非 `視網醇`；维生素 D 优先 `維生素D總量(ug)`，缺总量时才相加 D2 与 D3；维生素 E 依序优先 `α-維生素E當量(α-TE)`、总量、α-生育酚；维生素 K 没有总量字段时相加 K1、MK-4、MK-7。这样每个 Google 营养代码既尽量完整，又不会把总量和组成重复写回。
+
 **菜与食材：**
 
 - `meal_dishes.portion_grams`：用户确认的**这道菜进食克数**。Google 一条 log 对应这一行的营养合计。
@@ -147,12 +149,13 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 
 ### 5.2 一期食物成分数据源与匹配
 
-一期唯一的营养数值权威源是**台湾卫生福利部食品药物管理署「食品营养成分资料集」**。该政府开放资料可下载 CSV、JSON、XML，食物名称以中文为主，字段按每 100 g 给出，并包含维生素、矿物质、脂肪酸等营养成分。仓库只维护一份当前原始文件 `data/tw-fda/food-composition.json.zip` 和对应 `manifest.json`；数据更新时在同一个 Git commit 中替换两者，由 Git 历史而非并存目录保存旧版本。manifest 记录官方 URL、取得时间、校验和、官方整合编号和解析器版本；餐食记录保存对应 Git commit / 校验和，保证历史可追溯。
+一期唯一的营养数值权威源是**台湾卫生福利部食品药物管理署「食品营养成分资料集」**。该政府开放资料可下载 CSV、JSON、XML，食物名称以中文为主，字段按每 100 g 给出，并包含维生素、矿物质、脂肪酸等营养成分。仓库只维护一份当前原始文件 `data/tw-fda/food-composition.json.zip` 和对应 `manifest.json`；数据更新时在同一个 Git commit 中替换两者，由 Git 历史而非并存目录保存旧版本。manifest 记录官方 URL、取得时间、校验和、压缩包成员、解析器版本和已验证的导入计数；餐食记录保存该快照 SHA-256，Git 提交历史按该文件校验和提供审计关联，保证历史可追溯。
 
-- 一期把简繁转换、同义词和人工维护 alias 用于**候选匹配**，例如「西兰花」→「花椰菜」；它们不改变官方数值和来源 ID。
+- 一期把简繁转换、同义词和人工维护 alias 用于**候选匹配**，例如「西兰花」→「青花菜（2021年取样）」；它们不改变官方数值和来源 ID。
 - 名称有多个可能命中、食材未命中、或该营养素在官方记录中缺失时，保留 `unknown`。不得从另一个食物、模型记忆或宏量营养素反推微量营养素。
 - Google Food 只用于 Google Health 的读写语义：其 API 为 `list` / `get`，不支持满足本产品需求的按名称在线查询，因此不用作解析器或本地事实来源。
 - USDA FoodData Central、加拿大 CNF、Open Food Facts 都不是一期的数值来源：前两者可在后续作为**显式标识的备用来源**补进口食材；Open Food Facts 仅考虑条码包装食品，且须单独遵守 ODbL。不得在一次菜级合计中无标记混合来源。
+- 标准 Compose 启动先运行一次性 `nutrition-import`：它校验 ZIP SHA-256、执行 migration，并只在当前快照的记录数、食物数和营养事实数都与 manifest 一致时跳过导入。`app` 必须等待该服务成功；空库或部分导入不得启动为可用状态。
 
 来源与许可： [台湾食药署食品营养成分资料集](https://data.gov.tw/en/datasets/8543)、[Google Health nutrition guide](https://developers.google.com/health/data-types/nutrition)、[USDA FoodData Central](https://fdc.nal.usda.gov/api-guide/)、[Open Food Facts data reuse terms](https://support.openfoodfacts.org/help/en-gb/12-donnees-api/94-y-a-t-il-des-conditions-to-use-the-api)。
 
@@ -164,7 +167,7 @@ Vision 必须按「道」拆开。包装食品的条码、产品名、标签营�
 | `meal_drafts` | 候选 JSON、estimate 区间、餐次/时间 | 确认前工作区；无照片 |
 | `meal_versions` | 用户、餐次、时间、确认时间、前一版本、该次是否请求写回 | 「这一餐」的一次确认 |
 | `meal_dishes` | 名称、进食克数、来源、client 短 ID | 一餐多道；每道新 version 都分配新的 `d-{uuid}` |
-| `food_composition_sources` | 台湾食药署文件的 Git commit、取得时间、校验和、授权标识 | 当前源与历史餐食的版本化审计 |
+| `food_composition_sources` | 台湾食药署文件的校验和、来源 URL、授权标识、导入时间与 current 标志 | 当前源与历史餐食的版本化审计；Git 提交由同一 SHA-256 在仓库历史中关联 |
 | `food_composition_foods` / `food_composition_nutrients` | 官方整合编号、中文名称、每 100 g 值、原始单位与快照 ID | 本地唯一数值来源；匹配与计算 |
 | `food_composition_aliases` | 用户/人工维护的中文候选名到官方食物 ID | 可审计的名称匹配；不改变官方数据 |
 | `meal_ingredients` | 食物/菜谱稳定 ID、名称、缩放克数、食物成分库来源与版本、菜谱版本 | 重算、可复现 |
@@ -259,6 +262,8 @@ GET /v4/users/me/dataTypes/nutrition-log/dataPoints/d-550e8400-e29b-41d4-a716-44
 ## 7. 可靠性状态机
 
 确认与该餐要创建的 outbox 同一 PostgreSQL 事务提交。写回 worker 是 Compose 服务 `nutrition-sync`（`node worker/nutrition-loop.mjs`），每分钟 `POST /rhythm/api/internal/nutrition-sync`；与健康同步 `sync` 服务分开，不共用 15 分钟连接 lease。可共用 `SYNC_SECRET`。
+
+每个 nutrition outbox 认领后持有两分钟 lease。Google create、Operation 查询和精确名称 GET 都带 AbortSignal，单次请求默认最多 30 秒；即使依次经历 token、create 和恢复 GET 也留有 lease 余量。超时 create 立即以完整 data point name 做一次 GET 恢复，之后进入 `synced` 或 `unknown`，绝不让下一个 worker 自动重发。
 
 状态挂在**每一道菜的 outbox** 上：
 

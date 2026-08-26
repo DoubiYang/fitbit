@@ -89,7 +89,7 @@ async function loadNutritionAccessToken(): Promise<
 
 async function main(): Promise<void> {
   const imagePath = path.resolve(process.cwd(), '..', 'test.jpg');
-  const ingested = ingestMealPhoto(readFileSync(imagePath));
+  const ingested = await ingestMealPhoto(readFileSync(imagePath));
   const meal = await recognizeMealPhoto(ingested, apiKey);
 
   let foodProbe: unknown = undefined;
