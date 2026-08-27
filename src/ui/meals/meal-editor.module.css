@@ -1,0 +1,323 @@
+.page {
+:global(.mealEditor__shell) {
+  width: min(100%, 72rem);
+  min-width: 20rem;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 7.5rem;
+  color: #172826;
+}
+
+:global(.mealEditor__header),
+:global(.mealEditor__uploadCard),
+:global(.mealEditor__card),
+:global(.mealEditor__aiCard),
+:global(.mealEditor__mainColumn),
+:global(.mealEditor__aiColumn),
+:global(.mealEditor__nutrientGroups),
+:global(.mealEditor__dishList),
+:global(.mealEditor__ingredientEditor),
+:global(.mealEditor__messages),
+:global(.mealEditor__aiForm),
+:global(.mealEditor__suggestionList) {
+  display: grid;
+  gap: 1rem;
+}
+
+:global(.mealEditor__header) { max-width: 48rem; }
+
+:global(.mealEditor__backLink),
+:global(.mealEditor__textButton) {
+  width: fit-content;
+  min-height: 2.75rem;
+  padding: 0.6rem 0;
+  color: #1f6b57;
+  background: transparent;
+  text-decoration: underline;
+}
+
+:global(.mealEditor__eyebrow) {
+  color: #3b625e;
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+:global(.mealEditor__header) h1,
+:global(.mealEditor__card) h2,
+:global(.mealEditor__aiCard) h2,
+:global(.mealEditor__fullScreenDialog) h2,
+:global(.mealEditor__bottomSheet) h2 {
+  margin: 0;
+  letter-spacing: -0.04em;
+}
+
+:global(.mealEditor__header) h1 { font-size: clamp(1.8rem, 8vw, 3rem); line-height: 1.05; }
+:global(.mealEditor__card) h2, :global(.mealEditor__aiCard) h2 { font-size: 1.3rem; }
+
+:global(.mealEditor__lede),
+:global(.mealEditor__sectionHeading) > p,
+:global(.mealEditor__dishCard) p,
+:global(.mealEditor__aiCard) > p,
+:global(.mealEditor__dialogHint),
+:global(.mealEditor__suggestionImpact),
+:global(.mealEditor__statusText) {
+  margin: 0;
+  color: #49615d;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+:global(.mealEditor__titleRow),
+:global(.mealEditor__sectionHeading),
+:global(.mealEditor__dishCard),
+:global(.mealEditor__groupToggle),
+:global(.mealEditor__nutrientRow),
+:global(.mealEditor__dialogHeader),
+:global(.mealEditor__dialogActions),
+:global(.mealEditor__ingredientRow),
+:global(.mealEditor__nutrientEditControls),
+:global(.mealEditor__actionBar) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+:global(.mealEditor__titleRow) { align-items: flex-start; }
+
+:global(.mealEditor__syncBadge) {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 999px;
+  color: #415752;
+  background: #e7f3ee;
+  font-size: 0.75rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+:global(.mealEditor__syncBadge)[data-state='draft'] { color: #365d87; background: #e6eff9; }
+:global(.mealEditor__syncBadge)[data-state='unsynced'], :global(.mealEditor__syncBadge)[data-state='recovery'] { color: #804906; background: #f6e7ca; }
+:global(.mealEditor__syncBadge)[data-state='syncing'] { color: #365d87; background: #e6eff9; }
+:global(.mealEditor__syncBadge)[data-state='synced'] { color: #195c46; background: #d9efe4; }
+
+:global(.mealEditor__lockNotice),
+:global(.mealEditor__notice),
+:global(.mealEditor__error),
+:global(.mealEditor__warning) {
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 0.7rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+:global(.mealEditor__lockNotice), :global(.mealEditor__warning) { color: #804906; background: #fff4df; }
+:global(.mealEditor__notice) { color: #195c46; background: #eaf7ef; }
+:global(.mealEditor__error) { color: #8e2f24; background: #fff0ed; }
+
+:global(.mealEditor__uploadCard),
+:global(.mealEditor__card),
+:global(.mealEditor__aiCard) {
+  padding: 1rem;
+  border: 1px solid #c7d2cc;
+  border-radius: 1rem;
+  background: #fff;
+  box-shadow: 0 0.5rem 1.75rem rgb(41 83 72 / 6%);
+}
+
+:global(.mealEditor__uploadCard) { max-width: 42rem; margin-top: 1.25rem; }
+
+:global(.mealEditor__fileLabel),
+:global(.mealEditor__inputLabel),
+:global(.mealEditor__fieldGrid) > label,
+:global(.mealEditor__consent) {
+  display: grid;
+  gap: 0.45rem;
+  color: #314c47;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+:global(.mealEditor__fileLabel) {
+  min-height: 8rem;
+  place-content: center;
+  padding: 1rem;
+  border: 1px dashed #8bb6a6;
+  border-radius: 0.85rem;
+  text-align: center;
+}
+
+:global(.mealEditor__fileLabel) input { max-width: 100%; font: inherit; font-weight: 500; }
+
+:global(.mealEditor__photoPreview),
+:global(.mealEditor__reviewPreview) {
+  display: block;
+  width: 100%;
+  max-height: 18rem;
+  object-fit: cover;
+  border-radius: 0.85rem;
+}
+
+:global(.mealEditor__reviewPreview) { max-width: 22rem; }
+
+:global(.mealEditor__fieldGrid) { display: grid; grid-template-columns: 1fr; gap: 0.85rem; }
+
+input,
+select,
+textarea {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid #aebfb9;
+  border-radius: 0.65rem;
+  color: #172826;
+  background: #fff;
+  font: inherit;
+}
+
+textarea { min-height: 6.25rem; resize: vertical; }
+
+button {
+  min-height: 2.75rem;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.65rem 1rem;
+  color: #f6f4ee;
+  background: #1f6b57;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: #185846; }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 3px solid #de8f2a; outline-offset: 2px; }
+
+:global(.mealEditor__secondaryButton) { color: #1f6b57; background: #e7f3ee; }
+:global(.mealEditor__secondaryButton):hover:not(:disabled) { background: #d5e9e0; }
+:global(.mealEditor__textButton):hover:not(:disabled) { background: transparent; color: #154a3b; }
+
+:global(.mealEditor__consent) { grid-template-columns: auto 1fr; align-items: center; }
+:global(.mealEditor__consent) input { width: 1.25rem; min-height: 1.25rem; }
+
+:global(.mealEditor__contentGrid) { display: grid; gap: 1rem; margin-top: 1.25rem; }
+:global(.mealEditor__mainColumn) { min-width: 0; }
+:global(.mealEditor__aiColumn) { min-width: 0; }
+
+:global(.mealEditor__sectionHeading) { align-items: flex-start; }
+:global(.mealEditor__sectionHeading) > div { display: grid; gap: 0.35rem; }
+:global(.mealEditor__sectionHeading) > p { max-width: 11rem; text-align: right; }
+
+:global(.mealEditor__dishCard) {
+  align-items: flex-start;
+  padding: 0.9rem;
+  border: 1px solid #d6e0db;
+  border-radius: 0.8rem;
+}
+
+:global(.mealEditor__dishCard) > div { display: grid; gap: 0.4rem; min-width: 0; }
+:global(.mealEditor__dishCard) h3 { margin: 0; font-size: 1rem; }
+
+:global(.mealEditor__nutrientGroup) { border-top: 1px solid #d6e0db; }
+:global(.mealEditor__nutrientGroup):first-child { border-top: 0; }
+
+:global(.mealEditor__groupToggle),
+:global(.mealEditor__nutrientRow) {
+  width: 100%;
+  border-radius: 0;
+  color: #172826;
+  background: transparent;
+  text-align: left;
+}
+
+:global(.mealEditor__groupToggle) { padding: 0.85rem 0; }
+:global(.mealEditor__groupToggle):hover:not(:disabled), :global(.mealEditor__nutrientRow):hover:not(:disabled) { background: #f2f7f4; }
+
+:global(.mealEditor__groupToggle) span:last-child { color: #49615d; font-size: 0.8rem; font-weight: 600; }
+
+:global(.mealEditor__nutrientList) { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+:global(.mealEditor__nutrientRow) { padding: 0.75rem 0.4rem; border-top: 1px solid #edf1ee; }
+:global(.mealEditor__nutrientRow) > span:first-child { display: grid; gap: 0.18rem; }
+:global(.mealEditor__nutrientRow) small { color: #61746f; font-size: 0.75rem; font-weight: 500; }
+:global(.mealEditor__nutrientRow) > span:last-child { flex: 0 0 auto; color: #1f6b57; font-variant-numeric: tabular-nums; }
+
+:global(.mealEditor__aiCard) { position: relative; }
+:global(.mealEditor__aiCard) > h2 { margin: 0; }
+
+:global(.mealEditor__actionBar) {
+  position: fixed;
+  z-index: 5;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  min-height: 4.75rem;
+  padding: 0.75rem max(1rem, env(safe-area-inset-left)) calc(0.75rem + env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-right));
+  border-top: 1px solid #c7d2cc;
+  background: rgb(246 244 238 / 96%);
+  backdrop-filter: blur(12px);
+}
+
+:global(.mealEditor__actionBar) > * { flex: 1; }
+:global(.mealEditor__localSaveState) { margin: 0; color: #49615d; font-size: 0.9rem; text-align: center; }
+
+:global(.mealEditor__fullScreenDialog),
+:global(.mealEditor__bottomSheet) {
+  position: fixed;
+  z-index: 10;
+  width: 100%;
+  max-width: none;
+  max-height: 100dvh;
+  margin: 0;
+  border: 0;
+  color: #172826;
+  background: #f6f4ee;
+  box-shadow: 0 -0.5rem 2rem rgb(23 40 38 / 20%);
+}
+
+:global(.mealEditor__fullScreenDialog) { inset: 0; min-height: 100dvh; padding: 1rem 1rem calc(1.25rem + env(safe-area-inset-bottom)); overflow: auto; }
+:global(.mealEditor__bottomSheet) { right: 0; bottom: 0; left: 0; padding: 1rem 1rem calc(1.25rem + env(safe-area-inset-bottom)); border-radius: 1.25rem 1.25rem 0 0; }
+:global(.mealEditor__fullScreenDialog)::backdrop, :global(.mealEditor__bottomSheet)::backdrop { background: rgb(23 40 38 / 35%); }
+
+:global(.mealEditor__dialogHeader) { align-items: flex-start; margin-bottom: 1rem; }
+:global(.mealEditor__dialogHeader) h3 { margin: 0; }
+:global(.mealEditor__ingredientRow) { align-items: flex-start; }
+:global(.mealEditor__ingredientRow) > input { min-width: 0; }
+:global(.mealEditor__ingredientRow) > label { display: flex; align-items: center; gap: 0.2rem; width: 7rem; }
+:global(.mealEditor__ingredientRow) > label input { min-width: 0; }
+:global(.mealEditor__inputLabel) { margin-bottom: 1rem; }
+:global(.mealEditor__dialogActions) { margin-top: 1.25rem; }
+:global(.mealEditor__dialogActions) > * { flex: 1; }
+:global(.mealEditor__nutrientEditName) { margin: 0 0 1rem; color: #1f6b57; font-weight: 750; }
+:global(.mealEditor__nutrientEditControls) { align-items: flex-start; }
+:global(.mealEditor__nutrientEditControls) > * { flex: 1; }
+
+:global(.mealEditor__messages) { max-height: 16rem; overflow: auto; padding: 0.25rem; }
+:global(.mealEditor__messages) p { margin: 0; padding: 0.7rem; border-radius: 0.75rem; background: #edf4f0; line-height: 1.5; }
+:global(.mealEditor__messages) p[data-role='user'] { background: #e5eef9; }
+:global(.mealEditor__messages) p[data-role='error'] { background: #fff0ed; color: #8e2f24; }
+:global(.mealEditor__aiForm) { margin-top: 1rem; }
+:global(.mealEditor__suggestionList) { margin: 1rem 0 0; padding: 0; list-style: none; }
+:global(.mealEditor__suggestionList) li { display: grid; gap: 0.65rem; padding: 0.9rem; border: 1px solid #d6e0db; border-radius: 0.85rem; background: #fff; }
+:global(.mealEditor__suggestionList) p { margin: 0; line-height: 1.5; }
+:global(.mealEditor__suggestionList) li > div { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+
+@media (min-width: 34rem) {
+  :global(.mealEditor__shell) { padding-right: 1.5rem; padding-left: 1.5rem; }
+  :global(.mealEditor__fieldGrid) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  :global(.mealEditor__actionBar) { justify-content: center; }
+  :global(.mealEditor__actionBar) > * { flex: 0 1 18rem; }
+}
+
+@media (min-width: 48rem) {
+  :global(.mealEditor__shell) { padding-top: 2rem; padding-bottom: 3rem; }
+  :global(.mealEditor__contentGrid) { grid-template-columns: minmax(0, 1.45fr) minmax(17rem, 0.8fr); align-items: start; }
+  :global(.mealEditor__aiColumn) { position: sticky; top: 1rem; }
+  :global(.mealEditor__actionBar) { position: static; width: min(100%, 72rem); margin: 1rem auto 0; border: 0; background: transparent; backdrop-filter: none; }
+  :global(.mealEditor__fullScreenDialog) { inset: 2rem; width: min(42rem, calc(100% - 4rem)); min-height: auto; margin: auto; border-radius: 1.25rem; }
+  :global(.mealEditor__bottomSheet) { right: 2rem; bottom: 2rem; left: auto; width: min(34rem, calc(100% - 4rem)); border-radius: 1.25rem; }
+}
+}

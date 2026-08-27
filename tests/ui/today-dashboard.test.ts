@@ -35,4 +35,6 @@ test('shows the action evidence and data quality instead of a metric wall', () =
   assert.match(html, /恢复信号/);
   assert.match(html, /数据质量：中/);
   assert.match(html, /数据新鲜/);
+  assert.match(html, /href="\/rhythm\/meals\/new"/);
+  assert.match(html, /记录餐食/);
 });

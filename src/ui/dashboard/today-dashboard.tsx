@@ -24,6 +24,9 @@ export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; va
         <p>
           <a href="/rhythm/account">账户</a>
         </p>
+        <p>
+          <a href="/rhythm/meals/new">记录餐食</a>
+        </p>
       </header>
 
       <section className="action-card" aria-labelledby="today-action-heading">
