@@ -100,8 +100,59 @@ function draftEditor(snapshot: CurrentMealSnapshot): EditableMealDraft {
   };
 }
 
-function currentMealResponse(snapshot: CurrentMealSnapshot, status = 200): Response {
-  return response({ meal: savedEditor(snapshot), syncState: snapshot.syncState }, status);
+type CurrentMealSyncReadiness =
+  | { canSync: true }
+  | { canSync: false; syncReason: string };
+
+async function writebackReadiness(userId: string, snapshot: CurrentMealSnapshot, deps: MealHttpDeps): Promise<CurrentMealSyncReadiness> {
+  if (!await deps.store.users.nutritionWritebackEnabled(userId)) {
+    return { canSync: false, syncReason: 'nutrition_writeback_disabled' };
+  }
+  const connection = await deps.store.connections.findByUserId(userId);
+  if (!connection || !syncable(connection.status)) {
+    return { canSync: false, syncReason: 'connection_unavailable' };
+  }
+  if (!canWriteNutrition(connection.grantedScopes)) {
+    return { canSync: false, syncReason: 'nutrition_write_scope_missing' };
+  }
+  if (googlePayloadProjection(draftEditor(snapshot)).nutrients.length === 0) {
+    return { canSync: false, syncReason: 'no_google_writable_nutrients' };
+  }
+  return { canSync: true };
+}
+
+/**
+ * This read-only preflight mirrors the sync handler's state gates. It never
+ * starts a generation, so the UI can disable an impossible action without
+ * creating a hidden write path.
+ */
+async function currentMealSyncReadiness(
+  userId: string,
+  snapshot: CurrentMealSnapshot,
+  deps: MealHttpDeps,
+): Promise<CurrentMealSyncReadiness> {
+  const mealSync = deps.store.mealSync;
+  if (!mealSync) return { canSync: false, syncReason: 'sync_feature_unavailable' };
+  if (snapshot.syncState === 'synced') return { canSync: false, syncReason: 'no_unsynced_changes' };
+  if (snapshot.syncState === 'syncing') return { canSync: false, syncReason: 'sync_in_progress' };
+  if (snapshot.syncState === 'recovery') {
+    const state = await mealSync.readGenerationState({ mealId: snapshot.id, userId });
+    if (!state) return { canSync: false, syncReason: 'sync_generation_unavailable' };
+    // Exact-name recovery is safe even if normal writeback prerequisites are
+    // currently unavailable: it does not send a fresh create/delete request.
+    if (state.hasUnknownPoint) return { canSync: true };
+  }
+  return writebackReadiness(userId, snapshot, deps);
+}
+
+async function currentMealResponse(
+  snapshot: CurrentMealSnapshot,
+  userId: string,
+  deps: MealHttpDeps,
+  status = 200,
+): Promise<Response> {
+  const readiness = await currentMealSyncReadiness(userId, snapshot, deps);
+  return response({ meal: savedEditor(snapshot), syncState: snapshot.syncState, ...readiness }, status);
 }
 
 async function requireSession(request: Request, deps: MealHttpDeps, write = false): Promise<string | Response> {
@@ -343,7 +394,7 @@ export async function handleCurrentMealDraftSave(request: Request, draftId: stri
       if (!draft) return undefined;
       return store.currentMeals.saveEditorDraft({ userId: session, draftId, now: nowFor(deps) });
     });
-    return saved ? currentMealResponse(saved, 201) : response({ error: 'not_found' }, 404);
+    return saved ? await currentMealResponse(saved, session, deps, 201) : response({ error: 'not_found' }, 404);
   } catch (error) {
     return isMissingEditorDraftError(error) ? response({ error: 'not_found' }, 404) : serviceUnavailable();
   }
@@ -355,8 +406,12 @@ export async function handleCurrentMeal(request: Request, mealId: string, deps: 
   if (isResponse(session)) return session;
   const userId = session;
   if (request.method === 'GET') {
-    const current = await deps.store.currentMeals.findCurrentMeal(userId, mealId);
-    return current ? currentMealResponse(current) : response({ error: 'not_found' }, 404);
+    try {
+      const current = await deps.store.currentMeals.findCurrentMeal(userId, mealId);
+      return current ? await currentMealResponse(current, userId, deps) : response({ error: 'not_found' }, 404);
+    } catch {
+      return serviceUnavailable();
+    }
   }
 
   const parsedPatch = await requestPatch(request);
@@ -390,7 +445,7 @@ export async function handleCurrentMeal(request: Request, mealId: string, deps: 
         now: nowFor(deps),
       });
     });
-    return updated ? currentMealResponse(updated) : response({ error: 'not_found' }, 404);
+    return updated ? await currentMealResponse(updated, userId, deps) : response({ error: 'not_found' }, 404);
   } catch (error) {
     if (error instanceof CurrentMealEditLockedError) {
       return response({ error: 'meal_locked_for_sync', reason: 'sync_in_progress' }, 409);

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 
 import {
   editableMealDraftSchema,
@@ -14,9 +14,8 @@ import {
   type MealPatch,
 } from '../../domain/meal-editor';
 import {
-  mealAiSuggestionsSchema,
-  type MealAiSuggestion,
-  type MealAiSuggestions,
+  mealAiSuggestionResponseSchema,
+  type MealAiSuggestionResponse,
 } from '../../domain/meal-ai-suggestions';
 import {
   editableNutrientUnits,
@@ -38,7 +37,7 @@ type MealType = 'BREAKFAST' | 'LUNCH' | 'DINNER' | 'SNACK';
 type SyncState = 'unsynced' | 'syncing' | 'synced' | 'recovery';
 type EditorSession =
   | { kind: 'draft'; editor: EditableMealDraft }
-  | { kind: 'saved'; editor: EditableMealSaved; syncState: SyncState };
+  | { kind: 'saved'; editor: EditableMealSaved; syncState: SyncState; canSync: boolean; syncReason?: string };
 
 type EditorEndpoint =
   | { kind: 'photo' }
@@ -53,7 +52,7 @@ type Message = {
   id: number;
   role: 'user' | 'assistant' | 'error';
   text: string;
-  suggestions?: MealAiSuggestion[];
+  suggestions?: MealAiSuggestionResponse[];
 };
 
 type IngredientInput = { key: number; nameZh: string; grams: string };
@@ -66,6 +65,9 @@ export type MobileMealEditorProps = {
   /** Used by tests and future server-rendered callers that already hold a saved response. */
   initialMeal?: EditableMealSaved;
   initialSyncState?: SyncState;
+  /** Server-computed saved-meal sync preflight. A saved meal is safe-disabled unless explicitly ready. */
+  initialCanSync?: boolean;
+  initialSyncReason?: string;
   /** A direct saved-meal visit loads its latest value with an empty browser-only chat. */
   initialMealId?: string;
 };
@@ -113,7 +115,13 @@ export function savedMealUrl(mealId: string): string {
 
 function initialSession(props: MobileMealEditorProps): EditorSession | undefined {
   if (props.initialMeal) {
-    return { kind: 'saved', editor: props.initialMeal, syncState: props.initialSyncState ?? 'unsynced' };
+    return {
+      kind: 'saved',
+      editor: props.initialMeal,
+      syncState: props.initialSyncState ?? 'unsynced',
+      canSync: props.initialCanSync ?? false,
+      syncReason: props.initialSyncReason,
+    };
   }
   return props.initialDraft ? { kind: 'draft', editor: props.initialDraft } : undefined;
 }
@@ -132,10 +140,13 @@ function parseDraftResponse(value: unknown): EditableMealDraft | undefined {
   return parsed.success ? parsed.data : undefined;
 }
 
-function parseSavedResponse(value: unknown): { meal: EditableMealSaved; syncState: SyncState } | undefined {
-  if (!isRecord(value) || !isSyncState(value.syncState)) return undefined;
+function parseSavedResponse(value: unknown): { meal: EditableMealSaved; syncState: SyncState; canSync: boolean; syncReason?: string } | undefined {
+  if (!isRecord(value) || !isSyncState(value.syncState) || typeof value.canSync !== 'boolean') return undefined;
+  if (value.syncReason !== undefined && typeof value.syncReason !== 'string') return undefined;
   const parsed = editableMealSavedSchema.safeParse(value.meal);
-  return parsed.success ? { meal: parsed.data, syncState: value.syncState } : undefined;
+  return parsed.success
+    ? { meal: parsed.data, syncState: value.syncState, canSync: value.canSync, syncReason: value.syncReason }
+    : undefined;
 }
 
 function parseError(value: unknown): string {
@@ -173,11 +184,22 @@ function mealTypeLabel(mealType: string): string {
   return MEAL_TYPES.find((type) => type.value === mealType)?.label ?? mealType;
 }
 
-function suggestionSummary(suggestion: MealAiSuggestion): string {
+export function mealSuggestionPatch(suggestion: MealAiSuggestionResponse): MealPatch {
   if (suggestion.kind === 'replace_ingredients') {
-    return `将这道菜改为「${suggestion.nameZh}」，并按新食材克数重新计算整道菜的营养。`;
+    return {
+      kind: 'replace_ingredients',
+      dishId: suggestion.dishId,
+      nameZh: suggestion.nameZh,
+      ingredients: suggestion.ingredients,
+    };
   }
-  return `只修改 ${suggestion.nutrientCode} 这一项为 ${suggestion.value} ${suggestion.unit}。`;
+  return {
+    kind: 'set_nutrient',
+    dishId: suggestion.dishId,
+    nutrientCode: suggestion.nutrientCode,
+    value: suggestion.value,
+    unit: suggestion.unit,
+  };
 }
 
 function dishForEdit(dish: EditableDish, keyStart: number): DishEditorState {
@@ -210,10 +232,11 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
-  const [pendingSuggestions, setPendingSuggestions] = useState<MealAiSuggestion[]>([]);
-  const [resolvedSuggestions, setResolvedSuggestions] = useState<Set<number>>(() => new Set());
+  const [pendingSuggestions, setPendingSuggestions] = useState<MealAiSuggestionResponse[]>([]);
+  const [resolvedSuggestions, setResolvedSuggestions] = useState<Set<string>>(() => new Set());
   const ingredientKeys = useRef(100);
   const messageIds = useRef(1);
+  const dialogTrigger = useRef<HTMLElement | undefined>(undefined);
 
   useEffect(() => {
     if (eatenAt) return;
@@ -242,7 +265,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
         if (!result.ok) throw new Error(parseError(body));
         const saved = parseSavedResponse(body);
         if (!saved) throw new Error('服务器返回的餐食数据无效。');
-        if (!cancelled) setSession({ kind: 'saved', editor: saved.meal, syncState: saved.syncState });
+        if (!cancelled) setSession({ kind: 'saved', editor: saved.meal, syncState: saved.syncState, canSync: saved.canSync, syncReason: saved.syncReason });
       } catch (loadError) {
         if (!cancelled) setError(loadError instanceof Error ? loadError.message : '无法加载这餐。');
       } finally {
@@ -275,11 +298,17 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
     }
     const saved = parseSavedResponse(body);
     if (saved) {
-      setSession({ kind: 'saved', editor: saved.meal, syncState: saved.syncState });
+      setSession({ kind: 'saved', editor: saved.meal, syncState: saved.syncState, canSync: saved.canSync, syncReason: saved.syncReason });
       return true;
     }
     showError('服务器返回的餐食数据无效。');
     return false;
+  }
+
+  function invalidatePendingSuggestions() {
+    setPendingSuggestions([]);
+    setResolvedSuggestions(new Set());
+    setSuggestionsOpen(false);
   }
 
   async function applyPatch(patch: MealPatch): Promise<boolean> {
@@ -304,6 +333,9 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
         return false;
       }
       if (!replaceFromPatchResponse(body)) return false;
+      // Each content patch changes the meal AI reasoned about. Suggestions are
+      // response-local, so none may remain actionable after a successful edit.
+      invalidatePendingSuggestions();
       setNotice(patch.kind === 'replace_ingredients' ? '这道菜已按食材克数重新计算。' : '该营养项已更新。');
       return true;
     } catch {
@@ -349,7 +381,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
       if (!result.ok) throw new Error(parseError(body));
       const saved = parseSavedResponse(body);
       if (!saved) throw new Error('服务器返回的餐食数据无效。');
-      setSession({ kind: 'saved', editor: saved.meal, syncState: saved.syncState });
+      setSession({ kind: 'saved', editor: saved.meal, syncState: saved.syncState, canSync: saved.canSync, syncReason: saved.syncReason });
       setFile(undefined);
       if (typeof window !== 'undefined') window.history.replaceState({}, '', savedMealUrl(saved.meal.mealId));
       setNotice('已保存到本地；只有点击“同步这一餐”才会写入 Google Health。');
@@ -360,8 +392,9 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
     }
   }
 
-  function beginDishEdit(dish: EditableDish) {
+  function beginDishEdit(dish: EditableDish, trigger: HTMLElement) {
     if (editingLocked) return;
+    dialogTrigger.current = trigger;
     const start = ingredientKeys.current;
     ingredientKeys.current += dish.ingredients.length + 1;
     setEditingDish(dishForEdit(dish, start));
@@ -384,8 +417,9 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
     if (applied) setEditingDish(undefined);
   }
 
-  function beginNutrientEdit(nutrient: PresentedMealNutrient) {
+  function beginNutrientEdit(nutrient: PresentedMealNutrient, trigger: HTMLElement) {
     if (editingLocked) return;
+    dialogTrigger.current = trigger;
     setNutrientEditor({ nutrient, value: nutrient.displayValue === undefined ? '' : String(nutrient.displayValue), unit: nutrient.displayUnit });
     clearFeedback();
   }
@@ -444,9 +478,9 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
       const body = await responseBody(result);
       if (!result.ok) throw new Error(parseError(body));
       const rawSuggestions = isRecord(body) ? body.suggestions : undefined;
-      const parsed = mealAiSuggestionsSchema.safeParse({ suggestions: rawSuggestions });
+      const parsed = mealAiSuggestionResponseSchema.safeParse({ suggestions: rawSuggestions });
       if (!parsed.success) throw new Error('AI 返回的建议无法安全应用，请换一种说法再问。');
-      const suggestions: MealAiSuggestions['suggestions'] = parsed.data.suggestions;
+      const suggestions = parsed.data.suggestions;
       setPendingSuggestions(suggestions);
       setResolvedSuggestions(new Set());
       setMessages((current) => [...current, {
@@ -464,28 +498,31 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
     }
   }
 
-  async function applySuggestion(suggestion: MealAiSuggestion, index: number) {
-    if (resolvedSuggestions.has(index)) return;
-    const applied = await applyPatch(suggestion);
-    if (applied) setResolvedSuggestions((current) => new Set([...current, index]));
+  async function applySuggestion(suggestion: MealAiSuggestionResponse) {
+    if (resolvedSuggestions.has(suggestion.id)) return;
+    const applied = await applyPatch(mealSuggestionPatch(suggestion));
+    if (applied) setResolvedSuggestions((current) => new Set([...current, suggestion.id]));
   }
 
   async function applyAllSuggestions() {
     if (applyAllState.disabled) return;
-    for (const [index, suggestion] of pendingSuggestions.entries()) {
-      if (resolvedSuggestions.has(index)) continue;
-      const applied = await applyPatch(suggestion);
+    // Take a response-local snapshot. applyPatch invalidates visible pending
+    // suggestions, but an explicit Apply all may finish this one non-conflicting
+    // response in its original order.
+    const suggestions = pendingSuggestions.filter((suggestion) => !resolvedSuggestions.has(suggestion.id));
+    for (const suggestion of suggestions) {
+      const applied = await applyPatch(mealSuggestionPatch(suggestion));
       if (!applied) return;
-      setResolvedSuggestions((current) => new Set([...current, index]));
+      setResolvedSuggestions((current) => new Set([...current, suggestion.id]));
     }
   }
 
-  function ignoreSuggestion(index: number) {
-    setResolvedSuggestions((current) => new Set([...current, index]));
+  function ignoreSuggestion(id: string) {
+    setResolvedSuggestions((current) => new Set([...current, id]));
   }
 
   async function syncMeal() {
-    if (!session || session.kind !== 'saved' || session.syncState === 'syncing' || session.syncState === 'synced') return;
+    if (!session || session.kind !== 'saved' || !session.canSync) return;
     clearFeedback();
     setBusy(true);
     try {
@@ -493,7 +530,12 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
       const body = await responseBody(result);
       if (!result.ok) throw new Error(parseError(body));
       if (!isRecord(body) || !isSyncState(body.syncState)) throw new Error('服务器返回的同步状态无效。');
-      setSession({ ...session, syncState: body.syncState });
+      setSession({
+        ...session,
+        syncState: body.syncState,
+        canSync: body.syncState === 'recovery',
+        syncReason: body.syncState === 'recovery' ? undefined : 'sync_in_progress',
+      });
       setNotice(body.syncState === 'recovery'
         ? '已请求恢复同步状态；系统只会核对已有的远端记录。'
         : '已创建这一餐的同步任务。同步完成后请刷新确认状态。');
@@ -554,6 +596,8 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   const editor = session.editor;
   const isDraft = session.kind === 'draft';
   const syncState = session.kind === 'saved' ? session.syncState : undefined;
+  const canSync = session.kind === 'saved' && session.canSync;
+  const syncReason = session.kind === 'saved' ? session.syncReason : undefined;
 
   return (
     <main className={ui('shell')}>
@@ -584,7 +628,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
                     <h3>{dish.nameZh}</h3>
                     <p>{dish.ingredients.map((ingredient) => `${ingredient.nameZh} ${ingredient.grams}g`).join(' · ')}</p>
                   </div>
-                  <button type="button" className={ui('secondaryButton')} onClick={() => beginDishEdit(dish)} disabled={busy || editingLocked}>编辑此菜</button>
+                  <button type="button" className={ui('secondaryButton')} onClick={(event) => beginDishEdit(dish, event.currentTarget)} disabled={busy || editingLocked}>编辑此菜</button>
                 </article>
               ))}
             </div>
@@ -620,7 +664,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
                               type="button"
                               className={ui('nutrientRow')}
                               aria-label={`编辑营养 ${nutrient.label}`}
-                              onClick={() => beginNutrientEdit(nutrient)}
+                              onClick={(event) => beginNutrientEdit(nutrient, event.currentTarget)}
                               disabled={busy || editingLocked}
                             >
                               <span><strong>{nutrient.label}</strong><small>{nutrient.sourceLabel}</small></span>
@@ -643,9 +687,9 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
             <p className={ui('eyebrow')}>AI 助手</p>
             <h2>问 AI 修改这餐</h2>
             <p>AI 只看到这餐当前的结构化数据。建议必须由你查看并应用。</p>
-            <button type="button" onClick={() => setAiOpen(true)} disabled={busy || editingLocked}>问 AI 修改这餐</button>
+            <button type="button" onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); }} disabled={busy || editingLocked}>问 AI 修改这餐</button>
             {pendingSuggestions.length > 0 ? (
-              <button type="button" className={ui('secondaryButton')} onClick={() => { setAiOpen(true); setSuggestionsOpen(true); }}>
+              <button type="button" className={ui('secondaryButton')} onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); setSuggestionsOpen(true); }}>
                 查看并应用（{pendingSuggestions.length}）
               </button>
             ) : null}
@@ -660,19 +704,22 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
           <p className={ui('localSaveState')}>本地已保存</p>
         )}
         {!isDraft ? (
-          <button
-            type="button"
-            onClick={() => void syncMeal()}
-            disabled={busy || syncState === 'syncing' || syncState === 'synced'}
-            title={syncState === 'synced' ? '当前没有新的本地修改' : undefined}
-          >
-            {syncState === 'recovery' ? '重试这一餐' : '同步这一餐'}
-          </button>
+          <div className={ui('syncAction')}>
+            {!canSync && syncReason ? <p className={ui('warning')} role="status">{SYNC_REASON_MESSAGES[syncReason] ?? '当前无法同步这一餐，请稍后再试。'}</p> : null}
+            <button
+              type="button"
+              onClick={() => void syncMeal()}
+              disabled={busy || !canSync}
+              title={!canSync ? (SYNC_REASON_MESSAGES[syncReason ?? ''] ?? '当前无法同步这一餐') : undefined}
+            >
+              {syncState === 'recovery' ? '重试这一餐' : '同步这一餐'}
+            </button>
+          </div>
         ) : null}
       </footer>
 
       {editingDish ? (
-        <dialog open className={ui('fullScreenDialog')} aria-modal="true" aria-labelledby="dish-editor-title">
+        <AccessibleDialog className={ui('fullScreenDialog')} labelledBy="dish-editor-title" initialFocusSelector={'input[aria-label="食材名称"]'} onRequestClose={() => setEditingDish(undefined)} returnFocusRef={dialogTrigger}>
           <div className={ui('dialogHeader')}><h2 id="dish-editor-title">编辑菜品与食材</h2><button type="button" className={ui('textButton')} onClick={() => setEditingDish(undefined)} disabled={busy}>关闭</button></div>
           <label className={ui('inputLabel')}>菜名<input value={editingDish.nameZh} onChange={(event) => setEditingDish({ ...editingDish, nameZh: event.target.value })} disabled={busy} /></label>
           <div className={ui('ingredientEditor')}>
@@ -688,11 +735,11 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
           <button type="button" className={ui('secondaryButton')} onClick={() => setEditingDish({ ...editingDish, ingredients: [...editingDish.ingredients, { key: ingredientKeys.current++, nameZh: '', grams: '' }] })} disabled={busy}>添加食材</button>
           <p className={ui('dialogHint')}>保存后会重新计算这道菜的全部营养，原来的单项营养修改会被替换。</p>
           <div className={ui('dialogActions')}><button type="button" className={ui('secondaryButton')} onClick={() => setEditingDish(undefined)} disabled={busy}>取消</button><button type="button" onClick={() => void saveDishEdit()} disabled={busy}>重新计算这道菜</button></div>
-        </dialog>
+        </AccessibleDialog>
       ) : null}
 
       {nutrientEditor ? (
-        <dialog open className={ui('bottomSheet')} aria-modal="true" aria-labelledby="nutrient-editor-title">
+        <AccessibleDialog className={ui('bottomSheet')} labelledBy="nutrient-editor-title" initialFocusSelector={'input[type="number"]'} onRequestClose={() => setNutrientEditor(undefined)} returnFocusRef={dialogTrigger}>
           <div className={ui('dialogHeader')}><h2 id="nutrient-editor-title">编辑营养</h2><button type="button" className={ui('textButton')} onClick={() => setNutrientEditor(undefined)} disabled={busy}>关闭</button></div>
           <p className={ui('nutrientEditName')}>{nutrientEditor.nutrient.label}</p>
           <div className={ui('nutrientEditControls')}>
@@ -701,11 +748,11 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
           </div>
           <p className={ui('dialogHint')}>只覆盖这一项，其他营养不会改变。</p>
           <button type="button" onClick={() => void saveNutrientEdit()} disabled={busy}>保存这一项</button>
-        </dialog>
+        </AccessibleDialog>
       ) : null}
 
       {aiOpen ? (
-        <dialog open className={ui('bottomSheet')} aria-modal="true" aria-labelledby="ai-editor-title">
+        <AccessibleDialog className={ui('bottomSheet')} labelledBy="ai-editor-title" initialFocusSelector="textarea" onRequestClose={() => setAiOpen(false)} returnFocusRef={dialogTrigger}>
           <div className={ui('dialogHeader')}><h2 id="ai-editor-title">问 AI 修改这餐</h2><button type="button" className={ui('textButton')} onClick={() => setAiOpen(false)} disabled={busy}>关闭</button></div>
           {!suggestionsOpen ? (
             <>
@@ -723,14 +770,14 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
               <div className={ui('dialogHeader')}><h3>待处理建议（{pendingSuggestions.length}）</h3><button type="button" className={ui('textButton')} onClick={() => setSuggestionsOpen(false)} disabled={busy}>继续对话</button></div>
               {applyAllState.disabled ? <p className={ui('warning')}>{applyAllState.message}</p> : <button type="button" className={ui('secondaryButton')} onClick={() => void applyAllSuggestions()} disabled={busy || pendingSuggestions.length === resolvedSuggestions.size}>应用全部</button>}
               <ol className={ui('suggestionList')}>
-                {pendingSuggestions.map((suggestion, index) => {
-                  const done = resolvedSuggestions.has(index);
-                  return <li key={`${suggestion.kind}:${suggestion.dishId}:${index}`}><p>{suggestionSummary(suggestion)}</p><p className={ui('suggestionImpact')}>{suggestion.kind === 'replace_ingredients' ? '应用后重新计算这道菜全部营养。' : '应用后只修改这一项。'}</p><div><button type="button" onClick={() => void applySuggestion(suggestion, index)} disabled={busy || done}>{done ? '已处理' : '应用这一条'}</button><button type="button" className={ui('textButton')} onClick={() => ignoreSuggestion(index)} disabled={busy || done}>忽略</button></div></li>;
+              {pendingSuggestions.map((suggestion) => {
+                  const done = resolvedSuggestions.has(suggestion.id);
+                  return <li key={suggestion.id}><p>{suggestion.summary}</p><p className={ui('suggestionImpact')}>{suggestion.kind === 'replace_ingredients' ? '应用后重新计算这道菜全部营养。' : '应用后只修改这一项。'}</p><div><button type="button" onClick={() => void applySuggestion(suggestion)} disabled={busy || done}>{done ? '已处理' : '应用这一条'}</button><button type="button" className={ui('textButton')} onClick={() => ignoreSuggestion(suggestion.id)} disabled={busy || done}>忽略</button></div></li>;
                 })}
               </ol>
             </>
           )}
-        </dialog>
+        </AccessibleDialog>
       ) : null}
     </main>
   );
@@ -739,4 +786,59 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 function Feedback({ notice, error }: { notice?: string; error?: string }) {
   if (!notice && !error) return null;
   return <p className={error ? ui('error') : ui('notice')} role={error ? 'alert' : 'status'}>{error ?? notice}</p>;
+}
+
+/**
+ * Opens a real native modal and returns its one-time teardown. Keeping the
+ * lifecycle here makes the keyboard/focus contract unit-testable without
+ * introducing a browser-only test dependency into this project.
+ */
+export function openAccessibleDialog(
+  dialog: HTMLDialogElement,
+  initialFocusSelector: string,
+  onRequestClose: () => void,
+  returnFocus?: Pick<HTMLElement, 'focus'>,
+): () => void {
+  const onCancel = (event: Event) => {
+    event.preventDefault();
+    onRequestClose();
+  };
+  dialog.addEventListener('cancel', onCancel);
+  if (!dialog.open) dialog.showModal();
+  const target = dialog.querySelector<HTMLElement>(initialFocusSelector);
+  (target ?? dialog).focus();
+  return () => {
+    dialog.removeEventListener('cancel', onCancel);
+    if (dialog.open) dialog.close();
+    returnFocus?.focus();
+  };
+}
+
+function AccessibleDialog({
+  children,
+  className,
+  labelledBy,
+  initialFocusSelector,
+  onRequestClose,
+  returnFocusRef,
+}: {
+  children: ReactNode;
+  className: string;
+  labelledBy: string;
+  initialFocusSelector: string;
+  onRequestClose: () => void;
+  returnFocusRef: MutableRefObject<HTMLElement | undefined>;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const onRequestCloseRef = useRef(onRequestClose);
+  onRequestCloseRef.current = onRequestClose;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return undefined;
+    const returnFocus = returnFocusRef.current;
+    return openAccessibleDialog(dialog, initialFocusSelector, () => onRequestCloseRef.current(), returnFocus);
+  }, [initialFocusSelector, returnFocusRef]);
+
+  return <dialog ref={dialogRef} className={className} aria-modal="true" aria-labelledby={labelledBy}>{children}</dialog>;
 }

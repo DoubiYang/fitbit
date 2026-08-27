@@ -8,6 +8,8 @@ import type { EditableMealDraft, EditableMealSaved } from '../../src/domain/meal
 import {
   MobileMealEditor,
   mealEditorEndpoint,
+  mealSuggestionPatch,
+  openAccessibleDialog,
   savedMealUrl,
 } from '../../src/ui/meals/mobile-meal-editor';
 
@@ -66,9 +68,16 @@ test('draft editor has a local save action, nutrient edit affordance, and no aut
 
 test('saved editor exposes explicit sync and recovery retries lock edits', () => {
   const unsyncedHtml = renderToStaticMarkup(
-    React.createElement(MobileMealEditor, { initialMeal: saved, initialSyncState: 'unsynced' }),
+    React.createElement(MobileMealEditor, {
+      initialMeal: saved,
+      initialSyncState: 'unsynced',
+      initialCanSync: false,
+      initialSyncReason: 'nutrition_writeback_disabled',
+    }),
   );
   assert.match(unsyncedHtml, /已保存 · 未同步/);
+  assert.match(unsyncedHtml, /账户尚未开启 Google 营养数据写回/);
+  assert.match(unsyncedHtml, /<button[^>]*disabled=""[^>]*>同步这一餐<\/button>/);
   assert.match(unsyncedHtml, /同步这一餐/);
 
   const recoveryHtml = renderToStaticMarkup(
@@ -77,6 +86,57 @@ test('saved editor exposes explicit sync and recovery retries lock edits', () =>
   assert.match(recoveryHtml, /同步恢复中/);
   assert.match(recoveryHtml, /重试这一餐/);
   assert.match(recoveryHtml, /编辑已暂停/);
+});
+
+test('strips response-only AI display fields before applying a suggestion as a strict PATCH', () => {
+  assert.deepEqual(mealSuggestionPatch({
+    id: 's-3',
+    summary: '只修改蛋白质这一项为 20 g。',
+    kind: 'set_nutrient',
+    dishId: 'dish-1',
+    nutrientCode: 'PROTEIN',
+    value: 20,
+    unit: 'g',
+  }), {
+    kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 20, unit: 'g',
+  });
+});
+
+test('opens native dialogs modally, focuses inside, handles Escape, and restores launcher focus', () => {
+  let cancelListener: ((event: Event) => void) | undefined;
+  let modalOpened = 0;
+  let dialogClosed = 0;
+  let dialogFocused = 0;
+  let fieldFocused = 0;
+  let launcherFocused = 0;
+  let closeRequested = 0;
+  const dialog = {
+    open: false,
+    showModal: () => { modalOpened += 1; dialog.open = true; },
+    close: () => { dialogClosed += 1; dialog.open = false; },
+    focus: () => { dialogFocused += 1; },
+    querySelector: () => ({ focus: () => { fieldFocused += 1; } }),
+    addEventListener: (_type: string, listener: EventListenerOrEventListenerObject) => { cancelListener = listener as (event: Event) => void; },
+    removeEventListener: () => { cancelListener = undefined; },
+  };
+
+  const cleanup = openAccessibleDialog(
+    dialog as unknown as HTMLDialogElement,
+    'textarea',
+    () => { closeRequested += 1; },
+    { focus: () => { launcherFocused += 1; } },
+  );
+
+  assert.equal(modalOpened, 1);
+  assert.equal(fieldFocused, 1);
+  assert.equal(dialogFocused, 0);
+  let prevented = false;
+  cancelListener?.({ preventDefault: () => { prevented = true; } } as Event);
+  assert.equal(prevented, true);
+  assert.equal(closeRequested, 1);
+  cleanup();
+  assert.equal(dialogClosed, 1);
+  assert.equal(launcherFocused, 1);
 });
 
 test('uses the rhythm base path for draft, saved, AI, and explicit-sync requests', () => {

@@ -3,7 +3,9 @@ import { z } from 'zod';
 import {
   mealAiNutrientUnit,
   mealAiSuggestionSchema,
+  presentMealAiSuggestion,
   type MealAiSuggestion,
+  type MealAiSuggestionResponse,
 } from '../../domain/meal-ai-suggestions';
 import {
   fromInternalNutrientAmount,
@@ -227,7 +229,7 @@ export async function suggestMealEdits(input: {
   meal: AssistantMeal;
   catalog: TwFdaFoodCatalog;
   client?: MealAssistantClient;
-}): Promise<MealAiSuggestion[]> {
+}): Promise<MealAiSuggestionResponse[]> {
   const question = questionSchema.parse(input.question);
   const meal = promptMeal(input.meal);
   const prompt = buildMealAssistantPrompt(meal);
@@ -254,5 +256,5 @@ export async function suggestMealEdits(input: {
   if (suggestions.length === 0) {
     throw new MealAssistantError('ai_response_invalid');
   }
-  return suggestions;
+  return suggestions.map((suggestion, position): MealAiSuggestionResponse => presentMealAiSuggestion(suggestion, position));
 }

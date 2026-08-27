@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   hasMealAiSuggestionConflict,
+  mealAiSuggestionResponseSchema,
   mealAiSuggestionsSchema,
 } from '../../src/domain/meal-ai-suggestions';
 
@@ -48,6 +49,26 @@ test('rejects unknown suggestion fields, kinds, invalid units, and non-finite va
   for (const response of invalid) {
     assert.throws(() => mealAiSuggestionsSchema.parse(response));
   }
+});
+
+test('accepts server-presented suggestions only when they carry a response-local id and summary', () => {
+  const presented = mealAiSuggestionResponseSchema.parse({
+    suggestions: [{
+      id: 's-1',
+      summary: '只修改蛋白质这一项为 20 g。',
+      kind: 'set_nutrient',
+      dishId: 'dish-1',
+      nutrientCode: 'PROTEIN',
+      value: 20,
+      unit: 'g',
+    }],
+  });
+
+  assert.equal(presented.suggestions[0]?.id, 's-1');
+  assert.equal(presented.suggestions[0]?.summary, '只修改蛋白质这一项为 20 g。');
+  assert.throws(() => mealAiSuggestionResponseSchema.parse({
+    suggestions: [{ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 20, unit: 'g' }],
+  }));
 });
 
 test('marks same-dish replacement combinations as apply-all conflicts only', () => {

@@ -73,7 +73,10 @@ test('returns only suggestions validated against the current meal, units, and lo
   });
 
   assert.equal(suggestions.length, 2);
-  assert.equal(suggestions[1]?.kind, 'set_nutrient');
+  assert.deepEqual(suggestions.map(({ id, summary, kind }) => ({ id, summary, kind })), [
+    { id: 's-1', summary: '将这道菜改为「少油番茄炒蛋」，并按新食材克数重新计算整道菜的营养。', kind: 'replace_ingredients' },
+    { id: 's-2', summary: '只修改 VITAMIN_C 这一项为 30 mg。', kind: 'set_nutrient' },
+  ]);
   const prompt = received?.prompt ?? '';
   assert.equal(received?.question, '少放一点油后营养怎么改？');
   assert.match(prompt, /dish-1/);
@@ -105,6 +108,8 @@ test('drops invalid model entries and fails only when no valid suggestion remain
     ] }),
   });
   assert.deepEqual(oneValid, [{
+    id: 's-1',
+    summary: '只修改 PROTEIN 这一项为 18 g。',
     kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 18, unit: 'g',
   }]);
 

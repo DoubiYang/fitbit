@@ -23,6 +23,45 @@ export const mealAiSuggestionsSchema = z.object({
 export type MealAiSuggestion = z.infer<typeof mealAiSuggestionSchema>;
 export type MealAiSuggestions = z.infer<typeof mealAiSuggestionsSchema>;
 
+const responseMetadataSchema = z.object({
+  /** Stable only inside one AI response; it is never persisted. */
+  id: z.string().regex(/^s-[1-9][0-9]*$/),
+  /** Server-authored display text, never model-authored prose. */
+  summary: z.string().trim().min(1).max(280),
+});
+
+export const mealAiSuggestionResponseItemSchema = z.discriminatedUnion('kind', [
+  replaceIngredientsPatchSchema.extend(responseMetadataSchema.shape).strict(),
+  setNutrientPatchSchema.extend(responseMetadataSchema.shape).strict(),
+]);
+
+export const mealAiSuggestionResponseSchema = z.object({
+  suggestions: z.array(mealAiSuggestionResponseItemSchema).max(20),
+}).strict();
+
+export type MealAiSuggestionResponse = z.infer<typeof mealAiSuggestionResponseItemSchema>;
+export type MealAiSuggestionResponseBody = z.infer<typeof mealAiSuggestionResponseSchema>;
+
+/**
+ * The model supplies only a patch. This response-only wrapper gives the UI
+ * stable keys and text without ever trusting model prose as display content.
+ */
+export function presentMealAiSuggestion(suggestion: MealAiSuggestion, position: number): MealAiSuggestionResponse {
+  const id = `s-${position + 1}`;
+  if (suggestion.kind === 'replace_ingredients') {
+    return {
+      ...suggestion,
+      id,
+      summary: `将这道菜改为「${suggestion.nameZh}」，并按新食材克数重新计算整道菜的营养。`,
+    };
+  }
+  return {
+    ...suggestion,
+    id,
+    summary: `只修改 ${suggestion.nutrientCode} 这一项为 ${suggestion.value} ${suggestion.unit}。`,
+  };
+}
+
 const MICROGRAM_NUTRIENTS = new Set([
   'BIOTIN',
   'CHROMIUM',
@@ -71,7 +110,7 @@ export function mealAiNutrientUnit(nutrientCode: string): NutritionUnit {
  * Applying a replacement recalculates all nutrients for that dish, so it
  * cannot be combined with another replacement or a nutrient override there.
  */
-export function hasMealAiSuggestionConflict(suggestions: MealAiSuggestion[]): boolean {
+export function hasMealAiSuggestionConflict(suggestions: readonly MealAiSuggestion[]): boolean {
   const byDish = new Map<string, { hasReplacement: boolean; nutrientCodes: Set<string> }>();
   for (const suggestion of suggestions) {
     const state = byDish.get(suggestion.dishId) ?? { hasReplacement: false, nutrientCodes: new Set<string>() };

@@ -236,6 +236,39 @@ test('saving a draft writes only the current meal snapshot and saved edits becom
   assert.equal(body.meal.nutrients.find((nutrient) => nutrient.nutrientCode === 'PROTEIN')?.value, 10);
 });
 
+test('saved GET and PATCH expose the server-computed single-meal sync preflight', async () => {
+  const input = await insertDraft();
+  await input.store.currentMeals.saveEditorDraft({ userId: input.userId, draftId: 'draft-1', now });
+
+  const blockedRead = await handleCurrentMeal(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1', { headers: headers(input.sessionToken) }),
+    'draft-1', deps(input.store),
+  );
+  assert.equal(blockedRead.status, 200);
+  assert.deepEqual(await blockedRead.json(), {
+    meal: {
+      view: 'saved', mealId: 'draft-1', mealType: 'LUNCH', eatenAt: now.toISOString(), savedAt: now.toISOString(),
+      dishes: input.draft.dishes, nutrients: input.draft.nutrients,
+    },
+    syncState: 'unsynced',
+    canSync: false,
+    syncReason: 'nutrition_writeback_disabled',
+  });
+
+  await input.store.users.setNutritionWritebackEnabled(input.userId, true);
+  const eligiblePatch = await handleCurrentMeal(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1', {
+      method: 'PATCH', headers: headers(input.sessionToken, true),
+      body: JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }),
+    }), 'draft-1', deps(input.store),
+  );
+  assert.equal(eligiblePatch.status, 200);
+  const body = await eligiblePatch.json() as { canSync?: unknown; syncReason?: unknown; syncState: string };
+  assert.equal(body.syncState, 'unsynced');
+  assert.equal(body.canSync, true);
+  assert.equal(body.syncReason, undefined);
+});
+
 test('draft save distinguishes a missing draft from a transaction outage', async () => {
   const input = await insertDraft();
   const unavailableStore: AuthStore = {
