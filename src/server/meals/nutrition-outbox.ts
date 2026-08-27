@@ -41,7 +41,7 @@ export type GoogleNutritionOperation = {
 
 export type GoogleNutritionOutboxClient = {
   create(accessToken: string, payload: GoogleNutritionDataPoint, signal?: AbortSignal): Promise<GoogleNutritionOperation>;
-  batchDelete(accessToken: string, pointNames: string[], signal?: AbortSignal): Promise<void>;
+  batchDelete(accessToken: string, pointNames: string[], signal?: AbortSignal): Promise<GoogleNutritionOperation>;
   getDataPoint(accessToken: string, name: string, signal?: AbortSignal): Promise<GoogleNutritionDataPoint | undefined>;
   getOperation(accessToken: string, name: string, signal?: AbortSignal): Promise<GoogleNutritionOperation>;
 };
@@ -57,6 +57,19 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
       },
     });
   }
+
+  async function parseOperation(response: Response, fallbackName?: string): Promise<GoogleNutritionOperation> {
+    if (!response.ok) {
+      throw new GoogleNutritionWriteError(response.status);
+    }
+    const body = (await response.json()) as Partial<GoogleNutritionOperation>;
+    return {
+      done: body.done === true,
+      name: typeof body.name === 'string' ? body.name : fallbackName,
+      error: body.error,
+    };
+  }
+
   return {
     async create(accessToken, payload, signal) {
       const response = await request(accessToken, 'users/me/dataTypes/nutrition-log/dataPoints', {
@@ -64,29 +77,19 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       }, signal);
-      if (!response.ok) {
-        throw new GoogleNutritionWriteError(response.status);
-      }
-      const body = (await response.json()) as Partial<GoogleNutritionOperation>;
-      return {
-        done: body.done === true,
-        name: typeof body.name === 'string' ? body.name : undefined,
-        error: body.error,
-      };
+      return parseOperation(response);
     },
     async batchDelete(accessToken, pointNames, signal) {
-      const dataPointNames = [...new Set(pointNames)];
-      if (dataPointNames.length === 0) {
+      const names = [...new Set(pointNames)];
+      if (names.length === 0) {
         throw new Error('batchDelete requires at least one data point name');
       }
       const response = await request(accessToken, 'users/me/dataTypes/nutrition-log/dataPoints:batchDelete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dataPointNames }),
+        body: JSON.stringify({ names }),
       }, signal);
-      if (!response.ok) {
-        throw new GoogleNutritionWriteError(response.status);
-      }
+      return parseOperation(response);
     },
     async getDataPoint(accessToken, name, signal) {
       const response = await request(accessToken, name, undefined, signal);
@@ -100,15 +103,7 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
     },
     async getOperation(accessToken, name, signal) {
       const response = await request(accessToken, name, undefined, signal);
-      if (!response.ok) {
-        throw new GoogleNutritionWriteError(response.status);
-      }
-      const body = (await response.json()) as Partial<GoogleNutritionOperation>;
-      return {
-        done: body.done === true,
-        name: typeof body.name === 'string' ? body.name : name,
-        error: body.error,
-      };
+      return parseOperation(response, name);
     },
   };
 }

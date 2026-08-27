@@ -67,7 +67,7 @@ async function pendingOutbox() {
 function client(overrides: Partial<GoogleNutritionOutboxClient> = {}): GoogleNutritionOutboxClient {
   return {
     async create() { return { done: true }; },
-    async batchDelete() {},
+    async batchDelete() { return { done: true }; },
     async getDataPoint() { return undefined; },
     async getOperation() { return { done: false }; },
     ...overrides,
