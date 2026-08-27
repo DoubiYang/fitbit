@@ -2,7 +2,7 @@
 
 面向 Fitbit Air 用户的中文健康数据仪表盘与自助 AI 教练。
 
-当前分支包含本地演示仪表盘、Google OAuth / 账户管理，以及真实数据同步。授权成功后会立即为该用户同步最近 14 天的睡眠、HRV、静息心率和训练；随后独立 worker 每分钟检查到期连接，每个用户在上次成功后 6 小时再次同步。失败会在 30 分钟、1 小时、2 小时后重试，之后回到 6 小时周期。首页只读成功保存的本地快照，**不会**在打开页面时请求 Google。当前没有历史回填、webhook、拍照记餐、营养写回或 AI Coach。
+当前分支包含本地演示仪表盘、Google OAuth / 账户管理、真实健康数据同步，以及手机优先的餐食审阅与显式营养同步。授权成功后会立即为该用户同步最近 14 天的睡眠、HRV、静息心率和训练；随后独立 worker 每分钟检查到期连接，每个用户在上次成功后 6 小时再次同步。失败会在 30 分钟、1 小时、2 小时后重试，之后回到 6 小时周期。首页只读成功保存的本地快照，**不会**在打开页面时请求 Google。
 
 ## 本地演示
 
@@ -44,11 +44,19 @@ http://localhost:3000/rhythm/account
 
 不要用 `http://127.0.0.1:3000`。本地 callback 必须是 `http://localhost:3000/rhythm/api/auth/google/callback`。
 
-Google Cloud 还需：启用 Health API、Testing + Test users、[OAuth 设计](docs/superpowers/specs/2026-08-24-05-oauth-account-docker-design.md)中固定的 10 个 scope，以及授权网域 `doubiyang.com`。其中营养写入权限只为后续已确认餐食的写回预先授权；当前代码不会写入 Google Health。
+Google Cloud 还需：启用 Health API、Testing + Test users、[OAuth 设计](docs/superpowers/specs/2026-08-24-05-oauth-account-docker-design.md)中固定的 10 个 scope，以及授权网域 `doubiyang.com`。营养写入权限仅用于用户已本地保存后、再明确点击“同步这一餐”的餐食写回；保存或打开页面不会写入 Google Health。
 
 - `https://doubiyang.com/rhythm`
 - `https://doubiyang.com/rhythm/privacy`
 - `https://doubiyang.com/rhythm/terms`
+
+## 餐食审阅与显式同步
+
+连接账户并开启营养写回后，打开仪表盘的“记录餐食”入口（或 `/rhythm/meals/new`）：选择一张照片并同意本次 AI 识别，审阅草稿；改食材或克数会重新计算该菜全部营养，直接改营养值只覆盖该一项。AI 只会返回可逐项应用的建议，不会自动修改餐食。
+
+“保存修改”只保存这餐的最新本地值，**不**向 Google 创建任务或发送写请求。只有用户随后点击“同步这一餐”，才为当前这一餐创建异步写回任务。已同步餐食重新编辑后，再次显式同步会先删除旧的 Google point，删除完成后才创建新的 point；状态未知时只按原名称精确查询恢复，绝不重复 POST 写入。
+
+照片预览只保留在当前浏览器页面内存。服务端不保存照片字节或 data URL；原始识别结果只在未保存草稿期短暂保留，保存后草稿会删除。已保存餐食只保留当前结构化菜品和营养值，不保留识别原始值、修正历史、AI 建议或聊天消息。模型请求只含当前结构化餐食和本次问题，不含照片或 OAuth token。
 
 ## 校验
 
