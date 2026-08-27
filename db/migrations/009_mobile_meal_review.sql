@@ -127,15 +127,18 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-  IF NEW.payload IS DISTINCT FROM OLD.payload OR NEW.payload_hash IS DISTINCT FROM OLD.payload_hash THEN
-    RAISE EXCEPTION 'meal_sync_points payload and payload_hash are immutable';
+  IF NEW.data_point_name IS DISTINCT FROM OLD.data_point_name
+    OR NEW.role IS DISTINCT FROM OLD.role
+    OR NEW.payload IS DISTINCT FROM OLD.payload
+    OR NEW.payload_hash IS DISTINCT FROM OLD.payload_hash THEN
+    RAISE EXCEPTION 'meal_sync_points remote identity, role, payload and payload_hash are immutable';
   END IF;
   RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER meal_sync_points_payload_immutable
-BEFORE UPDATE OF payload, payload_hash ON meal_sync_points
+CREATE TRIGGER meal_sync_points_recovery_mapping_immutable
+BEFORE UPDATE OF data_point_name, role, payload, payload_hash ON meal_sync_points
 FOR EACH ROW
 EXECUTE FUNCTION prevent_meal_sync_point_payload_mutation();
 

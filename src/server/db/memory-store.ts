@@ -124,7 +124,7 @@ function ownsOutboxLease(row: OutboxRow | undefined, input: { userId: string; le
 }
 
 function isSyncBlockedStatus(status: MealSyncPointStatus): boolean {
-  return status === 'unknown' || status === 'failed_action_required' || status === 'retrying';
+  return status === 'unknown' || status === 'failed_action_required';
 }
 
 function resumeStatus(point: MealSyncPointRow): 'pending' | 'operation_pending' {

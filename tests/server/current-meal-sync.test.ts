@@ -196,3 +196,26 @@ test('action-required recovery restores an existing Google operation instead of 
   assert.equal(restored?.googleOperationName, 'operations/known-write');
   assert.match(restored?.dataPointName ?? '', /\/d-[0-9a-f-]+$/u);
 });
+
+test('a retrying point stays in its pending phase and becomes claimable after its backoff', async () => {
+  const store = await savedMeal();
+  const generation = await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });
+  assert.ok(generation);
+  const firstLease = new Date(now.getTime() + 120_000);
+  const [first] = await store.mealSync!.claimDuePoints({ now, leaseUntil: firstLease, limit: 1 });
+  assert.ok(first);
+  const retryAt = new Date(now.getTime() + 60_000);
+  assert.equal(await store.mealSync!.retryPoint({
+    id: first.id, generationId: generation.id, userId: 'u1', leaseUntil: firstLease, now,
+    nextAttemptAt: retryAt, errorCode: 'google_503',
+  }), true);
+
+  const state = await store.mealSync!.readGenerationState({ mealId: 'meal-1', userId: 'u1' });
+  assert.equal(state?.generation.phase, 'pending_create');
+  assert.equal((await store.currentMeals.findCurrentMeal('u1', 'meal-1'))?.syncState, 'syncing');
+  assert.deepEqual(await store.mealSync!.claimDuePoints({ now, leaseUntil: firstLease, limit: 1 }), []);
+  const secondLease = new Date(retryAt.getTime() + 120_000);
+  const [retried] = await store.mealSync!.claimDuePoints({ now: retryAt, leaseUntil: secondLease, limit: 1 });
+  assert.equal(retried?.id, first.id);
+  assert.equal(retried?.status, 'retrying');
+});

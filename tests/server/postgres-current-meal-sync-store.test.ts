@@ -143,3 +143,30 @@ test('PostgreSQL recovery returns the resumed pending phase after action-require
   assert.equal(resumed?.phase, 'pending_create');
   assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
 });
+
+test('PostgreSQL retrying keeps its generation pending and the current meal syncing', async () => {
+  const leaseUntil = new Date(now.getTime() + 120_000);
+  const retryAt = new Date(now.getTime() + 60_000);
+  const pool = new RecordingPool([
+    { rows: [] },
+    { rows: [{ generation_id: 'generation-1' }] },
+    { rows: [generationRow()] },
+    { rows: [createPointRow({ status: 'retrying', next_attempt_at: retryAt })] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+
+  const retried = await store.mealSync!.retryPoint({
+    id: 'point-1', generationId: 'generation-1', userId: 'u1', leaseUntil, now,
+    nextAttemptAt: retryAt, errorCode: 'google_503',
+  });
+
+  assert.equal(retried, true);
+  const generationUpdate = pool.queries.find((query) => /UPDATE meal_sync_generations/u.test(query.text));
+  assert.equal(generationUpdate?.values?.[2], 'pending_create');
+  const mealUpdate = pool.queries.find((query) => /UPDATE current_meals/u.test(query.text));
+  assert.equal(mealUpdate?.values?.[2], 'syncing');
+  assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+});

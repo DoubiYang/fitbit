@@ -3,14 +3,14 @@ import { canonicalNutritionHash, type GoogleNutritionDataPoint } from './google-
 import type { OutboxRow } from './types';
 
 const GOOGLE_HEALTH_API = 'https://health.googleapis.com/v4';
-const LEASE_MS = 2 * 60 * 1_000;
-const OPERATION_RECHECK_MS = 60 * 1_000;
+export const LEASE_MS = 2 * 60 * 1_000;
+export const OPERATION_RECHECK_MS = 60 * 1_000;
 // Keep every outbound request well inside the two-minute DB lease. A timed-out
 // create is reconciled by its deterministic data-point name and is never retried
 // automatically, preventing a second worker from duplicating a late write.
 // A row can need token retrieval, create and exact-name recovery in sequence.
 // At 30 seconds each their worst case is still below the two-minute lease.
-const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1_000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1_000;
 
 export class GoogleNutritionWriteError extends Error {
   constructor(readonly status: number) {
@@ -108,7 +108,7 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
   };
 }
 
-function errorCode(error: unknown): string {
+export function errorCode(error: unknown): string {
   if (error instanceof GoogleNutritionWriteError) {
     return `google_${error.status}`;
   }
@@ -121,14 +121,14 @@ function errorCode(error: unknown): string {
   return 'indeterminate_create';
 }
 
-function rejectErroredOperation(operation: GoogleNutritionOperation): GoogleNutritionOperation {
+export function rejectErroredOperation(operation: GoogleNutritionOperation): GoogleNutritionOperation {
   if (operation.error !== undefined && operation.error !== null) {
     throw new GoogleNutritionOperationError();
   }
   return operation;
 }
 
-async function withLeaseSafeTimeout<T>(
+export async function withLeaseSafeTimeout<T>(
   call: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
 ): Promise<T> {
@@ -149,7 +149,7 @@ async function withLeaseSafeTimeout<T>(
   }
 }
 
-function requestTimeout(input: number | undefined): number {
+export function requestTimeout(input: number | undefined): number {
   const requested = input ?? DEFAULT_REQUEST_TIMEOUT_MS;
   if (!Number.isFinite(requested) || requested <= 0) {
     throw new Error('requestTimeoutMs must be a positive finite number');
@@ -160,7 +160,7 @@ function requestTimeout(input: number | undefined): number {
   return Math.min(requested, LEASE_MS / 4);
 }
 
-function retryAt(now: Date, attemptCount: number): Date {
+export function retryAt(now: Date, attemptCount: number): Date {
   const delay = attemptCount <= 1 ? 60_000 : attemptCount === 2 ? 5 * 60_000 : 30 * 60_000;
   return new Date(now.getTime() + delay);
 }

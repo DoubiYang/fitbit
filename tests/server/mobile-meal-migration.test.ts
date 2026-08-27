@@ -8,3 +8,9 @@ test('allows cross-generation sync-point handoff while keeping point names uniqu
   assert.match(migration, /UNIQUE \(generation_id, data_point_name\)/u);
   assert.doesNotMatch(migration, /UNIQUE \(data_point_name\)/u);
 });
+
+test('keeps the remote identity and immutable recovery mapping fields unchanged after point creation', () => {
+  assert.match(migration, /NEW\.data_point_name IS DISTINCT FROM OLD\.data_point_name/u);
+  assert.match(migration, /NEW\.role IS DISTINCT FROM OLD\.role/u);
+  assert.match(migration, /BEFORE UPDATE OF data_point_name, role, payload, payload_hash ON meal_sync_points/u);
+});

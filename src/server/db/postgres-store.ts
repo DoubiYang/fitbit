@@ -942,7 +942,7 @@ function storeFor(queryable: Queryable): AuthStore {
       return 'synced';
     }
     const blocked = points.some((point) => (
-      point.status === 'unknown' || point.status === 'failed_action_required' || point.status === 'retrying'
+      point.status === 'unknown' || point.status === 'failed_action_required'
     ));
     const phase: MealSyncGenerationPhase = blocked
       ? 'recovery'
