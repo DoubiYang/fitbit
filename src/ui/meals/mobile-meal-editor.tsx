@@ -55,6 +55,40 @@ type Message = {
   suggestions?: MealAiSuggestionResponse[];
 };
 
+export type PendingSuggestionState = {
+  suggestions: MealAiSuggestionResponse[];
+  resolvedIds: ReadonlySet<string>;
+};
+
+export type MealPatchOrigin =
+  | { kind: 'manual' }
+  | { kind: 'ai_suggestion'; suggestionId: string };
+
+export function startPendingSuggestionState(suggestions: readonly MealAiSuggestionResponse[]): PendingSuggestionState {
+  return { suggestions: [...suggestions], resolvedIds: new Set() };
+}
+
+export function actionableMealAiSuggestions(state: PendingSuggestionState): MealAiSuggestionResponse[] {
+  return state.suggestions.filter((suggestion) => !state.resolvedIds.has(suggestion.id));
+}
+
+/**
+ * Only manual edits change the meal outside the response the assistant saw,
+ * so they invalidate every pending action. Applying one current response-local
+ * suggestion instead resolves exactly that id and preserves compatible peers.
+ */
+export function nextPendingSuggestionState(
+  current: PendingSuggestionState,
+  origin: MealPatchOrigin,
+): PendingSuggestionState {
+  if (origin.kind === 'manual') return startPendingSuggestionState([]);
+  if (!current.suggestions.some((suggestion) => suggestion.id === origin.suggestionId)) return current;
+  return {
+    suggestions: current.suggestions,
+    resolvedIds: new Set([...current.resolvedIds, origin.suggestionId]),
+  };
+}
+
 type IngredientInput = { key: number; nameZh: string; grams: string };
 type DishEditorState = { id: string; nameZh: string; ingredients: IngredientInput[] };
 type NutrientEditorState = { nutrient: PresentedMealNutrient; value: string; unit: NutritionUnit };
@@ -232,8 +266,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
-  const [pendingSuggestions, setPendingSuggestions] = useState<MealAiSuggestionResponse[]>([]);
-  const [resolvedSuggestions, setResolvedSuggestions] = useState<Set<string>>(() => new Set());
+  const [suggestionState, setSuggestionState] = useState<PendingSuggestionState>(() => startPendingSuggestionState([]));
   const ingredientKeys = useRef(100);
   const messageIds = useRef(1);
   const dialogTrigger = useRef<HTMLElement | undefined>(undefined);
@@ -278,7 +311,10 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 
   const editingLocked = session?.kind === 'saved' && (session.syncState === 'syncing' || session.syncState === 'recovery');
   const groups = useMemo(() => session ? groupMealNutrients(session.editor.nutrients) : [], [session]);
-  const applyAllState = useMemo(() => mealAiApplyAllState(pendingSuggestions), [pendingSuggestions]);
+  const pendingSuggestions = suggestionState.suggestions;
+  const resolvedSuggestions = suggestionState.resolvedIds;
+  const actionableSuggestions = useMemo(() => actionableMealAiSuggestions(suggestionState), [suggestionState]);
+  const applyAllState = useMemo(() => mealAiApplyAllState(actionableSuggestions), [actionableSuggestions]);
 
   function showError(message: string) {
     setNotice(undefined);
@@ -306,12 +342,11 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   }
 
   function invalidatePendingSuggestions() {
-    setPendingSuggestions([]);
-    setResolvedSuggestions(new Set());
+    setSuggestionState(startPendingSuggestionState([]));
     setSuggestionsOpen(false);
   }
 
-  async function applyPatch(patch: MealPatch): Promise<boolean> {
+  async function applyPatch(patch: MealPatch, origin: MealPatchOrigin = { kind: 'manual' }): Promise<boolean> {
     if (!session || editingLocked) {
       showError('同步期间不能编辑这餐。');
       return false;
@@ -333,9 +368,13 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
         return false;
       }
       if (!replaceFromPatchResponse(body)) return false;
-      // Each content patch changes the meal AI reasoned about. Suggestions are
-      // response-local, so none may remain actionable after a successful edit.
-      invalidatePendingSuggestions();
+      if (origin.kind === 'manual') {
+        // A manual change is outside the AI response's input, so all pending
+        // actions are stale. An AI action resolves only its response-local id.
+        invalidatePendingSuggestions();
+      } else {
+        setSuggestionState((current) => nextPendingSuggestionState(current, origin));
+      }
       setNotice(patch.kind === 'replace_ingredients' ? '这道菜已按食材克数重新计算。' : '该营养项已更新。');
       return true;
     } catch {
@@ -481,8 +520,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
       const parsed = mealAiSuggestionResponseSchema.safeParse({ suggestions: rawSuggestions });
       if (!parsed.success) throw new Error('AI 返回的建议无法安全应用，请换一种说法再问。');
       const suggestions = parsed.data.suggestions;
-      setPendingSuggestions(suggestions);
-      setResolvedSuggestions(new Set());
+      setSuggestionState(startPendingSuggestionState(suggestions));
       setMessages((current) => [...current, {
         id: messageIds.current++,
         role: 'assistant',
@@ -500,25 +538,22 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 
   async function applySuggestion(suggestion: MealAiSuggestionResponse) {
     if (resolvedSuggestions.has(suggestion.id)) return;
-    const applied = await applyPatch(mealSuggestionPatch(suggestion));
-    if (applied) setResolvedSuggestions((current) => new Set([...current, suggestion.id]));
+    await applyPatch(mealSuggestionPatch(suggestion), { kind: 'ai_suggestion', suggestionId: suggestion.id });
   }
 
   async function applyAllSuggestions() {
     if (applyAllState.disabled) return;
-    // Take a response-local snapshot. applyPatch invalidates visible pending
-    // suggestions, but an explicit Apply all may finish this one non-conflicting
-    // response in its original order.
-    const suggestions = pendingSuggestions.filter((suggestion) => !resolvedSuggestions.has(suggestion.id));
+    // Take a response-local snapshot so an explicit Apply all completes this
+    // one non-conflicting response in its original order.
+    const suggestions = actionableSuggestions;
     for (const suggestion of suggestions) {
-      const applied = await applyPatch(mealSuggestionPatch(suggestion));
+      const applied = await applyPatch(mealSuggestionPatch(suggestion), { kind: 'ai_suggestion', suggestionId: suggestion.id });
       if (!applied) return;
-      setResolvedSuggestions((current) => new Set([...current, suggestion.id]));
     }
   }
 
   function ignoreSuggestion(id: string) {
-    setResolvedSuggestions((current) => new Set([...current, id]));
+    setSuggestionState((current) => nextPendingSuggestionState(current, { kind: 'ai_suggestion', suggestionId: id }));
   }
 
   async function syncMeal() {
@@ -688,9 +723,9 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
             <h2>问 AI 修改这餐</h2>
             <p>AI 只看到这餐当前的结构化数据。建议必须由你查看并应用。</p>
             <button type="button" onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); }} disabled={busy || editingLocked}>问 AI 修改这餐</button>
-            {pendingSuggestions.length > 0 ? (
+            {actionableSuggestions.length > 0 ? (
               <button type="button" className={ui('secondaryButton')} onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); setSuggestionsOpen(true); }}>
-                查看并应用（{pendingSuggestions.length}）
+                查看并应用（{actionableSuggestions.length}）
               </button>
             ) : null}
           </section>
@@ -759,7 +794,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
               <div className={ui('messages')} aria-live="polite">
                 {messages.length === 0 ? <p>可以描述你想改的食材、份量或某个营养数值。</p> : messages.map((message) => <p key={message.id} data-role={message.role}><strong>{message.role === 'user' ? '你' : message.role === 'assistant' ? 'AI' : '提示'}：</strong>{message.text}</p>)}
               </div>
-              {pendingSuggestions.length > 0 ? <button type="button" className={ui('secondaryButton')} onClick={() => setSuggestionsOpen(true)}>查看并应用（{pendingSuggestions.length}）</button> : null}
+              {actionableSuggestions.length > 0 ? <button type="button" className={ui('secondaryButton')} onClick={() => setSuggestionsOpen(true)}>查看并应用（{actionableSuggestions.length}）</button> : null}
               <form className={ui('aiForm')} onSubmit={submitAiQuestion}>
                 <label className={ui('inputLabel')}>你的问题<textarea value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={2000} placeholder="例如：把鸡胸肉改成 150g，重新计算这道菜" disabled={busy} /></label>
                 <button type="submit" disabled={busy || !question.trim()}>{busy ? '正在请求…' : '发送给 AI'}</button>
@@ -767,8 +802,8 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
             </>
           ) : (
             <>
-              <div className={ui('dialogHeader')}><h3>待处理建议（{pendingSuggestions.length}）</h3><button type="button" className={ui('textButton')} onClick={() => setSuggestionsOpen(false)} disabled={busy}>继续对话</button></div>
-              {applyAllState.disabled ? <p className={ui('warning')}>{applyAllState.message}</p> : <button type="button" className={ui('secondaryButton')} onClick={() => void applyAllSuggestions()} disabled={busy || pendingSuggestions.length === resolvedSuggestions.size}>应用全部</button>}
+              <div className={ui('dialogHeader')}><h3>待处理建议（{actionableSuggestions.length}）</h3><button type="button" className={ui('textButton')} onClick={() => setSuggestionsOpen(false)} disabled={busy}>继续对话</button></div>
+              {applyAllState.disabled ? <p className={ui('warning')}>{applyAllState.message}</p> : <button type="button" className={ui('secondaryButton')} onClick={() => void applyAllSuggestions()} disabled={busy || actionableSuggestions.length === 0}>应用全部</button>}
               <ol className={ui('suggestionList')}>
               {pendingSuggestions.map((suggestion) => {
                   const done = resolvedSuggestions.has(suggestion.id);

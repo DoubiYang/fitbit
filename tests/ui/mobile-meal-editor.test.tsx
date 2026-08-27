@@ -7,10 +7,13 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { EditableMealDraft, EditableMealSaved } from '../../src/domain/meal-editor';
 import {
   MobileMealEditor,
+  actionableMealAiSuggestions,
   mealEditorEndpoint,
   mealSuggestionPatch,
+  nextPendingSuggestionState,
   openAccessibleDialog,
   savedMealUrl,
+  startPendingSuggestionState,
 } from '../../src/ui/meals/mobile-meal-editor';
 
 const draft: EditableMealDraft = {
@@ -100,6 +103,30 @@ test('strips response-only AI display fields before applying a suggestion as a s
   }), {
     kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 20, unit: 'g',
   });
+});
+
+test('keeps compatible current AI suggestions actionable after one apply, but clears them after a manual patch or new response', () => {
+  const first = {
+    id: 's-1', summary: '只修改蛋白质这一项为 20 g。', kind: 'set_nutrient' as const,
+    dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 20, unit: 'g' as const,
+  };
+  const second = {
+    id: 's-2', summary: '只修改维生素 C 这一项为 30 mg。', kind: 'set_nutrient' as const,
+    dishId: 'dish-1', nutrientCode: 'VITAMIN_C', value: 30, unit: 'mg' as const,
+  };
+  const afterFirst = nextPendingSuggestionState(startPendingSuggestionState([first, second]), {
+    kind: 'ai_suggestion', suggestionId: first.id,
+  });
+
+  assert.deepEqual(afterFirst.suggestions.map((suggestion) => suggestion.id), ['s-1', 's-2']);
+  assert.deepEqual(actionableMealAiSuggestions(afterFirst).map((suggestion) => suggestion.id), ['s-2']);
+
+  const afterManual = nextPendingSuggestionState(afterFirst, { kind: 'manual' });
+  assert.equal(afterManual.suggestions.length, 0);
+  assert.equal(afterManual.resolvedIds.size, 0);
+
+  const replacement = startPendingSuggestionState([second]);
+  assert.deepEqual(actionableMealAiSuggestions(replacement).map((suggestion) => suggestion.id), ['s-2']);
 });
 
 test('opens native dialogs modally, focuses inside, handles Escape, and restores launcher focus', () => {
