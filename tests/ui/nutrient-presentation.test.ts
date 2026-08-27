@@ -57,6 +57,22 @@ test('keeps unknown values unknown and exposes valid direct-edit units', () => {
   assert.deepEqual(editableNutrientUnits('VITAMIN_D'), ['g', 'mg', 'μg']);
 });
 
+test('uses a non-zero microgram display for a tiny local FDA-only nutrient', () => {
+  const nutrient = groupMealNutrients([
+    { dishId: 'dish-1', nutrientCode: 'TW_FDA:葉酸樣欄位', value: 0.00001, unit: 'g', source: 'tw_fda' },
+  ])[3]?.nutrients[0];
+
+  assert.deepEqual(nutrient && {
+    displayValue: nutrient.displayValue,
+    displayUnit: nutrient.displayUnit,
+    formattedValue: nutrient.formattedValue,
+  }, {
+    displayValue: 10,
+    displayUnit: 'μg',
+    formattedValue: '10 μg',
+  });
+});
+
 test('disables AI apply-all only when suggestion ordering would overwrite the same dish', () => {
   const replacement = {
     kind: 'replace_ingredients' as const,
@@ -100,4 +116,13 @@ test('never presents low intake when local reminder coverage is insufficient', (
     status: 'below_reference',
     message: '相对参考摄入量偏低',
   });
+  for (const coverage of [undefined, Number.NaN, Infinity, -0.01, 1.01]) {
+    assert.deepEqual(presentNutrientReminder({
+      status: 'below_reference',
+      coverage: coverage as number,
+    }), {
+      status: 'unknown',
+      message: '数据不足，暂时无法判断',
+    });
+  }
 });

@@ -173,9 +173,8 @@ function sourceLabel(source: EditableNutrient['source']): string {
   return source === 'user_edit' ? '已手动修改' : '台湾食药署数据';
 }
 
-function formatNumber(value: number, unit: NutritionUnit): string {
-  const maximumFractionDigits = unit === 'g' ? 2 : unit === 'kcal' ? 0 : 1;
-  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits }).format(value);
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { maximumSignificantDigits: 6 }).format(value);
 }
 
 /** Avoid exposing IEEE-754 conversion tails (for example 89.39999999999999 mg) in an editor. */
@@ -183,8 +182,17 @@ function normaliseDisplayValue(value: number): number {
   return value === 0 ? 0 : Number(value.toPrecision(12));
 }
 
+function displayUnitFor(input: MealNutrientPresentationInput, internal: { value: number; unit: 'g' | 'kcal' }): NutritionUnit {
+  if (!input.nutrientCode.startsWith('TW_FDA:') || internal.unit === 'kcal' || internal.value === 0) {
+    return mealAiNutrientUnit(input.nutrientCode);
+  }
+  if (internal.value < 0.001) return 'μg';
+  if (internal.value < 1) return 'mg';
+  return 'g';
+}
+
 function presentNutrient(input: MealNutrientPresentationInput): PresentedMealNutrient {
-  const displayUnit = mealAiNutrientUnit(input.nutrientCode);
+  const defaultDisplayUnit = mealAiNutrientUnit(input.nutrientCode);
   if (input.value === undefined || !Number.isFinite(input.value) || input.value < 0) {
     return {
       dishId: input.dishId,
@@ -193,11 +201,12 @@ function presentNutrient(input: MealNutrientPresentationInput): PresentedMealNut
       source: input.source,
       sourceLabel: sourceLabel(input.source),
       displayValue: undefined,
-      displayUnit,
+      displayUnit: defaultDisplayUnit,
       formattedValue: '未知',
     };
   }
   const internal = toInternalNutrientAmount(input.nutrientCode, input.value, input.unit);
+  const displayUnit = displayUnitFor(input, internal);
   const displayed = fromInternalNutrientAmount(input.nutrientCode, internal.value, displayUnit);
   const displayValue = normaliseDisplayValue(displayed.value);
   return {
@@ -208,7 +217,7 @@ function presentNutrient(input: MealNutrientPresentationInput): PresentedMealNut
     sourceLabel: sourceLabel(input.source),
     displayValue,
     displayUnit: displayed.unit,
-    formattedValue: `${formatNumber(displayValue, displayed.unit)} ${displayed.unit}`,
+    formattedValue: `${formatNumber(displayValue)} ${displayed.unit}`,
   };
 }
 
@@ -271,7 +280,16 @@ export type PresentedNutrientReminder = {
  * safety gate: insufficient local coverage can never surface as “偏低”.
  */
 export function presentNutrientReminder(input: NutrientReminderPresentationInput): PresentedNutrientReminder {
-  if (input.status === 'unknown' || (input.coverage !== undefined && input.coverage < 0.8)) {
+  if (input.status === 'not_eligible') {
+    return { status: 'not_eligible', message: '暂无适用的参考摄入量' };
+  }
+  if (
+    input.status === 'unknown'
+    || input.coverage === undefined
+    || !Number.isFinite(input.coverage)
+    || input.coverage < 0.8
+    || input.coverage > 1
+  ) {
     return { status: 'unknown', message: '数据不足，暂时无法判断' };
   }
   switch (input.status) {
@@ -281,7 +299,5 @@ export function presentNutrientReminder(input: NutrientReminderPresentationInput
       return { status: 'met', message: '已达到参考摄入量' };
     case 'above_ul':
       return { status: 'above_ul', message: '相对参考摄入量偏高' };
-    case 'not_eligible':
-      return { status: 'not_eligible', message: '暂无适用的参考摄入量' };
   }
 }
