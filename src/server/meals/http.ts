@@ -372,6 +372,7 @@ export async function handleCurrentMealSync(request: Request, mealId: string, de
   if (isResponse(session)) return session;
   const current = await deps.store.currentMeals.findCurrentMeal(session, mealId);
   if (!current) return response({ error: 'not_found' }, 404);
+  if (current.syncState === 'synced') return syncNotReady('no_unsynced_changes');
   if (!await deps.store.users.nutritionWritebackEnabled(session)) return syncNotReady('nutrition_writeback_disabled');
   const connection = await deps.store.connections.findByUserId(session);
   if (!connection || !syncable(connection.status)) return syncNotReady('connection_unavailable');

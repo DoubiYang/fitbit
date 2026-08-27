@@ -366,4 +366,30 @@ test('sync enforces writeback preconditions and only accepts a single locally sa
   assert.equal(accepted.status, 202);
   assert.deepEqual(await accepted.json(), { mealId: 'draft-1', syncState: 'syncing' });
   assert.equal(startCalls, 1);
+
+  let syncedStartCalls = 0;
+  const alreadySyncedStore: AuthStore = {
+    ...input.store,
+    currentMeals: {
+      ...input.store.currentMeals,
+      async findCurrentMeal(userId, mealId) {
+        const current = await input.store.currentMeals.findCurrentMeal(userId, mealId);
+        return current ? { ...current, syncState: 'synced' } : undefined;
+      },
+    },
+    mealSync: {
+      ...sync,
+      async startGeneration() {
+        syncedStartCalls += 1;
+        return undefined;
+      },
+    },
+  };
+  const alreadySynced = await handleCurrentMealSync(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1/sync', { method: 'POST', headers: headers(input.sessionToken) }),
+    'draft-1', deps(alreadySyncedStore),
+  );
+  assert.equal(alreadySynced.status, 409);
+  assert.deepEqual(await alreadySynced.json(), { error: 'meal_sync_not_ready', reason: 'no_unsynced_changes' });
+  assert.equal(syncedStartCalls, 0);
 });
