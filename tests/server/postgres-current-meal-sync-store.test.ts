@@ -144,6 +144,31 @@ test('PostgreSQL recovery returns the resumed pending phase after action-require
   assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
 });
 
+test('PostgreSQL recovery gives an unknown point priority over action-required resumption', async () => {
+  const pool = new RecordingPool([
+    { rows: [] },
+    { rows: [generationRow({ phase: 'recovery' })] },
+    { rows: [
+      createPointRow({ id: 'unknown-point', status: 'unknown' }),
+      createPointRow({ id: 'failed-point', status: 'failed_action_required' }),
+    ] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+
+  const resumed = await store.mealSync!.beginRecovery({
+    mealId: 'meal-1', userId: 'u1', now, reason: 'retry_this_meal',
+  });
+
+  assert.equal(resumed?.phase, 'recovery');
+  assert.ok(pool.queries.some((query) => /SET recovery_requested_at/u.test(query.text)));
+  assert.equal(pool.queries.some((query) => /SET status = \$4/u.test(query.text)), false);
+  assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+});
+
 test('PostgreSQL retrying keeps its generation pending and the current meal syncing', async () => {
   const leaseUntil = new Date(now.getTime() + 120_000);
   const retryAt = new Date(now.getTime() + 60_000);

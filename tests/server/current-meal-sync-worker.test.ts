@@ -137,6 +137,68 @@ test('a failed exact-GET recovery stays unknown so it cannot replay the original
   assert.equal(store.mealSyncPoints()[0]?.status, 'unknown');
 });
 
+test('a token failure while recovering an unknown write stays exact-GET-only after auth is restored', async () => {
+  const store = await savedMeal();
+  await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });
+  let creates = 0;
+  const initialGoogle = completedGoogle({
+    create: async () => { creates += 1; throw new Error('connection lost after request'); },
+  });
+  await runCurrentMealSyncOutbox({ store, now, tokenForUser: async () => 'token', google: initialGoogle });
+  await store.mealSync!.beginRecovery({ mealId: 'meal-1', userId: 'u1', now, reason: 'retry_this_meal' });
+  await runCurrentMealSyncOutbox({
+    store,
+    now,
+    tokenForUser: async () => { throw new Error('refresh token unavailable'); },
+    google: initialGoogle,
+  });
+  assert.equal(store.mealSyncPoints()[0]?.status, 'unknown');
+
+  const recoveryNames: string[] = [];
+  await store.mealSync!.beginRecovery({
+    mealId: 'meal-1', userId: 'u1', now: new Date(now.getTime() + 1_000), reason: 'auth_restored',
+  });
+  await runCurrentMealSyncOutbox({
+    store,
+    now: new Date(now.getTime() + 1_000),
+    tokenForUser: async () => 'fresh-token',
+    google: completedGoogle({ getDataPoint: async (_token, name) => { recoveryNames.push(name); return undefined; } }),
+  });
+
+  assert.equal(creates, 1);
+  assert.deepEqual(recoveryNames, [store.mealSyncPoints()[0]?.dataPointName]);
+  assert.equal(store.mealSyncPoints()[0]?.status, 'unknown');
+});
+
+test('a 403 exact-GET recovery stays exact-GET-only after authorization is restored', async () => {
+  const store = await savedMeal();
+  await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });
+  let creates = 0;
+  const initialGoogle = completedGoogle({
+    create: async () => { creates += 1; throw new Error('connection lost after request'); },
+    getDataPoint: async () => { throw new GoogleNutritionWriteError(403); },
+  });
+  await runCurrentMealSyncOutbox({ store, now, tokenForUser: async () => 'token', google: initialGoogle });
+  await store.mealSync!.beginRecovery({ mealId: 'meal-1', userId: 'u1', now, reason: 'retry_this_meal' });
+  await runCurrentMealSyncOutbox({ store, now, tokenForUser: async () => 'token', google: initialGoogle });
+  assert.equal(store.mealSyncPoints()[0]?.status, 'unknown');
+
+  const recoveryNames: string[] = [];
+  await store.mealSync!.beginRecovery({
+    mealId: 'meal-1', userId: 'u1', now: new Date(now.getTime() + 1_000), reason: 'authorization_restored',
+  });
+  await runCurrentMealSyncOutbox({
+    store,
+    now: new Date(now.getTime() + 1_000),
+    tokenForUser: async () => 'fresh-token',
+    google: completedGoogle({ getDataPoint: async (_token, name) => { recoveryNames.push(name); return undefined; } }),
+  });
+
+  assert.equal(creates, 1);
+  assert.deepEqual(recoveryNames, [store.mealSyncPoints()[0]?.dataPointName]);
+  assert.equal(store.mealSyncPoints()[0]?.status, 'unknown');
+});
+
 test('worker polls an accepted operation instead of replaying its create request', async () => {
   const store = await savedMeal();
   await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });

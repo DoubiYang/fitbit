@@ -133,8 +133,11 @@ async function recoverUnknownPoint(input: {
   try {
     accessToken = await accessTokenFor(input);
   } catch {
-    if (await input.store.mealSync!.markPointFailedActionRequired({ ...owner, errorCode: 'token_unavailable' })) {
-      input.result.failed += 1;
+    // This is already an indeterminate write.  Do not turn a recovery-token
+    // problem into failed_action_required: beginRecovery would resume that
+    // status as pending and make the original create eligible for POST.
+    if (await input.store.mealSync!.markPointUnknown({ ...owner, errorCode: 'token_unavailable' })) {
+      input.result.unknown += 1;
     }
     return;
   }
@@ -155,14 +158,11 @@ async function recoverUnknownPoint(input: {
     }
   } catch (error) {
     // This point represents a write whose outcome is unknown.  A failed read
-    // cannot safely turn it into retrying: retrying create points are eligible
-    // for POST, which would replay that uncertain write.  Authentication is
-    // the only actionable exception; all other read failures remain unknown.
-    if (error instanceof GoogleNutritionWriteError && (error.status === 401 || error.status === 403)) {
-      if (await input.store.mealSync!.markPointFailedActionRequired({ ...owner, errorCode: errorCode(error) })) {
-        input.result.failed += 1;
-      }
-    } else if (await input.store.mealSync!.markPointUnknown({ ...owner, errorCode: errorCode(error) })) {
+    // cannot safely transition to *any* resumable state: retrying and
+    // failed_action_required can both become POST-eligible after recovery.
+    // Keep the error in last_error_code while retaining unknown's exact-GET
+    // recovery path, including for token and 401/403 failures.
+    if (await input.store.mealSync!.markPointUnknown({ ...owner, errorCode: errorCode(error) })) {
       input.result.unknown += 1;
     }
   }
