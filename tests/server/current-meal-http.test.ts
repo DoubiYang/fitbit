@@ -14,7 +14,7 @@ import {
   handleCurrentMealDraftSave,
   handleCurrentMealSync,
 } from '../../src/server/meals/http';
-import type { MealAssistantClient } from '../../src/server/meals/meal-assistant';
+import { MealAssistantError, type MealAssistantClient } from '../../src/server/meals/meal-assistant';
 import type { TwFdaFoodCatalog } from '../../src/server/nutrition/tw-fda';
 
 const now = new Date('2026-08-27T12:00:00.000Z');
@@ -150,6 +150,67 @@ test('draft PATCH recalculates every nutrient for ingredients but replaces only 
   ]);
 });
 
+test('draft PATCH reports a transaction outage as a safe 503 instead of invalid user input', async () => {
+  const input = await insertDraft();
+  const unavailableStore: AuthStore = {
+    ...input.store,
+    async withTransaction() { throw new Error('database connection reset'); },
+  };
+
+  const response = await handleCurrentMealDraft(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1', {
+      method: 'PATCH', headers: headers(input.sessionToken, true),
+      body: JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }),
+    }), 'draft-1', deps(unavailableStore),
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'service_unavailable' });
+});
+
+test('draft ingredient PATCH reports a catalog outage as a safe 503', async () => {
+  const input = await insertDraft();
+  const response = await handleCurrentMealDraft(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1', {
+      method: 'PATCH', headers: headers(input.sessionToken, true),
+      body: JSON.stringify({ kind: 'replace_ingredients', dishId: 'dish-1', nameZh: '鸡胸肉', ingredients: [{ nameZh: '鸡胸肉', grams: 50 }] }),
+    }),
+    'draft-1',
+    { ...deps(input.store), catalogForUser: async () => { throw new Error('catalog database unavailable'); } },
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'service_unavailable' });
+});
+
+test('draft PATCH rejects a declared oversized JSON body before parsing it', async () => {
+  const input = await insertDraft();
+  const response = await handleCurrentMealDraft(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1', {
+      method: 'PATCH',
+      headers: { ...headers(input.sessionToken, true), 'Content-Length': '70000' },
+      body: JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }),
+    }), 'draft-1', deps(input.store),
+  );
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: 'request_too_large' });
+});
+
+test('draft PATCH stops counting an oversized JSON stream without a Content-Length declaration', async () => {
+  const input = await insertDraft();
+  const body = `${JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' })}${' '.repeat(70_000)}`;
+  const request = new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1', {
+    method: 'PATCH', headers: headers(input.sessionToken, true), body,
+  });
+  assert.equal(request.headers.get('Content-Length'), null);
+
+  const response = await handleCurrentMealDraft(request, 'draft-1', deps(input.store));
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: 'request_too_large' });
+});
+
 test('saving a draft writes only the current meal snapshot and saved edits become unsynced', async () => {
   const input = await insertDraft();
   const savedResponse = await handleCurrentMealDraftSave(
@@ -173,6 +234,41 @@ test('saving a draft writes only the current meal snapshot and saved edits becom
   const body = await response.json() as { meal: { nutrients: Array<{ nutrientCode: string; value: number }> }; syncState: string };
   assert.equal(body.syncState, 'unsynced');
   assert.equal(body.meal.nutrients.find((nutrient) => nutrient.nutrientCode === 'PROTEIN')?.value, 10);
+});
+
+test('draft save distinguishes a missing draft from a transaction outage', async () => {
+  const input = await insertDraft();
+  const unavailableStore: AuthStore = {
+    ...input.store,
+    async withTransaction() { throw new Error('database connection reset'); },
+  };
+
+  const response = await handleCurrentMealDraftSave(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1/save', { method: 'POST', headers: headers(input.sessionToken) }),
+    'draft-1', deps(unavailableStore),
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'service_unavailable' });
+});
+
+test('saved PATCH reports a transaction outage as a safe 503', async () => {
+  const input = await insertDraft();
+  await input.store.currentMeals.saveEditorDraft({ userId: input.userId, draftId: 'draft-1', now });
+  const unavailableStore: AuthStore = {
+    ...input.store,
+    async withTransaction() { throw new Error('database connection reset'); },
+  };
+
+  const response = await handleCurrentMeal(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1', {
+      method: 'PATCH', headers: headers(input.sessionToken, true),
+      body: JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }),
+    }), 'draft-1', deps(unavailableStore),
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'service_unavailable' });
 });
 
 test('AI suggestion routes receive only the current structured meal and never persist suggestions', async () => {
@@ -203,6 +299,62 @@ test('AI suggestion routes receive only the current structured meal and never pe
   );
   assert.equal(savedResponse.status, 200);
   assert.equal(received.length, 2);
+});
+
+test('AI suggestion requests reject an oversized declared JSON body before invoking the model', async () => {
+  const input = await insertDraft();
+  let calls = 0;
+  const assistant: MealAssistantClient = {
+    async complete() {
+      calls += 1;
+      return JSON.stringify({ suggestions: [{ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }] });
+    },
+  };
+  const response = await handleCurrentMealDraftAiSuggestions(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1/ai-suggestions', {
+      method: 'POST',
+      headers: { ...headers(input.sessionToken, true), 'Content-Length': '70000' },
+      body: JSON.stringify({ question: '给我一个建议' }),
+    }), 'draft-1', deps(input.store, assistant),
+  );
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: 'request_too_large' });
+  assert.equal(calls, 0);
+});
+
+test('AI routes preserve known model errors but report catalog lookup outages as safe 503 responses', async () => {
+  const input = await insertDraft();
+  const unavailableModel = await handleCurrentMealDraftAiSuggestions(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1/ai-suggestions', {
+      method: 'POST', headers: headers(input.sessionToken, true), body: JSON.stringify({ question: '给我一个建议' }),
+    }),
+    'draft-1',
+    deps(input.store, { async complete() { throw new MealAssistantError('ai_model_unavailable'); } }),
+  );
+  assert.equal(unavailableModel.status, 502);
+  assert.deepEqual(await unavailableModel.json(), { error: 'ai_model_unavailable' });
+
+  const catalogOutage = await handleCurrentMealDraftAiSuggestions(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1/ai-suggestions', {
+      method: 'POST', headers: headers(input.sessionToken, true), body: JSON.stringify({ question: '换成鸡胸肉' }),
+    }),
+    'draft-1',
+    {
+      ...deps(input.store, {
+        async complete() {
+          return JSON.stringify({ suggestions: [{ kind: 'replace_ingredients', dishId: 'dish-1', nameZh: '鸡胸肉', ingredients: [{ nameZh: '鸡胸肉', grams: 50 }] }] });
+        },
+      }),
+      catalogForUser: async () => ({
+        catalog: { async findExact() { throw new Error('catalog lookup connection reset'); } },
+        canWriteNutrition: true,
+        connectionSyncable: true,
+      }),
+    },
+  );
+  assert.equal(catalogOutage.status, 503);
+  assert.deepEqual(await catalogOutage.json(), { error: 'service_unavailable' });
 });
 
 test('writes require origin and ownership, and saved edits are locked while sync state is active', async () => {

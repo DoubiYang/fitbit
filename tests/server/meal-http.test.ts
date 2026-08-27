@@ -5,7 +5,7 @@ import sharp from 'sharp';
 
 import { completeGoogleOAuth, startGoogleOAuth } from '../../src/server/auth/oauth-service';
 import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
-import type { GoogleOAuthClient } from '../../src/server/auth/types';
+import type { AuthStore, GoogleOAuthClient } from '../../src/server/auth/types';
 import { loadConfig, type OAuthConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { handleMealConfirm, handleMealDraft, handleMealPhoto } from '../../src/server/meals/http';
@@ -234,6 +234,27 @@ test('meal photo keeps a vision service failure distinct from local nutrition ca
   });
   assert.equal(response.status, 502);
   assert.deepEqual(await response.json(), { error: 'vision_unavailable' });
+});
+
+test('meal photo reports a current-draft store outage as a safe 503', async () => {
+  const signedIn = await signedInStore();
+  const unavailableStore: AuthStore = {
+    ...signedIn.store,
+    currentMeals: {
+      ...signedIn.store.currentMeals,
+      async insertEditorDraft() { throw new Error('database connection reset'); },
+    },
+  };
+  const response = await handleMealPhoto(await photoRequest({ sessionToken: signedIn.sessionToken }), {
+    config: config(),
+    store: unavailableStore,
+    now: () => now,
+    vision: { async complete() { return visionJson; } },
+    catalogForUser: async () => ({ catalog: catalog(), canWriteNutrition: true, connectionSyncable: true }),
+  });
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'service_unavailable' });
 });
 
 test('legacy meal confirm is permanently retired and never queues a legacy writeback', async () => {
