@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import sharp from 'sharp';
+
 import { completeGoogleOAuth, startGoogleOAuth } from '../../src/server/auth/oauth-service';
 import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
 import type { AuthStore, GoogleOAuthClient } from '../../src/server/auth/types';
 import { loadConfig, type OAuthConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import { draftFromVision } from '../../src/server/meals/current-meal';
 import { runCurrentMealSyncOutbox } from '../../src/server/meals/current-meal-sync';
 import {
   handleCurrentMeal,
@@ -14,8 +15,10 @@ import {
   handleCurrentMealDraft,
   handleCurrentMealDraftSave,
   handleCurrentMealSync,
+  handleMealPhoto,
 } from '../../src/server/meals/http';
 import type { MealAssistantClient } from '../../src/server/meals/meal-assistant';
+import type { VisionClient } from '../../src/server/meals/deepseek-vision';
 import type { GoogleNutritionOutboxClient } from '../../src/server/meals/nutrition-outbox';
 import type { TwFdaFoodCatalog } from '../../src/server/nutrition/tw-fda';
 
@@ -104,6 +107,20 @@ function headers(sessionToken: string, json = false): HeadersInit {
   };
 }
 
+async function photoRequest(sessionToken: string): Promise<Request> {
+  const form = new FormData();
+  form.set('aiPhotoConsent', 'true');
+  form.set('mealType', 'LUNCH');
+  form.set('eatenAt', now.toISOString());
+  const bytes = await sharp({
+    create: { width: 16, height: 16, channels: 3, background: 'red' },
+  }).jpeg().toBuffer();
+  form.set('photo', new Blob([bytes], { type: 'image/jpeg' }), 'meal.jpg');
+  return new Request('http://localhost:3000/rhythm/api/meals/photo', {
+    method: 'POST', headers: headers(sessionToken), body: form,
+  });
+}
+
 function deps(store: AuthStore, assistant?: MealAssistantClient) {
   return {
     config: config(),
@@ -158,23 +175,36 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
     photoQuality: 'usable' as const,
     globalUncertainties: ['raw image uncertainty must not reach the saved meal'],
   };
-  const editor = await draftFromVision({
-    mealId: 'draft-1', mealType: 'LUNCH', eatenAt: now.toISOString(), vision,
-  }, catalog);
-  const dishId = editor.dishes[0]!.id;
-  await input.store.currentMeals.insertEditorDraft({
-    id: 'draft-1', userId: input.userId, mealType: 'LUNCH', eatenAt: now, vision, editor, now,
+  const visionRequests: Array<Parameters<VisionClient['complete']>[0]> = [];
+  const photoResponse = await handleMealPhoto(await photoRequest(input.sessionToken), {
+    ...deps(input.store),
+    vision: {
+      async complete(request) {
+        visionRequests.push(structuredClone(request));
+        return JSON.stringify(vision);
+      },
+    },
   });
+  assert.equal(photoResponse.status, 201);
+  const photoBody = await photoResponse.json() as {
+    draft?: { mealId?: string; dishes?: Array<{ id?: string }> };
+  };
+  const draftId = photoBody.draft?.mealId;
+  const dishId = photoBody.draft?.dishes?.[0]?.id;
+  assert.ok(draftId && dishId);
+  assert.equal(visionRequests.length, 1);
+  assert.equal(visionRequests[0]?.photo.mime, 'image/jpeg');
+  assert.ok(visionRequests[0]?.photo.bytes.length);
 
   const ingredientsResponse = await handleCurrentMealDraft(
-    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1', {
+    new Request(`http://localhost:3000/rhythm/api/meals/drafts/${draftId}`, {
       method: 'PATCH',
       headers: headers(input.sessionToken, true),
       body: JSON.stringify({
         kind: 'replace_ingredients', dishId, nameZh: '鸡胸肉', ingredients: [{ nameZh: '鸡胸肉', grams: 50 }],
       }),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(ingredientsResponse.status, 200);
@@ -188,12 +218,12 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
   ]);
 
   const nutrientResponse = await handleCurrentMealDraft(
-    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1', {
+    new Request(`http://localhost:3000/rhythm/api/meals/drafts/${draftId}`, {
       method: 'PATCH',
       headers: headers(input.sessionToken, true),
       body: JSON.stringify({ kind: 'set_nutrient', dishId, nutrientCode: 'PROTEIN', value: 9000, unit: 'mg' }),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(nutrientResponse.status, 200);
@@ -207,27 +237,27 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
   ]);
 
   const saveResponse = await handleCurrentMealDraftSave(
-    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1/save', {
+    new Request(`http://localhost:3000/rhythm/api/meals/drafts/${draftId}/save`, {
       method: 'POST', headers: headers(input.sessionToken),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(saveResponse.status, 201);
   assert.deepEqual(input.store.outboxRows(), []);
   assert.deepEqual(input.store.mealSyncPoints(), []);
-  assert.equal(await input.store.currentMeals.findEditorDraft(input.userId, 'draft-1'), undefined);
+  assert.equal(await input.store.currentMeals.findEditorDraft(input.userId, draftId), undefined);
 
   const readResponse = await handleCurrentMeal(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1', { headers: headers(input.sessionToken) }),
-    'draft-1',
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}`, { headers: headers(input.sessionToken) }),
+    draftId,
     deps(input.store),
   );
   assert.equal(readResponse.status, 200);
   const readBody = await readResponse.json() as { meal: unknown; syncState: string };
   assert.equal(readBody.syncState, 'unsynced');
   assertNoTransientMealData(readBody.meal);
-  assertNoTransientMealData(await input.store.currentMeals.findCurrentMeal(input.userId, 'draft-1'));
+  assertNoTransientMealData(await input.store.currentMeals.findCurrentMeal(input.userId, draftId));
 
   const assistantRequests: Array<Parameters<MealAssistantClient['complete']>[0]> = [];
   const assistant: MealAssistantClient = {
@@ -239,12 +269,12 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
     },
   };
   const aiResponse = await handleCurrentMealAiSuggestions(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1/ai-suggestions', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}/ai-suggestions`, {
       method: 'POST',
       headers: headers(input.sessionToken, true),
       body: JSON.stringify({ question: '蛋白质看起来偏高吗？' }),
     }),
-    'draft-1',
+    draftId,
     deps(input.store, assistant),
   );
   assert.equal(aiResponse.status, 200);
@@ -267,10 +297,10 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
   });
 
   const initialSync = await handleCurrentMealSync(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1/sync', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}/sync`, {
       method: 'POST', headers: headers(input.sessionToken),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(initialSync.status, 202);
@@ -278,20 +308,20 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
   assert.deepEqual(writes, ['create']);
 
   const editResponse = await handleCurrentMeal(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}`, {
       method: 'PATCH',
       headers: headers(input.sessionToken, true),
       body: JSON.stringify({ kind: 'set_nutrient', dishId, nutrientCode: 'PROTEIN', value: 12, unit: 'g' }),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(editResponse.status, 200);
   const resync = await handleCurrentMealSync(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1/sync', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}/sync`, {
       method: 'POST', headers: headers(input.sessionToken),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(resync.status, 202);
@@ -301,20 +331,20 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
   assert.deepEqual(writes, ['create', 'delete', 'create']);
 
   const unknownEdit = await handleCurrentMeal(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}`, {
       method: 'PATCH',
       headers: headers(input.sessionToken, true),
       body: JSON.stringify({ kind: 'set_nutrient', dishId, nutrientCode: 'PROTEIN', value: 13, unit: 'g' }),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(unknownEdit.status, 200);
   const unknownSync = await handleCurrentMealSync(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1/sync', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}/sync`, {
       method: 'POST', headers: headers(input.sessionToken),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(unknownSync.status, 202);
@@ -344,10 +374,10 @@ test('mobile meal review persists only the reviewed meal and writes Google only 
   assert.equal(unknownPosts, 1);
 
   const recovery = await handleCurrentMealSync(
-    new Request('http://localhost:3000/rhythm/api/meals/draft-1/sync', {
+    new Request(`http://localhost:3000/rhythm/api/meals/${draftId}/sync`, {
       method: 'POST', headers: headers(input.sessionToken),
     }),
-    'draft-1',
+    draftId,
     deps(input.store),
   );
   assert.equal(recovery.status, 202);
