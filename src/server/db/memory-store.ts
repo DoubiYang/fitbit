@@ -2,13 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
-import type { AuthStore, ConnectionRow, OauthTransactionRow, SessionRow } from '../auth/types';
+import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, SessionRow } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import { CurrentMealEditLockedError, type CurrentMealDishRow, type CurrentMealIngredientRow, type CurrentMealNutrientRow, type CurrentMealSnapshot, type CurrentMealStore, type MealDishRow, type MealDraftRow, type MealIngredientRow, type MealNutrientRow, type MealNutritionProvenanceRow, type MealSyncPointRow, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
+import { buildCurrentMealGooglePayloads } from '../meals/current-meal';
+import { CurrentMealEditLockedError, type CurrentMealDishRow, type CurrentMealIngredientRow, type CurrentMealNutrientRow, type CurrentMealSnapshot, type CurrentMealStore, type MealDishRow, type MealDraftRow, type MealIngredientRow, type MealNutrientRow, type MealNutritionProvenanceRow, type MealSyncGenerationRow, type MealSyncPointRow, type MealSyncPointStatus, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
 import { resolveExactTwFdaFood, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
-export type MemoryStore = Omit<AuthStore, 'currentMeals'> & {
+export type MemoryStore = Omit<AuthStore, 'currentMeals' | 'mealSync'> & {
   currentMeals: CurrentMealStore;
+  mealSync: MealSyncStore;
   deletedHealthSnapshotUserIds: string[];
   seedFoodComposition(foods: LocalTwFdaFood[]): void;
   outboxRows(): OutboxRow[];
@@ -70,6 +72,21 @@ function cloneOutbox(row: OutboxRow): OutboxRow {
   };
 }
 
+function cloneMealSyncGeneration(row: MealSyncGenerationRow): MealSyncGenerationRow {
+  return { ...row, createdAt: new Date(row.createdAt), updatedAt: new Date(row.updatedAt) };
+}
+
+function cloneMealSyncPoint(row: MealSyncPointRow): MealSyncPointRow {
+  return {
+    ...row,
+    payload: row.payload ? structuredClone(row.payload) : undefined,
+    nextAttemptAt: row.nextAttemptAt ? new Date(row.nextAttemptAt) : undefined,
+    leaseUntil: row.leaseUntil ? new Date(row.leaseUntil) : undefined,
+    lastAttemptAt: row.lastAttemptAt ? new Date(row.lastAttemptAt) : undefined,
+    recoveryRequestedAt: row.recoveryRequestedAt ? new Date(row.recoveryRequestedAt) : undefined,
+  };
+}
+
 function cloneCurrentMeal(row: CurrentMealSnapshot): CurrentMealSnapshot {
   return {
     ...structuredClone(row),
@@ -106,7 +123,15 @@ function ownsOutboxLease(row: OutboxRow | undefined, input: { userId: string; le
   return Boolean(row && row.userId === input.userId && row.leaseUntil?.getTime() === input.leaseUntil.getTime());
 }
 
-export function createMemoryStore(): MemoryStore {
+function isSyncBlockedStatus(status: MealSyncPointStatus): boolean {
+  return status === 'unknown' || status === 'failed_action_required' || status === 'retrying';
+}
+
+function resumeStatus(point: MealSyncPointRow): 'pending' | 'operation_pending' {
+  return point.googleOperationName || point.recoveryState === 'operation_pending' ? 'operation_pending' : 'pending';
+}
+
+export function createMemoryStore(options: { transactionChild?: boolean } = {}): MemoryStore {
   const users = new Set<string>();
   const writebackEnabled = new Map<string, boolean>();
   const drafts = new Map<string, MealDraftRow>();
@@ -115,6 +140,8 @@ export function createMemoryStore(): MemoryStore {
   const currentDishes = new Map<string, CurrentMealDishRow[]>();
   const currentIngredients = new Map<string, CurrentMealIngredientRow[]>();
   const currentNutrients = new Map<string, CurrentMealNutrientRow[]>();
+  const syncGenerations = new Map<string, MealSyncGenerationRow>();
+  const syncPoints = new Map<string, MealSyncPointRow>();
   const versions: MealVersionRow[] = [];
   const dishes: MealDishRow[] = [];
   const ingredients: MealIngredientRow[] = [];
@@ -184,6 +211,8 @@ export function createMemoryStore(): MemoryStore {
       currentDishes: new Map([...currentDishes].map(([id, rows]) => [id, structuredClone(rows)])),
       currentIngredients: new Map([...currentIngredients].map(([id, rows]) => [id, structuredClone(rows)])),
       currentNutrients: new Map([...currentNutrients].map(([id, rows]) => [id, structuredClone(rows)])),
+      syncGenerations: new Map([...syncGenerations].map(([id, row]) => [id, cloneMealSyncGeneration(row)])),
+      syncPoints: new Map([...syncPoints].map(([id, row]) => [id, cloneMealSyncPoint(row)])),
       versions: structuredClone(versions),
       dishes: structuredClone(dishes),
       ingredients: structuredClone(ingredients),
@@ -198,39 +227,342 @@ export function createMemoryStore(): MemoryStore {
     };
   }
 
-  function restoreMap<T>(target: Map<string, T>, source: Map<string, T>): void {
+  function restoreMap<T>(target: Map<string, T>, source: Map<string, T>, clone: (row: T) => T): void {
     target.clear();
-    for (const [id, row] of source) target.set(id, row);
+    for (const [id, row] of source) target.set(id, clone(row));
   }
 
   function restoreState(state: ReturnType<typeof snapshotState>): void {
     users.clear();
     for (const user of state.users) users.add(user);
-    restoreMap(writebackEnabled, state.writebackEnabled);
-    restoreMap(drafts, state.drafts);
-    restoreMap(editorDrafts, state.editorDrafts);
-    restoreMap(currentMeals, state.currentMeals);
-    restoreMap(currentDishes, state.currentDishes);
-    restoreMap(currentIngredients, state.currentIngredients);
-    restoreMap(currentNutrients, state.currentNutrients);
-    versions.splice(0, versions.length, ...state.versions);
-    dishes.splice(0, dishes.length, ...state.dishes);
-    ingredients.splice(0, ingredients.length, ...state.ingredients);
-    nutrients.splice(0, nutrients.length, ...state.nutrients);
-    provenance.splice(0, provenance.length, ...state.provenance);
-    outbox.splice(0, outbox.length, ...state.outbox);
-    restoreMap(connections, state.connections);
-    restoreMap(sessions, state.sessions);
-    restoreMap(transactions, state.transactions);
+    restoreMap(writebackEnabled, state.writebackEnabled, (value) => value);
+    restoreMap(drafts, state.drafts, (row) => structuredClone(row));
+    restoreMap(editorDrafts, state.editorDrafts, (row) => structuredClone(row));
+    restoreMap(currentMeals, state.currentMeals, cloneCurrentMeal);
+    restoreMap(currentDishes, state.currentDishes, (rows) => structuredClone(rows));
+    restoreMap(currentIngredients, state.currentIngredients, (rows) => structuredClone(rows));
+    restoreMap(currentNutrients, state.currentNutrients, (rows) => structuredClone(rows));
+    restoreMap(syncGenerations, state.syncGenerations, cloneMealSyncGeneration);
+    restoreMap(syncPoints, state.syncPoints, cloneMealSyncPoint);
+    versions.splice(0, versions.length, ...structuredClone(state.versions));
+    dishes.splice(0, dishes.length, ...structuredClone(state.dishes));
+    ingredients.splice(0, ingredients.length, ...structuredClone(state.ingredients));
+    nutrients.splice(0, nutrients.length, ...structuredClone(state.nutrients));
+    provenance.splice(0, provenance.length, ...structuredClone(state.provenance));
+    outbox.splice(0, outbox.length, ...state.outbox.map(cloneOutbox));
+    restoreMap(connections, state.connections, cloneConnection);
+    restoreMap(sessions, state.sessions, (row) => structuredClone(row));
+    restoreMap(transactions, state.transactions, (row) => structuredClone(row));
     deletedHealthSnapshotUserIds.splice(0, deletedHealthSnapshotUserIds.length, ...state.deletedHealthSnapshotUserIds);
-    foodComposition = state.foodComposition;
+    foodComposition = structuredClone(state.foodComposition);
   }
 
-  const store: AuthStore = {
+  let store!: AuthStore;
+
+  function activeGeneration(mealId: string, userId: string): MealSyncGenerationRow | undefined {
+    return [...syncGenerations.values()]
+      .filter((generation) => generation.mealId === mealId && generation.userId === userId && generation.phase !== 'synced')
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))[0];
+  }
+
+  function pointsForGeneration(generationId: string): MealSyncPointRow[] {
+    return [...syncPoints.values()].filter((point) => point.generationId === generationId);
+  }
+
+  function ownsSyncPointLease(
+    point: MealSyncPointRow | undefined,
+    input: { generationId: string; userId: string; leaseUntil: Date },
+  ): point is MealSyncPointRow {
+    return Boolean(
+      point
+      && point.generationId === input.generationId
+      && point.userId === input.userId
+      && point.leaseUntil?.getTime() === input.leaseUntil.getTime(),
+    );
+  }
+
+  function updateCurrentMealSyncState(generation: MealSyncGenerationRow, state: CurrentMealSnapshot['syncState'], now: Date): void {
+    const meal = currentMeals.get(generation.mealId);
+    if (!meal || meal.userId !== generation.userId) return;
+    currentMeals.set(meal.id, { ...meal, syncState: state, updatedAt: new Date(now) });
+  }
+
+  function finaliseGeneration(generation: MealSyncGenerationRow, now: Date): void {
+    generation.phase = 'synced';
+    generation.updatedAt = new Date(now);
+    const meal = currentMeals.get(generation.mealId);
+    if (!meal || meal.userId !== generation.userId) return;
+    const priorGenerationId = meal.lastSyncedGenerationId;
+    if (priorGenerationId && priorGenerationId !== generation.id) {
+      syncGenerations.delete(priorGenerationId);
+      for (const [pointId, point] of syncPoints) {
+        if (point.generationId === priorGenerationId) syncPoints.delete(pointId);
+      }
+    }
+    for (const [pointId, point] of syncPoints) {
+      if (point.generationId === generation.id && point.role === 'delete_target') syncPoints.delete(pointId);
+    }
+    currentMeals.set(meal.id, {
+      ...meal,
+      syncState: 'synced',
+      lastSyncedGenerationId: generation.id,
+      updatedAt: new Date(now),
+    });
+  }
+
+  function refreshGenerationState(generation: MealSyncGenerationRow, now: Date): void {
+    const points = pointsForGeneration(generation.id);
+    const createPoints = points.filter((point) => point.role === 'create_target');
+    const deletePoints = points.filter((point) => point.role === 'delete_target');
+    if (createPoints.length > 0 && createPoints.every((point) => point.status === 'synced')) {
+      finaliseGeneration(generation, now);
+      return;
+    }
+    if (points.some((point) => isSyncBlockedStatus(point.status))) {
+      generation.phase = 'recovery';
+      generation.updatedAt = new Date(now);
+      updateCurrentMealSyncState(generation, 'recovery', now);
+      return;
+    }
+    generation.phase = deletePoints.every((point) => point.status === 'synced') ? 'pending_create' : 'pending_delete';
+    generation.updatedAt = new Date(now);
+    updateCurrentMealSyncState(generation, 'syncing', now);
+  }
+
+  async function inSyncTransaction<T>(work: (sync: MealSyncStore) => Promise<T>): Promise<T> {
+    if (options.transactionChild) return work(mealSync);
+    return store.withTransaction((inner) => work(inner.mealSync!));
+  }
+
+  const mealSync: MealSyncStore = {
+    async startGeneration(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.startGeneration(input);
+        const meal = currentMeals.get(input.mealId);
+        if (!meal || meal.userId !== input.userId || meal.syncState !== 'unsynced') return undefined;
+        if (activeGeneration(input.mealId, input.userId)) return undefined;
+        const payloads = buildCurrentMealGooglePayloads({
+          meal,
+          dataPointIdForDish: () => `d-${randomUUID()}`,
+        });
+        if (payloads.length === 0) return undefined;
+        const generation: MealSyncGenerationRow = {
+          id: randomUUID(),
+          mealId: input.mealId,
+          userId: input.userId,
+          contentRevision: meal.contentRevision,
+          phase: meal.lastSyncedGenerationId ? 'pending_delete' : 'pending_create',
+          createdAt: new Date(input.now),
+          updatedAt: new Date(input.now),
+        };
+        const previousPoints = meal.lastSyncedGenerationId
+          ? pointsForGeneration(meal.lastSyncedGenerationId).filter((point) => point.role === 'create_target')
+          : [];
+        syncGenerations.set(generation.id, generation);
+        for (const previous of previousPoints) {
+          const point: MealSyncPointRow = {
+            id: randomUUID(), generationId: generation.id, userId: input.userId, dishKey: previous.dishKey,
+            role: 'delete_target', dataPointName: previous.dataPointName, payload: undefined, payloadHash: undefined,
+            status: 'pending', attemptCount: 0, nextAttemptAt: undefined, leaseUntil: undefined, lastAttemptAt: undefined,
+            lastErrorCode: undefined, googleOperationName: undefined, recoveryState: undefined, recoveryRequestedAt: undefined,
+          };
+          syncPoints.set(point.id, point);
+        }
+        for (const payload of payloads) {
+          const point: MealSyncPointRow = {
+            id: randomUUID(), generationId: generation.id, userId: input.userId, dishKey: payload.dishKey,
+            role: 'create_target', dataPointName: payload.dataPoint.name,
+            payload: structuredClone(payload.dataPoint) as unknown as Record<string, unknown>, payloadHash: payload.payloadHash,
+            status: 'pending', attemptCount: 0, nextAttemptAt: undefined, leaseUntil: undefined, lastAttemptAt: undefined,
+            lastErrorCode: undefined, googleOperationName: undefined, recoveryState: undefined, recoveryRequestedAt: undefined,
+          };
+          syncPoints.set(point.id, point);
+        }
+        updateCurrentMealSyncState(generation, 'syncing', input.now);
+        return cloneMealSyncGeneration(generation);
+      });
+    },
+    async beginRecovery(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.beginRecovery(input);
+        void input.reason;
+        const generation = activeGeneration(input.mealId, input.userId);
+        if (!generation) return undefined;
+        const points = pointsForGeneration(generation.id);
+        const unknown = points.filter((point) => point.status === 'unknown');
+        if (unknown.length > 0) {
+          for (const point of unknown) point.recoveryRequestedAt = new Date(input.now);
+          generation.phase = 'recovery';
+          generation.updatedAt = new Date(input.now);
+          updateCurrentMealSyncState(generation, 'recovery', input.now);
+          return cloneMealSyncGeneration(generation);
+        }
+        for (const point of points.filter((item) => item.status === 'failed_action_required')) {
+          point.status = resumeStatus(point);
+          point.nextAttemptAt = new Date(input.now);
+          point.lastErrorCode = undefined;
+          point.recoveryState = undefined;
+        }
+        refreshGenerationState(generation, input.now);
+        return cloneMealSyncGeneration(generation);
+      });
+    },
+    async claimDuePoints(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.claimDuePoints(input);
+        const claimed: MealSyncPointRow[] = [];
+        const active = [...syncGenerations.values()]
+          .filter((generation) => generation.phase !== 'synced')
+          .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id));
+        for (const generation of active) {
+          if (claimed.length >= input.limit) break;
+          const points = pointsForGeneration(generation.id);
+          const unknown = points.some((point) => point.status === 'unknown');
+          const hasActionRequired = points.some((point) => point.status === 'failed_action_required');
+          const deletesComplete = points.filter((point) => point.role === 'delete_target').every((point) => point.status === 'synced');
+          const candidate = (point: MealSyncPointRow): boolean => {
+            if (point.leaseUntil && point.leaseUntil.getTime() > input.now.getTime()) return false;
+            if (unknown) {
+              return point.status === 'unknown'
+                && Boolean(point.recoveryRequestedAt)
+                && point.recoveryRequestedAt!.getTime() <= input.now.getTime();
+            }
+            if (hasActionRequired) return false;
+            if (point.role !== (deletesComplete ? 'create_target' : 'delete_target')) return false;
+            if (point.status !== 'pending' && point.status !== 'retrying' && point.status !== 'operation_pending') return false;
+            return !point.nextAttemptAt || point.nextAttemptAt.getTime() <= input.now.getTime();
+          };
+          for (const point of points.filter(candidate).sort((left, right) => left.id.localeCompare(right.id))) {
+            if (claimed.length >= input.limit) break;
+            point.leaseUntil = new Date(input.leaseUntil);
+            point.lastAttemptAt = new Date(input.now);
+            point.attemptCount += 1;
+            point.nextAttemptAt = undefined;
+            claimed.push(cloneMealSyncPoint(point));
+          }
+        }
+        return claimed;
+      });
+    },
+    async finishPoint(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.finishPoint(input);
+        const point = syncPoints.get(input.id);
+        if (!ownsSyncPointLease(point, input)) return false;
+        const generation = syncGenerations.get(point.generationId);
+        if (!generation || generation.userId !== input.userId) return false;
+        point.status = 'synced';
+        point.leaseUntil = undefined;
+        point.nextAttemptAt = undefined;
+        point.lastErrorCode = undefined;
+        point.recoveryState = undefined;
+        point.recoveryRequestedAt = undefined;
+        refreshGenerationState(generation, input.now);
+        return true;
+      });
+    },
+    async retryPoint(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.retryPoint(input);
+        const point = syncPoints.get(input.id);
+        if (!ownsSyncPointLease(point, input)) return false;
+        const generation = syncGenerations.get(point.generationId);
+        if (!generation || generation.userId !== input.userId) return false;
+        point.recoveryState = resumeStatus(point);
+        point.status = 'retrying';
+        point.leaseUntil = undefined;
+        point.nextAttemptAt = new Date(input.nextAttemptAt);
+        point.lastErrorCode = input.errorCode;
+        refreshGenerationState(generation, input.now);
+        return true;
+      });
+    },
+    async markPointUnknown(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.markPointUnknown(input);
+        const point = syncPoints.get(input.id);
+        if (!ownsSyncPointLease(point, input)) return false;
+        const generation = syncGenerations.get(point.generationId);
+        if (!generation || generation.userId !== input.userId) return false;
+        point.recoveryState = resumeStatus(point);
+        point.status = 'unknown';
+        point.leaseUntil = undefined;
+        point.nextAttemptAt = undefined;
+        point.lastErrorCode = input.errorCode;
+        point.recoveryRequestedAt = undefined;
+        refreshGenerationState(generation, input.now);
+        return true;
+      });
+    },
+    async markPointFailedActionRequired(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.markPointFailedActionRequired(input);
+        const point = syncPoints.get(input.id);
+        if (!ownsSyncPointLease(point, input)) return false;
+        const generation = syncGenerations.get(point.generationId);
+        if (!generation || generation.userId !== input.userId) return false;
+        point.recoveryState = resumeStatus(point);
+        point.status = 'failed_action_required';
+        point.leaseUntil = undefined;
+        point.nextAttemptAt = undefined;
+        point.lastErrorCode = input.errorCode;
+        refreshGenerationState(generation, input.now);
+        return true;
+      });
+    },
+    async markPointOperationPending(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.markPointOperationPending(input);
+        const point = syncPoints.get(input.id);
+        if (!ownsSyncPointLease(point, input)) return false;
+        const generation = syncGenerations.get(point.generationId);
+        if (!generation || generation.userId !== input.userId) return false;
+        point.status = 'operation_pending';
+        point.leaseUntil = undefined;
+        point.googleOperationName = input.operationName;
+        point.nextAttemptAt = new Date(input.nextAttemptAt);
+        point.lastErrorCode = undefined;
+        point.recoveryState = 'operation_pending';
+        return true;
+      });
+    },
+    async requestUnknownRecovery(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.requestUnknownRecovery(input);
+        const generation = syncGenerations.get(input.generationId);
+        const point = syncPoints.get(input.pointId);
+        if (!generation || generation.userId !== input.userId || point?.generationId !== generation.id || point.status !== 'unknown') return false;
+        point.recoveryRequestedAt = new Date(input.now);
+        generation.phase = 'recovery';
+        generation.updatedAt = new Date(input.now);
+        updateCurrentMealSyncState(generation, 'recovery', input.now);
+        return true;
+      });
+    },
+    async readGenerationState(input) {
+      const generation = activeGeneration(input.mealId, input.userId);
+      if (!generation) return undefined;
+      const points = pointsForGeneration(generation.id);
+      const pointStatusCounts: Partial<Record<MealSyncPointStatus, number>> = {};
+      for (const point of points) pointStatusCounts[point.status] = (pointStatusCounts[point.status] ?? 0) + 1;
+      const recoveryRequestedAt = points
+        .filter((point) => point.status === 'unknown' && point.recoveryRequestedAt)
+        .map((point) => point.recoveryRequestedAt!)
+        .sort((left, right) => right.getTime() - left.getTime())[0];
+      return {
+        generation: cloneMealSyncGeneration(generation),
+        pointStatusCounts,
+        hasUnknownPoint: points.some((point) => point.status === 'unknown'),
+        recoveryRequestedAt: recoveryRequestedAt ? new Date(recoveryRequestedAt) : undefined,
+      };
+    },
+  };
+
+  store = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
       return serializeRootTransaction(async () => {
         const parentSnapshot = snapshotState();
-        const child = createMemoryStore();
+        const child = createMemoryStore({ transactionChild: true });
         const childInternals = memoryStoreInternals.get(child);
         if (!childInternals) throw new Error('memory transaction child is unavailable');
         childInternals.restoreState(parentSnapshot);
@@ -415,6 +747,7 @@ export function createMemoryStore(): MemoryStore {
         });
       },
     },
+    mealSync,
     connections: {
       async findByHealthUserId(healthUserId: string): Promise<ConnectionRow | undefined> {
         const row = [...connections.values()].find((item) => item.healthUserId === healthUserId);
@@ -713,7 +1046,7 @@ export function createMemoryStore(): MemoryStore {
       return structuredClone(currentNutrients.get(mealId) ?? []);
     },
     mealSyncPoints() {
-      return [];
+      return [...syncPoints.values()].map(cloneMealSyncPoint);
     },
   }) as MemoryStore;
   memoryStoreInternals.set(memoryStore, {

@@ -13,9 +13,10 @@ import {
 } from '../../domain/meal-editor';
 import { isPortionRange, type VisionMeal } from '../../domain/meal-vision';
 import { allocateIngredientGrams } from './ingredient-grams';
-import { isGoogleSupportedNutrient } from './google-nutrition';
+import { buildGoogleNutritionDataPoint, isGoogleSupportedNutrient, type GoogleNutritionDataPoint } from './google-nutrition';
 import { resolveEditableTwFdaDishIngredients, type EditableTwFdaDish, type TwFdaFoodCatalog } from '../nutrition/tw-fda';
 import type { ResolvedDish } from './ingredient-nutrition';
+import type { CurrentMealSnapshot, MealDishRow, MealNutrientRow, MealVersionRow } from './types';
 
 export type DraftFromVisionInput = {
   mealId: string;
@@ -27,6 +28,13 @@ export type DraftFromVisionInput = {
 export type GooglePayloadProjection = {
   dishes: EditableDish[];
   nutrients: EditableNutrient[];
+};
+
+/** A generation freezes this payload before any Google request can be made. */
+export type CurrentMealGooglePayload = {
+  dishKey: string;
+  dataPoint: GoogleNutritionDataPoint;
+  payloadHash: string;
 };
 
 function initialDishGrams(dish: VisionMeal['foods'][number]): number {
@@ -146,4 +154,51 @@ export function googlePayloadProjection(draft: EditableMealDraft): GooglePayload
       .filter((nutrient) => isGoogleSupportedNutrient(nutrient.nutrientCode))
       .map((nutrient) => ({ ...nutrient })),
   };
+}
+
+/**
+ * Builds one write-once Google data point per currently writable dish.  The
+ * caller supplies a fresh data-point suffix so this function remains pure and
+ * the generated payload can be persisted before a worker sees it.
+ */
+export function buildCurrentMealGooglePayloads(input: {
+  meal: CurrentMealSnapshot;
+  dataPointIdForDish(dishId: string): string;
+}): CurrentMealGooglePayload[] {
+  const version: MealVersionRow = {
+    id: input.meal.id,
+    userId: input.meal.userId,
+    previousVersionId: undefined,
+    mealType: input.meal.mealType,
+    eatenAt: input.meal.eatenAt,
+    writebackThisMeal: true,
+    confirmedAt: input.meal.updatedAt,
+  };
+  return input.meal.dishes.flatMap((dish): CurrentMealGooglePayload[] => {
+    const legacyDish: MealDishRow = {
+      id: dish.id,
+      versionId: input.meal.id,
+      userId: input.meal.userId,
+      clientShortId: input.dataPointIdForDish(dish.id),
+      nameZh: dish.nameZh,
+      portionGrams: dish.portionGrams,
+      source: 'current_meal',
+    };
+    const nutrients: MealNutrientRow[] = input.meal.nutrients
+      .filter((nutrient) => nutrient.dishId === dish.id)
+      .map((nutrient) => {
+        const amount = toInternalNutrientAmount(nutrient.nutrientCode, nutrient.value, nutrient.unit);
+        return {
+          dishId: dish.id,
+          userId: input.meal.userId,
+          nutrientCode: nutrient.nutrientCode,
+          grams: amount.unit === 'g' ? amount.value : undefined,
+          kcal: amount.unit === 'kcal' ? amount.value : undefined,
+          source: nutrient.source,
+          confidence: undefined,
+        };
+      });
+    const built = buildGoogleNutritionDataPoint({ dish: legacyDish, version, nutrients });
+    return built ? [{ dishKey: dish.id, dataPoint: built.dataPoint, payloadHash: built.payloadHash }] : [];
+  });
 }
