@@ -29,11 +29,19 @@ test('nutrition tick posts only a bearer token and aggregate counts', async () =
     secret: 'test-sync-secret',
     fetchImpl: async (_url, init) => {
       authorization = init?.headers?.Authorization;
-      return Response.json({ claimed: 2, succeeded: 1, failed: 0, retrying: 1, unknown: 0 });
+      return Response.json({
+        claimed: 2, succeeded: 1, failed: 0, retrying: 1, unknown: 0,
+        legacy: { dataPointName: 'users/me/dataTypes/nutrition-log/dataPoints/private-name' },
+        currentMeals: { payload: 'private-payload', photo: 'private-photo', token: 'private-token' },
+      });
     },
     log: (message) => logs.push(message),
   });
   assert.equal(authorization, 'Bearer test-sync-secret');
   assert.deepEqual(logs, ['[nutrition-sync] claimed=2 succeeded=1 failed=0 retrying=1 unknown=0']);
-  assert.equal(logs.join('').includes('payload'), false);
+  const output = logs.join('');
+  assert.equal(output.includes('private-name'), false);
+  assert.equal(output.includes('private-payload'), false);
+  assert.equal(output.includes('private-photo'), false);
+  assert.equal(output.includes('private-token'), false);
 });
