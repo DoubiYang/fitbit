@@ -545,3 +545,54 @@ test('sync enforces writeback preconditions and only accepts a single locally sa
   assert.deepEqual(await alreadySynced.json(), { error: 'meal_sync_not_ready', reason: 'no_unsynced_changes' });
   assert.equal(syncedStartCalls, 0);
 });
+
+test('sync recovery requests only exact-name recovery before checking writeback prerequisites', async () => {
+  const input = await insertDraft();
+  await input.store.currentMeals.saveEditorDraft({ userId: input.userId, draftId: 'draft-1', now });
+  let beginCalls = 0;
+  const recoverySync: MealSyncStore = {
+    async startGeneration() { throw new Error('must not create a generation during recovery'); },
+    async beginRecovery({ mealId, userId, reason }) {
+      beginCalls += 1;
+      assert.equal(mealId, 'draft-1');
+      assert.equal(userId, input.userId);
+      assert.equal(reason, 'unknown_exact_get');
+      return { id: 'generation-1', mealId, userId, contentRevision: 1, phase: 'recovery', createdAt: now, updatedAt: now };
+    },
+    async claimDuePoints() { return []; },
+    async finishPoint() { return false; },
+    async retryPoint() { return false; },
+    async markPointUnknown() { return false; },
+    async markPointFailedActionRequired() { return false; },
+    async markPointOperationPending() { return false; },
+    async requestUnknownRecovery() { return false; },
+    async readGenerationState() {
+      return {
+        generation: { id: 'generation-1', mealId: 'draft-1', userId: input.userId, contentRevision: 1, phase: 'recovery', createdAt: now, updatedAt: now },
+        pointStatusCounts: { unknown: 1, failed_action_required: 1 },
+        hasUnknownPoint: true,
+        recoveryRequestedAt: undefined,
+      };
+    },
+  };
+  const recoveryStore: AuthStore = {
+    ...input.store,
+    currentMeals: {
+      ...input.store.currentMeals,
+      async findCurrentMeal(userId, mealId) {
+        const current = await input.store.currentMeals.findCurrentMeal(userId, mealId);
+        return current && userId === input.userId && mealId === 'draft-1' ? { ...current, syncState: 'recovery' } : undefined;
+      },
+    },
+    mealSync: recoverySync,
+  };
+
+  const response = await handleCurrentMealSync(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1/sync', { method: 'POST', headers: headers(input.sessionToken) }),
+    'draft-1', deps(recoveryStore),
+  );
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), { mealId: 'draft-1', syncState: 'recovery' });
+  assert.equal(beginCalls, 1);
+});

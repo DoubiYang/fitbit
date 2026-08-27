@@ -168,3 +168,31 @@ test('an unknown point takes priority over an action-required point until exact 
   await store.mealSync!.beginRecovery({ mealId: 'meal-1', userId: 'u1', now, reason: 'writeback_restored' });
   assert.equal(store.mealSyncPoints().find((point) => point.id === failed.id)?.status, 'pending');
 });
+
+test('action-required recovery restores an existing Google operation instead of creating a new write state', async () => {
+  const store = await savedMeal();
+  const generation = await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });
+  assert.ok(generation);
+  const firstLease = new Date(now.getTime() + 120_000);
+  const [write] = await store.mealSync!.claimDuePoints({ now, leaseUntil: firstLease, limit: 1 });
+  assert.ok(write);
+  const operationCheckAt = new Date(now.getTime() + 60_000);
+  assert.equal(await store.mealSync!.markPointOperationPending({
+    id: write.id, generationId: generation.id, userId: 'u1', leaseUntil: firstLease,
+    operationName: 'operations/known-write', nextAttemptAt: operationCheckAt, now,
+  }), true);
+  const secondLease = new Date(operationCheckAt.getTime() + 120_000);
+  const [operation] = await store.mealSync!.claimDuePoints({ now: operationCheckAt, leaseUntil: secondLease, limit: 1 });
+  assert.equal(operation?.status, 'operation_pending');
+  assert.equal(await store.mealSync!.markPointFailedActionRequired({
+    id: operation!.id, generationId: generation.id, userId: 'u1', leaseUntil: secondLease,
+    now: operationCheckAt, errorCode: 'google_401',
+  }), true);
+
+  await store.mealSync!.beginRecovery({ mealId: 'meal-1', userId: 'u1', now: operationCheckAt, reason: 'writeback_prerequisites_restored' });
+
+  const restored = store.mealSyncPoints().find((point) => point.id === write.id);
+  assert.equal(restored?.status, 'operation_pending');
+  assert.equal(restored?.googleOperationName, 'operations/known-write');
+  assert.match(restored?.dataPointName ?? '', /\/d-[0-9a-f-]+$/u);
+});

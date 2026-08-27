@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto';
 
 import { editableMealDraftSchema, fromInternalNutrientAmount, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import { parseVisionMeal } from '../../domain/meal-vision';
-import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
+import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, MealSyncStore, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
-import { CurrentMealEditLockedError, type CurrentMealSnapshot, type CurrentMealStore, type CurrentMealSyncState, type MealDraftRow, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
+import { buildCurrentMealGooglePayloads } from '../meals/current-meal';
+import { CurrentMealEditLockedError, type CurrentMealSnapshot, type CurrentMealStore, type CurrentMealSyncState, type MealDraftRow, type MealSyncGenerationPhase, type MealSyncGenerationRow, type MealSyncPointRow, type MealSyncPointStatus, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
 import type { ConnectionStatus } from '../auth/scopes';
 import { twFdaLookupKeys, type LocalTwFdaFood } from '../nutrition/tw-fda';
 
@@ -111,6 +112,8 @@ function mapConnection(row: pg.QueryResult['rows'][number]): ConnectionRow {
 
 const mealTypes = new Set<MealType>(['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']);
 const currentMealSyncStates = new Set<CurrentMealSyncState>(['unsynced', 'syncing', 'synced', 'recovery']);
+const mealSyncGenerationPhases = new Set<MealSyncGenerationPhase>(['pending_delete', 'pending_create', 'synced', 'recovery']);
+const mealSyncPointStatuses = new Set<MealSyncPointStatus>(['pending', 'leased', 'operation_pending', 'synced', 'retrying', 'unknown', 'failed_action_required']);
 
 function parsedEditorForMeal(editor: unknown, mealId: string): EditableMealDraft & { mealType: MealType } {
   const parsed = editableMealDraftSchema.parse(editor);
@@ -185,6 +188,53 @@ function asDate(value: unknown, column: string): Date {
   const date = value instanceof Date ? value : new Date(String(value));
   if (Number.isNaN(date.getTime())) throw new Error(`invalid ${column}`);
   return date;
+}
+
+function parseJsonObject(value: unknown, column: string): Record<string, unknown> | undefined {
+  if (value === null || value === undefined) return undefined;
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`invalid ${column}`);
+  return structuredClone(parsed as Record<string, unknown>);
+}
+
+function mapMealSyncGeneration(row: Record<string, unknown>): MealSyncGenerationRow {
+  const phase = String(row.phase) as MealSyncGenerationPhase;
+  if (!mealSyncGenerationPhases.has(phase)) throw new Error('invalid meal sync generation phase');
+  return {
+    id: String(row.id),
+    mealId: String(row.meal_id),
+    userId: String(row.user_id),
+    contentRevision: Number(row.content_revision),
+    phase,
+    createdAt: asDate(row.created_at, 'meal_sync_generations.created_at'),
+    updatedAt: asDate(row.updated_at, 'meal_sync_generations.updated_at'),
+  };
+}
+
+function mapMealSyncPoint(row: Record<string, unknown>): MealSyncPointRow {
+  const status = String(row.status) as MealSyncPointStatus;
+  if (!mealSyncPointStatuses.has(status)) throw new Error('invalid meal sync point status');
+  const role = row.role === 'delete_target' ? 'delete_target' : row.role === 'create_target' ? 'create_target' : undefined;
+  if (!role) throw new Error('invalid meal sync point role');
+  return {
+    id: String(row.id),
+    generationId: String(row.generation_id),
+    userId: String(row.user_id),
+    dishKey: String(row.dish_key),
+    role,
+    dataPointName: String(row.data_point_name),
+    payload: parseJsonObject(row.payload, 'meal_sync_points.payload'),
+    payloadHash: row.payload_hash ? String(row.payload_hash) : undefined,
+    status,
+    attemptCount: Number(row.attempt_count ?? 0),
+    nextAttemptAt: row.next_attempt_at ? asDate(row.next_attempt_at, 'meal_sync_points.next_attempt_at') : undefined,
+    leaseUntil: row.lease_until ? asDate(row.lease_until, 'meal_sync_points.lease_until') : undefined,
+    lastAttemptAt: row.last_attempt_at ? asDate(row.last_attempt_at, 'meal_sync_points.last_attempt_at') : undefined,
+    lastErrorCode: row.last_error_code ? String(row.last_error_code) : undefined,
+    googleOperationName: row.google_operation_name ? String(row.google_operation_name) : undefined,
+    recoveryState: row.recovery_state ? String(row.recovery_state) : undefined,
+    recoveryRequestedAt: row.recovery_requested_at ? asDate(row.recovery_requested_at, 'meal_sync_points.recovery_requested_at') : undefined,
+  };
 }
 
 function mapCurrentMealSnapshot(
@@ -810,6 +860,371 @@ function storeFor(queryable: Queryable): AuthStore {
     },
   };
 
+  async function findActiveSyncGeneration(input: { mealId: string; userId: string; lock?: boolean }): Promise<MealSyncGenerationRow | undefined> {
+    const result = await queryable.query(
+      `SELECT * FROM meal_sync_generations
+       WHERE meal_id = $1 AND user_id = $2 AND phase <> 'synced'
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1${input.lock ? ' FOR UPDATE' : ''}`,
+      [input.mealId, input.userId],
+    );
+    return result.rows[0] ? mapMealSyncGeneration(result.rows[0]) : undefined;
+  }
+
+  async function readSyncPoints(generationId: string, userId: string, lock = false): Promise<MealSyncPointRow[]> {
+    const result = await queryable.query(
+      `SELECT * FROM meal_sync_points
+       WHERE generation_id = $1 AND user_id = $2
+       ORDER BY created_at ASC, id ASC${lock ? ' FOR UPDATE' : ''}`,
+      [generationId, userId],
+    );
+    return result.rows.map(mapMealSyncPoint);
+  }
+
+  async function updateCurrentMealSyncState(input: {
+    generation: MealSyncGenerationRow;
+    syncState: CurrentMealSyncState;
+    now: Date;
+    lastSyncedGenerationId?: string | undefined;
+  }): Promise<void> {
+    await queryable.query(
+      `UPDATE current_meals
+       SET sync_state = $3,
+           last_synced_generation_id = COALESCE($4, last_synced_generation_id),
+           updated_at = $5
+       WHERE id = $1 AND user_id = $2`,
+      [input.generation.mealId, input.generation.userId, input.syncState, input.lastSyncedGenerationId ?? null, input.now],
+    );
+  }
+
+  async function finaliseSyncGeneration(generation: MealSyncGenerationRow, now: Date): Promise<void> {
+    const mealResult = await queryable.query(
+      `SELECT last_synced_generation_id
+       FROM current_meals
+       WHERE id = $1 AND user_id = $2
+       FOR UPDATE`,
+      [generation.mealId, generation.userId],
+    );
+    const meal = mealResult.rows[0];
+    if (!meal) throw new Error('current meal disappeared during sync finalisation');
+    const priorGenerationId = meal.last_synced_generation_id ? String(meal.last_synced_generation_id) : undefined;
+    await queryable.query(
+      `UPDATE meal_sync_generations
+       SET phase = 'synced', updated_at = $2
+       WHERE id = $1 AND user_id = $3`,
+      [generation.id, now, generation.userId],
+    );
+    await queryable.query(
+      `UPDATE current_meals
+       SET sync_state = 'synced', last_synced_generation_id = $3, updated_at = $4
+       WHERE id = $1 AND user_id = $2`,
+      [generation.mealId, generation.userId, generation.id, now],
+    );
+    await queryable.query(
+      `DELETE FROM meal_sync_points
+       WHERE generation_id = $1 AND user_id = $2 AND role = 'delete_target'`,
+      [generation.id, generation.userId],
+    );
+    if (priorGenerationId && priorGenerationId !== generation.id) {
+      await queryable.query(
+        'DELETE FROM meal_sync_generations WHERE id = $1 AND user_id = $2',
+        [priorGenerationId, generation.userId],
+      );
+    }
+  }
+
+  async function refreshSyncGenerationState(generation: MealSyncGenerationRow, now: Date): Promise<MealSyncGenerationPhase> {
+    const points = await readSyncPoints(generation.id, generation.userId, true);
+    const createPoints = points.filter((point) => point.role === 'create_target');
+    const deletePoints = points.filter((point) => point.role === 'delete_target');
+    if (createPoints.length > 0 && createPoints.every((point) => point.status === 'synced')) {
+      await finaliseSyncGeneration(generation, now);
+      return 'synced';
+    }
+    const blocked = points.some((point) => (
+      point.status === 'unknown' || point.status === 'failed_action_required' || point.status === 'retrying'
+    ));
+    const phase: MealSyncGenerationPhase = blocked
+      ? 'recovery'
+      : deletePoints.every((point) => point.status === 'synced') ? 'pending_create' : 'pending_delete';
+    const syncState: CurrentMealSyncState = phase === 'recovery' ? 'recovery' : 'syncing';
+    await queryable.query(
+      `UPDATE meal_sync_generations
+       SET phase = $3, updated_at = $4
+       WHERE id = $1 AND user_id = $2`,
+      [generation.id, generation.userId, phase, now],
+    );
+    await updateCurrentMealSyncState({ generation, syncState, now });
+    return phase;
+  }
+
+  function resumePointStatus(point: MealSyncPointRow): 'pending' | 'operation_pending' {
+    return point.googleOperationName || point.recoveryState === 'operation_pending' ? 'operation_pending' : 'pending';
+  }
+
+  const mealSync: MealSyncStore = {
+    async startGeneration(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.mealSync!.startGeneration(input));
+      }
+      const meal = await readCurrentMeal(input.userId, input.mealId, true);
+      if (!meal || meal.syncState !== 'unsynced') return undefined;
+      if (await findActiveSyncGeneration({ ...input, lock: true })) return undefined;
+      const payloads = buildCurrentMealGooglePayloads({
+        meal,
+        dataPointIdForDish: () => `d-${randomUUID()}`,
+      });
+      if (payloads.length === 0) return undefined;
+      const priorPoints = meal.lastSyncedGenerationId
+        ? await readSyncPoints(meal.lastSyncedGenerationId, input.userId, true)
+        : [];
+      const generation: MealSyncGenerationRow = {
+        id: randomUUID(), mealId: input.mealId, userId: input.userId, contentRevision: meal.contentRevision,
+        phase: priorPoints.length > 0 ? 'pending_delete' : 'pending_create',
+        createdAt: new Date(input.now), updatedAt: new Date(input.now),
+      };
+      await queryable.query(
+        `INSERT INTO meal_sync_generations (id, meal_id, user_id, content_revision, phase, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$6)`,
+        [generation.id, generation.mealId, generation.userId, generation.contentRevision, generation.phase, generation.createdAt],
+      );
+      for (const point of priorPoints.filter((item) => item.role === 'create_target')) {
+        await queryable.query(
+          `INSERT INTO meal_sync_points (
+            id, generation_id, user_id, dish_key, role, data_point_name, payload, payload_hash, status, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,'delete_target',$5,NULL,NULL,'pending',$6,$6)`,
+          [randomUUID(), generation.id, generation.userId, point.dishKey, point.dataPointName, input.now],
+        );
+      }
+      for (const payload of payloads) {
+        await queryable.query(
+          `INSERT INTO meal_sync_points (
+            id, generation_id, user_id, dish_key, role, data_point_name, payload, payload_hash, status, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,'create_target',$5,$6::jsonb,$7,'pending',$8,$8)`,
+          [
+            randomUUID(), generation.id, generation.userId, payload.dishKey, payload.dataPoint.name,
+            JSON.stringify(payload.dataPoint), payload.payloadHash, input.now,
+          ],
+        );
+      }
+      await updateCurrentMealSyncState({ generation, syncState: 'syncing', now: input.now });
+      return generation;
+    },
+    async beginRecovery(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.mealSync!.beginRecovery(input));
+      }
+      void input.reason;
+      const generation = await findActiveSyncGeneration({ ...input, lock: true });
+      if (!generation) return undefined;
+      const points = await readSyncPoints(generation.id, generation.userId, true);
+      const unknown = points.filter((point) => point.status === 'unknown');
+      if (unknown.length > 0) {
+        await queryable.query(
+          `UPDATE meal_sync_points
+           SET recovery_requested_at = $3, updated_at = $3
+           WHERE generation_id = $1 AND user_id = $2 AND status = 'unknown'`,
+          [generation.id, generation.userId, input.now],
+        );
+        await queryable.query(
+          `UPDATE meal_sync_generations SET phase = 'recovery', updated_at = $3 WHERE id = $1 AND user_id = $2`,
+          [generation.id, generation.userId, input.now],
+        );
+        await updateCurrentMealSyncState({ generation, syncState: 'recovery', now: input.now });
+        return { ...generation, phase: 'recovery', updatedAt: new Date(input.now) };
+      }
+      for (const point of points.filter((item) => item.status === 'failed_action_required')) {
+        await queryable.query(
+          `UPDATE meal_sync_points
+           SET status = $4, next_attempt_at = $5, last_error_code = NULL, recovery_state = NULL, updated_at = $5
+           WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND status = 'failed_action_required'`,
+          [point.id, generation.id, generation.userId, resumePointStatus(point), input.now],
+        );
+      }
+      const phase = await refreshSyncGenerationState(generation, input.now);
+      return { ...generation, phase, updatedAt: new Date(input.now) };
+    },
+    async claimDuePoints(input) {
+      const result = await queryable.query(
+        `WITH candidate AS (
+           SELECT point.id
+           FROM meal_sync_points AS point
+           JOIN meal_sync_generations AS generation ON generation.id = point.generation_id AND generation.user_id = point.user_id
+           WHERE generation.phase <> 'synced'
+             AND (point.lease_until IS NULL OR point.lease_until <= $1)
+             AND (
+               (
+                 EXISTS (
+                   SELECT 1 FROM meal_sync_points AS unknown_point
+                   WHERE unknown_point.generation_id = generation.id AND unknown_point.user_id = generation.user_id
+                     AND unknown_point.status = 'unknown'
+                 )
+                 AND point.status = 'unknown' AND point.recovery_requested_at IS NOT NULL AND point.recovery_requested_at <= $1
+               )
+               OR (
+                 NOT EXISTS (
+                   SELECT 1 FROM meal_sync_points AS unknown_point
+                   WHERE unknown_point.generation_id = generation.id AND unknown_point.user_id = generation.user_id
+                     AND unknown_point.status = 'unknown'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM meal_sync_points AS failed_point
+                   WHERE failed_point.generation_id = generation.id AND failed_point.user_id = generation.user_id
+                     AND failed_point.status = 'failed_action_required'
+                 )
+                 AND point.status IN ('pending', 'retrying', 'operation_pending')
+                 AND (point.next_attempt_at IS NULL OR point.next_attempt_at <= $1)
+                 AND (
+                   (
+                     EXISTS (
+                       SELECT 1 FROM meal_sync_points AS unfinished_delete
+                       WHERE unfinished_delete.generation_id = generation.id AND unfinished_delete.user_id = generation.user_id
+                         AND unfinished_delete.role = 'delete_target' AND unfinished_delete.status <> 'synced'
+                     )
+                     AND point.role = 'delete_target'
+                   )
+                   OR (
+                     NOT EXISTS (
+                       SELECT 1 FROM meal_sync_points AS unfinished_delete
+                       WHERE unfinished_delete.generation_id = generation.id AND unfinished_delete.user_id = generation.user_id
+                         AND unfinished_delete.role = 'delete_target' AND unfinished_delete.status <> 'synced'
+                     )
+                     AND point.role = 'create_target'
+                   )
+                 )
+               )
+             )
+           ORDER BY COALESCE(point.next_attempt_at, point.created_at) ASC, point.id ASC
+           FOR UPDATE SKIP LOCKED
+           LIMIT $3
+         )
+         UPDATE meal_sync_points AS point
+         SET lease_until = $2, last_attempt_at = $1, next_attempt_at = NULL,
+             attempt_count = point.attempt_count + 1, updated_at = $1
+         FROM candidate
+         WHERE point.id = candidate.id
+         RETURNING point.*`,
+        [input.now, input.leaseUntil, input.limit],
+      );
+      return result.rows.map(mapMealSyncPoint);
+    },
+    async finishPoint(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.mealSync!.finishPoint(input));
+      }
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET status = 'synced', lease_until = NULL, next_attempt_at = NULL, last_error_code = NULL,
+             recovery_state = NULL, recovery_requested_at = NULL, updated_at = $5
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND lease_until = $4
+         RETURNING generation_id`,
+        [input.id, input.generationId, input.userId, input.leaseUntil, input.now],
+      );
+      if (!result.rows[0]) return false;
+      const generationResult = await queryable.query(
+        'SELECT * FROM meal_sync_generations WHERE id = $1 AND user_id = $2 FOR UPDATE',
+        [input.generationId, input.userId],
+      );
+      if (!generationResult.rows[0]) return false;
+      await refreshSyncGenerationState(mapMealSyncGeneration(generationResult.rows[0]), input.now);
+      return true;
+    },
+    async retryPoint(input) {
+      if (canStartTransaction(queryable)) return store.withTransaction((inner) => inner.mealSync!.retryPoint(input));
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET recovery_state = CASE WHEN google_operation_name IS NULL THEN 'pending' ELSE 'operation_pending' END,
+             status = 'retrying', lease_until = NULL, next_attempt_at = $5, last_error_code = $6, updated_at = $7
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND lease_until = $4
+         RETURNING generation_id`,
+        [input.id, input.generationId, input.userId, input.leaseUntil, input.nextAttemptAt, input.errorCode, input.now],
+      );
+      if (!result.rows[0]) return false;
+      const generationResult = await queryable.query('SELECT * FROM meal_sync_generations WHERE id = $1 AND user_id = $2 FOR UPDATE', [input.generationId, input.userId]);
+      if (!generationResult.rows[0]) return false;
+      await refreshSyncGenerationState(mapMealSyncGeneration(generationResult.rows[0]), input.now);
+      return true;
+    },
+    async markPointUnknown(input) {
+      if (canStartTransaction(queryable)) return store.withTransaction((inner) => inner.mealSync!.markPointUnknown(input));
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET recovery_state = CASE WHEN google_operation_name IS NULL THEN 'pending' ELSE 'operation_pending' END,
+             status = 'unknown', lease_until = NULL, next_attempt_at = NULL, last_error_code = $5,
+             recovery_requested_at = NULL, updated_at = $6
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND lease_until = $4
+         RETURNING generation_id`,
+        [input.id, input.generationId, input.userId, input.leaseUntil, input.errorCode, input.now],
+      );
+      if (!result.rows[0]) return false;
+      const generationResult = await queryable.query('SELECT * FROM meal_sync_generations WHERE id = $1 AND user_id = $2 FOR UPDATE', [input.generationId, input.userId]);
+      if (!generationResult.rows[0]) return false;
+      await refreshSyncGenerationState(mapMealSyncGeneration(generationResult.rows[0]), input.now);
+      return true;
+    },
+    async markPointFailedActionRequired(input) {
+      if (canStartTransaction(queryable)) return store.withTransaction((inner) => inner.mealSync!.markPointFailedActionRequired(input));
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET recovery_state = CASE WHEN google_operation_name IS NULL THEN 'pending' ELSE 'operation_pending' END,
+             status = 'failed_action_required', lease_until = NULL, next_attempt_at = NULL, last_error_code = $5, updated_at = $6
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND lease_until = $4
+         RETURNING generation_id`,
+        [input.id, input.generationId, input.userId, input.leaseUntil, input.errorCode, input.now],
+      );
+      if (!result.rows[0]) return false;
+      const generationResult = await queryable.query('SELECT * FROM meal_sync_generations WHERE id = $1 AND user_id = $2 FOR UPDATE', [input.generationId, input.userId]);
+      if (!generationResult.rows[0]) return false;
+      await refreshSyncGenerationState(mapMealSyncGeneration(generationResult.rows[0]), input.now);
+      return true;
+    },
+    async markPointOperationPending(input) {
+      if (canStartTransaction(queryable)) return store.withTransaction((inner) => inner.mealSync!.markPointOperationPending(input));
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET status = 'operation_pending', lease_until = NULL, google_operation_name = $5,
+             next_attempt_at = $6, last_error_code = NULL, recovery_state = 'operation_pending', updated_at = $7
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND lease_until = $4`,
+        [input.id, input.generationId, input.userId, input.leaseUntil, input.operationName, input.nextAttemptAt, input.now],
+      );
+      return result.rowCount === 1;
+    },
+    async requestUnknownRecovery(input) {
+      if (canStartTransaction(queryable)) return store.withTransaction((inner) => inner.mealSync!.requestUnknownRecovery(input));
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET recovery_requested_at = $4, updated_at = $4
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3 AND status = 'unknown'`,
+        [input.pointId, input.generationId, input.userId, input.now],
+      );
+      if (result.rowCount !== 1) return false;
+      const generationResult = await queryable.query(
+        'UPDATE meal_sync_generations SET phase = \'recovery\', updated_at = $3 WHERE id = $1 AND user_id = $2 RETURNING *',
+        [input.generationId, input.userId, input.now],
+      );
+      if (!generationResult.rows[0]) return false;
+      await updateCurrentMealSyncState({ generation: mapMealSyncGeneration(generationResult.rows[0]), syncState: 'recovery', now: input.now });
+      return true;
+    },
+    async readGenerationState(input) {
+      const generation = await findActiveSyncGeneration(input);
+      if (!generation) return undefined;
+      const points = await readSyncPoints(generation.id, generation.userId);
+      const pointStatusCounts: Partial<Record<MealSyncPointStatus, number>> = {};
+      for (const point of points) pointStatusCounts[point.status] = (pointStatusCounts[point.status] ?? 0) + 1;
+      const recoveryRequestedAt = points
+        .filter((point) => point.status === 'unknown' && point.recoveryRequestedAt)
+        .map((point) => point.recoveryRequestedAt!)
+        .sort((left, right) => right.getTime() - left.getTime())[0];
+      return {
+        generation,
+        pointStatusCounts,
+        hasUnknownPoint: points.some((point) => point.status === 'unknown'),
+        recoveryRequestedAt: recoveryRequestedAt ? new Date(recoveryRequestedAt) : undefined,
+      };
+    },
+  };
+
   store = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
       const pool = canStartTransaction(queryable) ? queryable : undefined;
@@ -978,6 +1393,7 @@ function storeFor(queryable: Queryable): AuthStore {
       },
     },
     currentMeals,
+    mealSync,
     connections,
     sessions: {
       async insert(row: SessionRow): Promise<void> {

@@ -458,16 +458,40 @@ export async function handleCurrentMealSync(request: Request, mealId: string, de
   if (isResponse(session)) return session;
   const current = await deps.store.currentMeals.findCurrentMeal(session, mealId);
   if (!current) return response({ error: 'not_found' }, 404);
+  const mealSync = deps.store.mealSync;
+  if (!mealSync) return syncNotReady('sync_feature_unavailable');
   if (current.syncState === 'synced') return syncNotReady('no_unsynced_changes');
+  if (current.syncState === 'syncing') return syncNotReady('sync_in_progress');
+  if (current.syncState === 'recovery') {
+    const state = await mealSync.readGenerationState({ mealId, userId: session });
+    if (!state) return syncNotReady('sync_generation_unavailable');
+    if (state.hasUnknownPoint) {
+      const generation = await mealSync.beginRecovery({
+        mealId,
+        userId: session,
+        now: nowFor(deps),
+        reason: 'unknown_exact_get',
+      });
+      return generation ? response({ mealId, syncState: 'recovery' }, 202) : syncNotReady('sync_generation_unavailable');
+    }
+    if (!await deps.store.users.nutritionWritebackEnabled(session)) return syncNotReady('nutrition_writeback_disabled');
+    const connection = await deps.store.connections.findByUserId(session);
+    if (!connection || !syncable(connection.status)) return syncNotReady('connection_unavailable');
+    if (!canWriteNutrition(connection.grantedScopes)) return syncNotReady('nutrition_write_scope_missing');
+    const generation = await mealSync.beginRecovery({
+      mealId,
+      userId: session,
+      now: nowFor(deps),
+      reason: 'writeback_prerequisites_restored',
+    });
+    return generation ? response({ mealId, syncState: generation.phase === 'recovery' ? 'recovery' : 'syncing' }, 202) : syncNotReady('sync_generation_unavailable');
+  }
   if (!await deps.store.users.nutritionWritebackEnabled(session)) return syncNotReady('nutrition_writeback_disabled');
   const connection = await deps.store.connections.findByUserId(session);
   if (!connection || !syncable(connection.status)) return syncNotReady('connection_unavailable');
   if (!canWriteNutrition(connection.grantedScopes)) return syncNotReady('nutrition_write_scope_missing');
   if (googlePayloadProjection(draftEditor(current)).nutrients.length === 0) return syncNotReady('no_google_writable_nutrients');
-  if (current.syncState === 'syncing') return syncNotReady('sync_in_progress');
-  if (current.syncState === 'recovery') return syncNotReady('sync_recovery_required');
-  if (!deps.store.mealSync) return syncNotReady('sync_feature_unavailable');
-  const generation = await deps.store.mealSync.startGeneration({ mealId, userId: session, now: nowFor(deps) });
+  const generation = await mealSync.startGeneration({ mealId, userId: session, now: nowFor(deps) });
   if (!generation) return syncNotReady('sync_generation_unavailable');
   return response({ mealId, syncState: 'syncing' }, 202);
 }
