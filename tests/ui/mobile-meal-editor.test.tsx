@@ -12,6 +12,7 @@ import {
   mealSuggestionPatch,
   nextPendingSuggestionState,
   openAccessibleDialog,
+  parseEditableNutrientValue,
   savedMealUrl,
   startPendingSuggestionState,
 } from '../../src/ui/meals/mobile-meal-editor';
@@ -89,6 +90,30 @@ test('saved editor exposes explicit sync and recovery retries lock edits', () =>
   assert.match(recoveryHtml, /同步恢复中/);
   assert.match(recoveryHtml, /重试这一餐/);
   assert.match(recoveryHtml, /编辑已暂停/);
+});
+
+test('places a blocked sync explanation above the mobile action bar instead of inside it', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(MobileMealEditor, {
+      initialMeal: saved,
+      initialSyncState: 'unsynced',
+      initialCanSync: false,
+      initialSyncReason: 'nutrition_writeback_disabled',
+    }),
+  );
+  const noticeIndex = html.indexOf('mealEditor__syncNotice');
+  const actionBarIndex = html.indexOf('mealEditor__actionBar');
+  assert.ok(noticeIndex >= 0);
+  assert.ok(actionBarIndex >= 0);
+  assert.ok(noticeIndex < actionBarIndex);
+});
+
+test('rejects blank nutrient editor values instead of coercing them to zero', () => {
+  assert.equal(parseEditableNutrientValue(''), undefined);
+  assert.equal(parseEditableNutrientValue('   \t'), undefined);
+  assert.equal(parseEditableNutrientValue('-1'), undefined);
+  assert.equal(parseEditableNutrientValue('0'), 0);
+  assert.equal(parseEditableNutrientValue(' 12.5 '), 12.5);
 });
 
 test('strips response-only AI display fields before applying a suggestion as a strict PATCH', () => {

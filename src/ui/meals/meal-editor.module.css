@@ -4,7 +4,8 @@
   min-width: 20rem;
   min-height: 100vh;
   margin: 0 auto;
-  padding: 1.25rem 1rem 7.5rem;
+  /* The mobile action bar is fixed; reserve extra room even with safe area. */
+  padding: 1.25rem 1rem calc(9.5rem + env(safe-area-inset-bottom));
   color: #172826;
 }
 
@@ -263,6 +264,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 :global(.mealEditor__actionBar) > * { flex: 1; }
 :global(.mealEditor__localSaveState) { margin: 0; color: #49615d; font-size: 0.9rem; text-align: center; }
+:global(.mealEditor__syncAction) { display: flex; }
+:global(.mealEditor__syncAction) > button { flex: 1; }
+/* Keep verbose readiness guidance in normal content flow, not inside fixed actions. */
+:global(.mealEditor__syncNotice) { max-width: 48rem; margin: 1.25rem 0 0; }
 
 :global(.mealEditor__fullScreenDialog),
 :global(.mealEditor__bottomSheet) {

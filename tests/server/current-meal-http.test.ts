@@ -269,6 +269,51 @@ test('saved GET and PATCH expose the server-computed single-meal sync preflight'
   assert.equal(body.syncReason, undefined);
 });
 
+test('a post-commit sync-readiness failure keeps draft save and saved PATCH successful but safely disables sync', async () => {
+  const input = await insertDraft();
+  const preflightUnavailableStore: AuthStore = {
+    ...input.store,
+    users: {
+      ...input.store.users,
+      async nutritionWritebackEnabled() { throw new Error('read replica unavailable'); },
+    },
+  };
+
+  const saved = await handleCurrentMealDraftSave(
+    new Request('http://localhost:3000/rhythm/api/meals/drafts/draft-1/save', { method: 'POST', headers: headers(input.sessionToken) }),
+    'draft-1', deps(preflightUnavailableStore),
+  );
+  assert.equal(saved.status, 201);
+  assert.deepEqual(await saved.json(), {
+    meal: {
+      view: 'saved', mealId: 'draft-1', mealType: 'LUNCH', eatenAt: now.toISOString(), savedAt: now.toISOString(),
+      dishes: input.draft.dishes, nutrients: input.draft.nutrients,
+    },
+    syncState: 'unsynced',
+    canSync: false,
+    syncReason: 'sync_feature_unavailable',
+  });
+
+  const patched = await handleCurrentMeal(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1', {
+      method: 'PATCH', headers: headers(input.sessionToken, true),
+      body: JSON.stringify({ kind: 'set_nutrient', dishId: 'dish-1', nutrientCode: 'PROTEIN', value: 10, unit: 'g' }),
+    }), 'draft-1', deps(preflightUnavailableStore),
+  );
+  assert.equal(patched.status, 200);
+  const body = await patched.json() as { meal: { nutrients: Array<{ nutrientCode: string; value: number }> }; canSync: boolean; syncReason?: string };
+  assert.equal(body.meal.nutrients.find((nutrient) => nutrient.nutrientCode === 'PROTEIN')?.value, 10);
+  assert.equal(body.canSync, false);
+  assert.equal(body.syncReason, 'sync_feature_unavailable');
+
+  const read = await handleCurrentMeal(
+    new Request('http://localhost:3000/rhythm/api/meals/draft-1', { headers: headers(input.sessionToken) }),
+    'draft-1', deps(preflightUnavailableStore),
+  );
+  assert.equal(read.status, 503);
+  assert.deepEqual(await read.json(), { error: 'service_unavailable' });
+});
+
 test('draft save distinguishes a missing draft from a transaction outage', async () => {
   const input = await insertDraft();
   const unavailableStore: AuthStore = {

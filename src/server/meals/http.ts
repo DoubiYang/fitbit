@@ -155,6 +155,29 @@ async function currentMealResponse(
   return response({ meal: savedEditor(snapshot), syncState: snapshot.syncState, ...readiness }, status);
 }
 
+/**
+ * A committed content write must not be reported as failed merely because the
+ * optional, follow-up readiness read is unavailable. GET retains its stricter
+ * failure semantics; write responses instead safely disable the next sync.
+ */
+async function currentMealPostCommitResponse(
+  snapshot: CurrentMealSnapshot,
+  userId: string,
+  deps: MealHttpDeps,
+  status = 200,
+): Promise<Response> {
+  try {
+    return await currentMealResponse(snapshot, userId, deps, status);
+  } catch {
+    return response({
+      meal: savedEditor(snapshot),
+      syncState: snapshot.syncState,
+      canSync: false,
+      syncReason: 'sync_feature_unavailable',
+    }, status);
+  }
+}
+
 async function requireSession(request: Request, deps: MealHttpDeps, write = false): Promise<string | Response> {
   if (write) {
     const originError = checkPostOrigin(request, deps.config);
@@ -394,7 +417,7 @@ export async function handleCurrentMealDraftSave(request: Request, draftId: stri
       if (!draft) return undefined;
       return store.currentMeals.saveEditorDraft({ userId: session, draftId, now: nowFor(deps) });
     });
-    return saved ? await currentMealResponse(saved, session, deps, 201) : response({ error: 'not_found' }, 404);
+    return saved ? await currentMealPostCommitResponse(saved, session, deps, 201) : response({ error: 'not_found' }, 404);
   } catch (error) {
     return isMissingEditorDraftError(error) ? response({ error: 'not_found' }, 404) : serviceUnavailable();
   }
@@ -445,7 +468,7 @@ export async function handleCurrentMeal(request: Request, mealId: string, deps: 
         now: nowFor(deps),
       });
     });
-    return updated ? await currentMealResponse(updated, userId, deps) : response({ error: 'not_found' }, 404);
+    return updated ? await currentMealPostCommitResponse(updated, userId, deps) : response({ error: 'not_found' }, 404);
   } catch (error) {
     if (error instanceof CurrentMealEditLockedError) {
       return response({ error: 'meal_locked_for_sync', reason: 'sync_in_progress' }, 409);

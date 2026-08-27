@@ -147,6 +147,13 @@ export function savedMealUrl(mealId: string): string {
   return `/rhythm/meals/${encodeURIComponent(mealId)}`;
 }
 
+export function parseEditableNutrientValue(rawValue: string): number | undefined {
+  const normalized = rawValue.trim();
+  if (!normalized) return undefined;
+  const value = Number(normalized);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function initialSession(props: MobileMealEditorProps): EditorSession | undefined {
   if (props.initialMeal) {
     return {
@@ -482,8 +489,8 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 
   async function saveNutrientEdit() {
     if (!nutrientEditor) return;
-    const value = Number(nutrientEditor.value);
-    if (!Number.isFinite(value) || value < 0) {
+    const value = parseEditableNutrientValue(nutrientEditor.value);
+    if (value === undefined) {
       showError('请输入有限且不小于 0 的数值。');
       return;
     }
@@ -732,6 +739,12 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
         </aside>
       </div>
 
+      {!isDraft && !canSync && syncReason ? (
+        <p className={`${ui('syncNotice')} ${ui('warning')}`} role="status">
+          {SYNC_REASON_MESSAGES[syncReason] ?? '当前无法同步这一餐，请稍后再试。'}
+        </p>
+      ) : null}
+
       <footer className={ui('actionBar')}>
         {isDraft ? (
           <button type="button" onClick={() => void saveDraft()} disabled={busy}>保存修改</button>
@@ -740,7 +753,6 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
         )}
         {!isDraft ? (
           <div className={ui('syncAction')}>
-            {!canSync && syncReason ? <p className={ui('warning')} role="status">{SYNC_REASON_MESSAGES[syncReason] ?? '当前无法同步这一餐，请稍后再试。'}</p> : null}
             <button
               type="button"
               onClick={() => void syncMeal()}
