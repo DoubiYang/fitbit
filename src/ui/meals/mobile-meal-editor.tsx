@@ -154,6 +154,22 @@ export function parseEditableNutrientValue(rawValue: string): number | undefined
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+export function convertEditableNutrientUnitValue(
+  rawValue: string,
+  nutrientCode: string,
+  fromUnit: NutritionUnit,
+  toUnit: NutritionUnit,
+): string {
+  const value = parseEditableNutrientValue(rawValue);
+  if (value === undefined) return rawValue;
+  try {
+    const internal = toInternalNutrientAmount(nutrientCode, value, fromUnit);
+    return String(fromInternalNutrientAmount(nutrientCode, internal.value, toUnit).value);
+  } catch {
+    return rawValue;
+  }
+}
+
 function initialSession(props: MobileMealEditorProps): EditorSession | undefined {
   if (props.initialMeal) {
     return {
@@ -473,18 +489,13 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   function changeNutrientUnit(unit: NutritionUnit) {
     if (!nutrientEditor) return;
     const current = nutrientEditor;
-    const value = Number(current.value);
-    if (!Number.isFinite(value) || value < 0) {
-      setNutrientEditor({ ...current, unit });
-      return;
-    }
-    try {
-      const internal = toInternalNutrientAmount(current.nutrient.nutrientCode, value, current.unit);
-      const converted = fromInternalNutrientAmount(current.nutrient.nutrientCode, internal.value, unit);
-      setNutrientEditor({ ...current, unit, value: String(converted.value) });
-    } catch {
-      setNutrientEditor({ ...current, unit });
-    }
+    const value = convertEditableNutrientUnitValue(
+      current.value,
+      current.nutrient.nutrientCode,
+      current.unit,
+      unit,
+    );
+    setNutrientEditor({ ...current, unit, value });
   }
 
   async function saveNutrientEdit() {

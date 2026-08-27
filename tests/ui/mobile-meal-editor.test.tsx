@@ -8,6 +8,7 @@ import type { EditableMealDraft, EditableMealSaved } from '../../src/domain/meal
 import {
   MobileMealEditor,
   actionableMealAiSuggestions,
+  convertEditableNutrientUnitValue,
   mealEditorEndpoint,
   mealSuggestionPatch,
   nextPendingSuggestionState,
@@ -114,6 +115,12 @@ test('rejects blank nutrient editor values instead of coercing them to zero', ()
   assert.equal(parseEditableNutrientValue('-1'), undefined);
   assert.equal(parseEditableNutrientValue('0'), 0);
   assert.equal(parseEditableNutrientValue(' 12.5 '), 12.5);
+});
+
+test('keeps a cleared nutrient value empty when the editor changes units', () => {
+  assert.equal(convertEditableNutrientUnitValue('', 'PROTEIN', 'g', 'mg'), '');
+  assert.equal(convertEditableNutrientUnitValue('  ', 'PROTEIN', 'g', 'mg'), '  ');
+  assert.equal(convertEditableNutrientUnitValue('1.5', 'PROTEIN', 'g', 'mg'), '1500');
 });
 
 test('strips response-only AI display fields before applying a suggestion as a strict PATCH', () => {
