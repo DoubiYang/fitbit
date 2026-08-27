@@ -422,6 +422,14 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           const deletesComplete = points.filter((point) => point.role === 'delete_target').every((point) => point.status === 'synced');
           const candidate = (point: MealSyncPointRow): boolean => {
             if (point.leaseUntil && point.leaseUntil.getTime() > input.now.getTime()) return false;
+            if (input.mode === 'batch_delete') {
+              return !unknown
+                && !hasActionRequired
+                && point.role === 'delete_target'
+                && (point.status === 'pending' || point.status === 'retrying')
+                && !point.googleOperationName
+                && (!point.nextAttemptAt || point.nextAttemptAt.getTime() <= input.now.getTime());
+            }
             if (unknown) {
               return point.status === 'unknown'
                 && Boolean(point.recoveryRequestedAt)
@@ -430,6 +438,10 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
             if (hasActionRequired) return false;
             if (point.role !== (deletesComplete ? 'create_target' : 'delete_target')) return false;
             if (point.status !== 'pending' && point.status !== 'retrying' && point.status !== 'operation_pending') return false;
+            if (input.mode === 'single'
+              && point.role === 'delete_target'
+              && (point.status === 'pending' || point.status === 'retrying')
+              && !point.googleOperationName) return false;
             return !point.nextAttemptAt || point.nextAttemptAt.getTime() <= input.now.getTime();
           };
           for (const point of points.filter(candidate).sort((left, right) => left.id.localeCompare(right.id))) {
@@ -440,8 +452,22 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
             point.nextAttemptAt = undefined;
             claimed.push(cloneMealSyncPoint(point));
           }
+          if (input.mode === 'batch_delete' && claimed.length > 0) break;
         }
         return claimed;
+      });
+    },
+    async renewPointLease(input) {
+      return inSyncTransaction(async (sync) => {
+        if (sync !== mealSync) return sync.renewPointLease(input);
+        const point = syncPoints.get(input.id);
+        const leaseUntil = point?.leaseUntil;
+        if (!ownsSyncPointLease(point, input)
+          || !leaseUntil
+          || leaseUntil.getTime() <= input.now.getTime()
+          || input.renewedLeaseUntil.getTime() <= leaseUntil.getTime()) return false;
+        point.leaseUntil = new Date(input.renewedLeaseUntil);
+        return true;
       });
     },
     async finishPoint(input) {

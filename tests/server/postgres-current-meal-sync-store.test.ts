@@ -195,3 +195,46 @@ test('PostgreSQL retrying keeps its generation pending and the current meal sync
   assert.equal(mealUpdate?.values?.[2], 'syncing');
   assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
 });
+
+test('PostgreSQL batch-delete claims stay within one selected generation cohort', async () => {
+  const leaseUntil = new Date(now.getTime() + 120_000);
+  const pool = new RecordingPool([
+    { rows: [{
+      ...createPointRow({ role: 'delete_target', status: 'pending', payload: null, payload_hash: null }),
+      lease_until: leaseUntil,
+    }] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+
+  const claimed = await store.mealSync!.claimDuePoints({
+    now, leaseUntil, limit: 20, mode: 'batch_delete',
+  });
+
+  assert.equal(claimed.length, 1);
+  const query = pool.queries[0];
+  assert.match(query?.text ?? '', /selected_batch_generation/u);
+  assert.match(query?.text ?? '', /\$4 = 'batch_delete'/u);
+  assert.deepEqual(query?.values, [now, leaseUntil, 20, 'batch_delete']);
+});
+
+test('PostgreSQL renews a point lease only with its exact unexpired owner lease', async () => {
+  const leaseUntil = new Date(now.getTime() + 120_000);
+  const renewedLeaseUntil = new Date(leaseUntil.getTime() + 120_000);
+  const pool = new RecordingPool([
+    { rows: [] },
+    { rows: [], rowCount: 1 },
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+
+  const renewed = await store.mealSync!.renewPointLease({
+    id: 'point-1', generationId: 'generation-1', userId: 'u1', leaseUntil,
+    renewedLeaseUntil, now,
+  });
+
+  assert.equal(renewed, true);
+  const query = pool.queries[1];
+  assert.match(query?.text ?? '', /lease_until = \$4 AND lease_until > \$6 AND \$5 > \$4/u);
+  assert.deepEqual(query?.values, ['point-1', 'generation-1', 'u1', leaseUntil, renewedLeaseUntil, now, now]);
+  assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+});

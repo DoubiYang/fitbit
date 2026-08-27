@@ -502,6 +502,7 @@ test('sync enforces writeback preconditions and only accepts a single locally sa
     },
     async beginRecovery() { throw new Error('not expected'); },
     async claimDuePoints() { return []; },
+    async renewPointLease() { return false; },
     async finishPoint() { return false; },
     async retryPoint() { return false; },
     async markPointUnknown() { return false; },
@@ -560,6 +561,7 @@ test('sync recovery requests only exact-name recovery before checking writeback 
       return { id: 'generation-1', mealId, userId, contentRevision: 1, phase: 'recovery', createdAt: now, updatedAt: now };
     },
     async claimDuePoints() { return []; },
+    async renewPointLease() { return false; },
     async finishPoint() { return false; },
     async retryPoint() { return false; },
     async markPointUnknown() { return false; },

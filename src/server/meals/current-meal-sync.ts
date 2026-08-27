@@ -32,6 +32,16 @@ type CurrentMealSyncInput = {
   requestTimeoutMs?: number;
 };
 
+const MAX_BATCH_DELETE_CLAIM_LIMIT = 20;
+
+function claimLimit(input: number | undefined): number {
+  const requested = input ?? MAX_BATCH_DELETE_CLAIM_LIMIT;
+  if (!Number.isInteger(requested) || requested <= 0) {
+    throw new Error('limit must be a positive integer');
+  }
+  return Math.min(requested, MAX_BATCH_DELETE_CLAIM_LIMIT);
+}
+
 function pointLease(row: MealSyncPointRow, now: Date): MealSyncPointLease {
   if (!row.leaseUntil) {
     throw new Error('claimed current-meal sync point is missing a lease');
@@ -43,6 +53,28 @@ function pointLease(row: MealSyncPointRow, now: Date): MealSyncPointLease {
     leaseUntil: row.leaseUntil,
     now,
   };
+}
+
+/**
+ * A claimed point gets another full lease window immediately before token/API
+ * I/O.  Exact old-lease ownership makes a stale worker harmless: if renewal
+ * loses the compare-and-set race it must not send the remote request.
+ */
+async function renewLeaseForExternalAction(input: {
+  row: MealSyncPointRow;
+  now: Date;
+  store: AuthStore;
+}): Promise<boolean> {
+  const currentLeaseUntil = input.row.leaseUntil;
+  if (!currentLeaseUntil) return false;
+  const renewedLeaseUntil = new Date(currentLeaseUntil.getTime() + LEASE_MS);
+  const renewed = await input.store.mealSync!.renewPointLease({
+    ...pointLease(input.row, input.now),
+    renewedLeaseUntil,
+  });
+  if (!renewed) return false;
+  input.row.leaseUntil = renewedLeaseUntil;
+  return true;
 }
 
 function asPayload(row: MealSyncPointRow): GoogleNutritionDataPoint | undefined {
@@ -128,6 +160,7 @@ async function recoverUnknownPoint(input: {
   google: GoogleNutritionOutboxClient;
   result: CurrentMealSyncResult;
 }): Promise<void> {
+  if (!await renewLeaseForExternalAction(input)) return;
   const owner = pointLease(input.row, input.now);
   let accessToken: string;
   try {
@@ -177,12 +210,14 @@ async function pollOperation(input: {
   google: GoogleNutritionOutboxClient;
   result: CurrentMealSyncResult;
 }): Promise<void> {
-  const owner = pointLease(input.row, input.now);
   if (!input.row.googleOperationName) {
+    const owner = pointLease(input.row, input.now);
     await input.store.mealSync!.markPointUnknown({ ...owner, errorCode: 'missing_operation_name' });
     input.result.unknown += 1;
     return;
   }
+  if (!await renewLeaseForExternalAction(input)) return;
+  const owner = pointLease(input.row, input.now);
   let accessToken: string;
   try {
     accessToken = await accessTokenFor(input);
@@ -212,12 +247,14 @@ async function createPoint(input: {
   google: GoogleNutritionOutboxClient;
   result: CurrentMealSyncResult;
 }): Promise<void> {
-  const owner = pointLease(input.row, input.now);
   const payload = asPayload(input.row);
   if (!payload) {
+    const owner = pointLease(input.row, input.now);
     if (await input.store.mealSync!.markPointUnknown({ ...owner, errorCode: 'missing_payload' })) input.result.unknown += 1;
     return;
   }
+  if (!await renewLeaseForExternalAction(input)) return;
+  const owner = pointLease(input.row, input.now);
   let accessToken: string;
   try {
     accessToken = await accessTokenFor(input);
@@ -247,13 +284,17 @@ async function deleteBatch(input: {
   google: GoogleNutritionOutboxClient;
   result: CurrentMealSyncResult;
 }): Promise<void> {
-  const [first] = input.rows;
+  const rows: MealSyncPointRow[] = [];
+  for (const row of input.rows) {
+    if (await renewLeaseForExternalAction({ row, now: input.now, store: input.store })) rows.push(row);
+  }
+  const [first] = rows;
   if (!first) return;
   let accessToken: string;
   try {
     accessToken = await accessTokenFor({ row: first, timeoutMs: input.timeoutMs, tokenForUser: input.tokenForUser });
   } catch {
-    for (const row of input.rows) {
+    for (const row of rows) {
       const owner = pointLease(row, input.now);
       if (await input.store.mealSync!.markPointFailedActionRequired({ ...owner, errorCode: 'token_unavailable' })) {
         input.result.failed += 1;
@@ -263,14 +304,14 @@ async function deleteBatch(input: {
   }
   try {
     const operation = rejectErroredOperation(await withLeaseSafeTimeout(
-      (signal) => input.google.batchDelete(accessToken, input.rows.map((row) => row.dataPointName), signal),
+      (signal) => input.google.batchDelete(accessToken, rows.map((row) => row.dataPointName), signal),
       input.timeoutMs,
     ));
-    for (const row of input.rows) {
+    for (const row of rows) {
       await markOperationResult({ row, operation, now: input.now, store: input.store, result: input.result });
     }
   } catch (error) {
-    for (const row of input.rows) {
+    for (const row of rows) {
       await markWriteError({ row, now: input.now, store: input.store, result: input.result, error });
     }
   }
@@ -282,48 +323,43 @@ async function deleteBatch(input: {
  * immutable generation, while a separate runner invokes this worker.
  */
 export async function runCurrentMealSyncOutbox(input: CurrentMealSyncInput): Promise<CurrentMealSyncResult> {
+  const batchLimit = claimLimit(input.limit);
   if (!input.store.mealSync) return initialResult(0);
   const now = input.now ?? new Date();
   const timeoutMs = requestTimeout(input.requestTimeoutMs);
-  const claimed = await input.store.mealSync.claimDuePoints({
+  // A delete batch makes exactly one Google write.  The store leases only one
+  // generation/user cohort, so all names share that one bounded request.
+  const deleteClaims = await input.store.mealSync.claimDuePoints({
     now,
     leaseUntil: new Date(now.getTime() + LEASE_MS),
-    limit: input.limit ?? 20,
+    limit: batchLimit,
+    mode: 'batch_delete',
   });
-  const result = initialResult(claimed.length);
-  const normalDeleteGroups = new Map<string, MealSyncPointRow[]>();
-  const individual: MealSyncPointRow[] = [];
-
-  for (const row of claimed) {
-    if (row.role === 'delete_target' && !row.googleOperationName && row.status !== 'unknown' && row.status !== 'operation_pending') {
-      const key = `${row.generationId}\u0000${row.userId}`;
-      const group = normalDeleteGroups.get(key) ?? [];
-      group.push(row);
-      normalDeleteGroups.set(key, group);
-    } else {
-      individual.push(row);
-    }
+  if (deleteClaims.length > 0) {
+    const result = initialResult(deleteClaims.length);
+    await deleteBatch({ ...input, rows: deleteClaims, now, timeoutMs, result });
+    return result;
   }
-  for (const rows of normalDeleteGroups.values()) {
-    // Google batchDelete has a 10,000-name maximum. Claim limits are lower,
-    // but keep the worker safe should its caller raise the limit later.
-    for (let start = 0; start < rows.length; start += 10_000) {
-      await deleteBatch({ ...input, rows: rows.slice(start, start + 10_000), now, timeoutMs, result });
-    }
-  }
-  for (const row of individual) {
-    if (row.status === 'unknown') {
-      await recoverUnknownPoint({ ...input, row, now, timeoutMs, result });
-    } else if (row.googleOperationName || row.status === 'operation_pending') {
-      await pollOperation({ ...input, row, now, timeoutMs, result });
-    } else if (row.role === 'create_target') {
-      await createPoint({ ...input, row, now, timeoutMs, result });
-    } else {
-      // A delete with an operation is handled above; a claimed delete without
-      // one belongs to a batch. Keep this as an indeterminate safety valve.
-      const owner = pointLease(row, now);
-      if (await input.store.mealSync.markPointUnknown({ ...owner, errorCode: 'unexpected_delete_state' })) result.unknown += 1;
-    }
+  // Creates, exact-name recovery, and operation polling each may consume a
+  // token plus an API timeout.  Lease one only, rather than allowing later
+  // points to expire while earlier network calls are still in flight.
+  const [row] = await input.store.mealSync.claimDuePoints({
+    now,
+    leaseUntil: new Date(now.getTime() + LEASE_MS),
+    limit: 1,
+    mode: 'single',
+  });
+  const result = initialResult(row ? 1 : 0);
+  if (!row) return result;
+  if (row.status === 'unknown') {
+    await recoverUnknownPoint({ ...input, row, now, timeoutMs, result });
+  } else if (row.googleOperationName || row.status === 'operation_pending') {
+    await pollOperation({ ...input, row, now, timeoutMs, result });
+  } else if (row.role === 'create_target') {
+    await createPoint({ ...input, row, now, timeoutMs, result });
+  } else {
+    const owner = pointLease(row, now);
+    if (await input.store.mealSync.markPointUnknown({ ...owner, errorCode: 'unexpected_delete_state' })) result.unknown += 1;
   }
   return result;
 }

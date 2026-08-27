@@ -1047,7 +1047,7 @@ function storeFor(queryable: Queryable): AuthStore {
     async claimDuePoints(input) {
       const result = await queryable.query(
         `WITH candidate AS (
-           SELECT point.id
+           SELECT point.id, point.generation_id, point.user_id
            FROM meal_sync_points AS point
            JOIN meal_sync_generations AS generation ON generation.id = point.generation_id AND generation.user_id = point.user_id
            WHERE generation.phase <> 'synced'
@@ -1091,22 +1091,79 @@ function storeFor(queryable: Queryable): AuthStore {
                      )
                      AND point.role = 'create_target'
                    )
+               )
+             )
+             AND (
+               $4::text IS NULL
+               OR (
+                 $4 = 'batch_delete'
+                 AND point.role = 'delete_target'
+                 AND point.status IN ('pending', 'retrying')
+                 AND point.google_operation_name IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM meal_sync_points AS unknown_point
+                   WHERE unknown_point.generation_id = generation.id AND unknown_point.user_id = generation.user_id
+                     AND unknown_point.status = 'unknown'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM meal_sync_points AS failed_point
+                   WHERE failed_point.generation_id = generation.id AND failed_point.user_id = generation.user_id
+                     AND failed_point.status = 'failed_action_required'
+                 )
+               )
+               OR (
+                 $4 = 'single'
+                 AND NOT (
+                   point.role = 'delete_target'
+                   AND point.status IN ('pending', 'retrying')
+                   AND point.google_operation_name IS NULL
                  )
                )
              )
+           )
            ORDER BY COALESCE(point.next_attempt_at, point.created_at) ASC, point.id ASC
            FOR UPDATE SKIP LOCKED
            LIMIT $3
+         ),
+         selected_batch_generation AS (
+           SELECT generation_id, user_id
+           FROM candidate
+           WHERE $4 = 'batch_delete'
+           ORDER BY generation_id, user_id
+           LIMIT 1
+         ),
+         selected_candidate AS (
+           SELECT candidate.id
+           FROM candidate
+           WHERE $4 IS DISTINCT FROM 'batch_delete'
+              OR EXISTS (
+                SELECT 1 FROM selected_batch_generation AS selected
+                WHERE selected.generation_id = candidate.generation_id AND selected.user_id = candidate.user_id
+              )
          )
          UPDATE meal_sync_points AS point
          SET lease_until = $2, last_attempt_at = $1, next_attempt_at = NULL,
              attempt_count = point.attempt_count + 1, updated_at = $1
-         FROM candidate
+         FROM selected_candidate AS candidate
          WHERE point.id = candidate.id
          RETURNING point.*`,
-        [input.now, input.leaseUntil, input.limit],
+        [input.now, input.leaseUntil, input.limit, input.mode ?? null],
       );
       return result.rows.map(mapMealSyncPoint);
+    },
+    async renewPointLease(input) {
+      if (canStartTransaction(queryable)) return store.withTransaction((inner) => inner.mealSync!.renewPointLease(input));
+      const result = await queryable.query(
+        `UPDATE meal_sync_points
+         SET lease_until = $5, updated_at = $7
+         WHERE id = $1 AND generation_id = $2 AND user_id = $3
+           AND lease_until = $4 AND lease_until > $6 AND $5 > $4`,
+        [
+          input.id, input.generationId, input.userId, input.leaseUntil,
+          input.renewedLeaseUntil, input.now, input.now,
+        ],
+      );
+      return result.rowCount === 1;
     },
     async finishPoint(input) {
       if (canStartTransaction(queryable)) {

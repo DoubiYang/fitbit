@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { EditableMealDraft } from '../../src/domain/meal-editor';
+import type { MealSyncPointClaim } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { runCurrentMealSyncOutbox } from '../../src/server/meals/current-meal-sync';
 import { GoogleNutritionWriteError, type GoogleNutritionOutboxClient } from '../../src/server/meals/nutrition-outbox';
@@ -44,6 +45,27 @@ async function savedMeal() {
   return store;
 }
 
+async function savedMealWithTwoCreates() {
+  const store = createMemoryStore();
+  const twoDishes = editor();
+  twoDishes.dishes.push({
+    id: 'dish-2',
+    nameZh: '豆腐',
+    portionGrams: 80,
+    ingredients: [{
+      nameZh: '豆腐', grams: 80, foodSource: 'tw_fda', foodSourceId: 'V0200202', foodSourceVersion: 'fda-test',
+    }],
+  });
+  twoDishes.nutrients.push({ dishId: 'dish-2', nutrientCode: 'ENERGY', value: 60, unit: 'kcal', source: 'tw_fda' });
+  await store.users.insert('u1');
+  await store.currentMeals.insertEditorDraft({
+    id: 'meal-1', userId: 'u1', mealType: 'LUNCH', eatenAt: now,
+    vision: { foods: [], photoQuality: 'unusable', globalUncertainties: [] }, editor: twoDishes, now,
+  });
+  await store.currentMeals.saveEditorDraft({ userId: 'u1', draftId: 'meal-1', now });
+  return store;
+}
+
 function completedGoogle(overrides: Partial<GoogleNutritionOutboxClient> = {}): GoogleNutritionOutboxClient {
   return {
     create: async () => ({ done: true }),
@@ -73,6 +95,81 @@ test('worker executes a frozen create point and finalizes the current meal gener
   assert.equal(creates.length, 1);
   assert.equal(store.mealSyncPoints()[0]?.status, 'synced');
   assert.equal((await store.currentMeals.findCurrentMeal('u1', 'meal-1'))?.syncState, 'synced');
+});
+
+test('an in-flight create keeps its lease after the original lease window passes', async () => {
+  const store = await savedMeal();
+  await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });
+  const names: string[] = [];
+  let releaseCreate: (() => void) | undefined;
+  let notifyStarted!: () => void;
+  const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+  const google = completedGoogle({
+    create: async (_token, payload) => {
+      names.push(payload.name);
+      if (names.length === 1) {
+        notifyStarted();
+        return new Promise((resolve) => { releaseCreate = () => resolve({ done: true }); });
+      }
+      return { done: true };
+    },
+  });
+  const workerOne = runCurrentMealSyncOutbox({
+    store, now, limit: 20, tokenForUser: async () => 'token', google,
+  });
+
+  await started;
+  const workerTwo = await runCurrentMealSyncOutbox({
+    store,
+    now: new Date(now.getTime() + 120_001),
+    limit: 20,
+    tokenForUser: async () => 'token',
+    google,
+  });
+  releaseCreate?.();
+  await workerOne;
+
+  assert.equal(workerTwo.claimed, 0);
+  assert.equal(names.length, 1);
+});
+
+test('a multi-create generation posts only one point per worker run', async () => {
+  const store = await savedMealWithTwoCreates();
+  await store.mealSync!.startGeneration({ mealId: 'meal-1', userId: 'u1', now });
+  const names: string[] = [];
+
+  await runCurrentMealSyncOutbox({
+    store,
+    now,
+    limit: 20,
+    tokenForUser: async () => 'token',
+    google: completedGoogle({ create: async (_token, payload) => { names.push(payload.name); return { done: true }; } }),
+  });
+
+  assert.equal(names.length, 1);
+  assert.equal((await store.currentMeals.findCurrentMeal('u1', 'meal-1'))?.syncState, 'syncing');
+});
+
+test('worker validates public limits and caps a batch claim before its single-point claim', async () => {
+  const store = await savedMeal();
+  const original = store.mealSync!;
+  const claims: Array<MealSyncPointClaim & { mode?: string }> = [];
+  store.mealSync = {
+    ...original,
+    claimDuePoints: async (input) => {
+      claims.push(input);
+      return [];
+    },
+  };
+  const input = { store, now, tokenForUser: async () => 'token', google: completedGoogle() };
+
+  await assert.rejects(() => runCurrentMealSyncOutbox({ ...input, limit: 0 }), /limit must be a positive integer/u);
+  await runCurrentMealSyncOutbox({ ...input, limit: 999 });
+
+  assert.deepEqual(claims.map((claim) => ({ limit: claim.limit, mode: claim.mode })), [
+    { limit: 20, mode: 'batch_delete' },
+    { limit: 1, mode: 'single' },
+  ]);
 });
 
 test('worker completes all replacement deletes before it creates the new immutable payload', async () => {

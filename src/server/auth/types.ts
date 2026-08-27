@@ -97,6 +97,8 @@ export type MealSyncPointClaim = {
   now: Date;
   leaseUntil: Date;
   limit: number;
+  /** `batch_delete` leases one delete-only generation; `single` leases one non-batch point. */
+  mode?: 'batch_delete' | 'single';
 };
 
 export type MealSyncPointLease = {
@@ -119,6 +121,7 @@ export type MealSyncStore = {
   startGeneration(input: { mealId: string; userId: string; now: Date }): Promise<MealSyncGenerationRow | undefined>;
   beginRecovery(input: { mealId: string; userId: string; now: Date; reason: string }): Promise<MealSyncGenerationRow | undefined>;
   claimDuePoints(input: MealSyncPointClaim): Promise<MealSyncPointRow[]>;
+  renewPointLease(input: MealSyncPointLease & { renewedLeaseUntil: Date }): Promise<boolean>;
   finishPoint(input: MealSyncPointLease): Promise<boolean>;
   retryPoint(input: MealSyncPointLease & { nextAttemptAt: Date; errorCode: string }): Promise<boolean>;
   markPointUnknown(input: MealSyncPointLease & { errorCode: string }): Promise<boolean>;
