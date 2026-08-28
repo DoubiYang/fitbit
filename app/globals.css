@@ -43,11 +43,16 @@ ol {
 
 .dashboard {
   display: grid;
-  gap: 1.5rem;
+  gap: clamp(1.5rem, 4vw, 2rem);
   max-width: 68rem;
   min-height: 100vh;
   margin: 0 auto;
   padding: clamp(1.5rem, 5vw, 4rem) clamp(1rem, 4vw, 2rem) 3rem;
+}
+
+.dashboard.dashboard--today {
+  width: min(100%, 46rem);
+  max-width: 46rem;
 }
 
 .dashboard-header {
@@ -95,6 +100,23 @@ h3 {
   line-height: 1.65;
 }
 
+.dashboard-context {
+  max-width: 44rem;
+}
+
+.dashboard-sync {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  color: #536762;
+  font-size: 0.875rem;
+}
+
+.dashboard-sync time {
+  font-variant-numeric: tabular-nums;
+}
+
 .freshness,
 .quality {
   border-radius: 999px;
@@ -118,8 +140,50 @@ h3 {
   background: var(--caution-surface);
 }
 
+.recovery-status,
+.today-advice,
+.data-state {
+  border: 1px solid rgb(23 40 38 / 13%);
+  border-radius: 1.1rem;
+}
+
+.recovery-status {
+  display: grid;
+  gap: 0.875rem;
+  padding: clamp(1.25rem, 3vw, 1.5rem);
+  background: var(--surface-sage);
+  box-shadow: 0 0.5rem 1.5rem rgb(41 83 72 / 6%);
+}
+
+.recovery-status > div,
+.today-advice__heading {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.recovery-status__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.recovery-status__score {
+  color: var(--sage-deep);
+  font-size: clamp(2rem, 7vw, 2.75rem);
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  letter-spacing: -0.06em;
+  line-height: 1;
+}
+
+.recovery-status__detail {
+  color: #536762;
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
 .action-card,
-.metric-card,
 .data-state {
   border: 1px solid rgb(23 40 38 / 13%);
   border-radius: 1.1rem;
@@ -135,6 +199,20 @@ h3 {
 }
 
 .action-card__text {
+  max-width: 48rem;
+  font-size: clamp(1.05rem, 3.5vw, 1.3rem);
+  line-height: 1.6;
+}
+
+.today-advice {
+  display: grid;
+  gap: 0.875rem;
+  padding: clamp(1.25rem, 3vw, 1.5rem);
+  background: var(--surface-raised);
+  box-shadow: 0 0.5rem 1.5rem rgb(41 83 72 / 5%);
+}
+
+.today-advice__text {
   max-width: 48rem;
   font-size: clamp(1.05rem, 3.5vw, 1.3rem);
   line-height: 1.6;
@@ -171,21 +249,56 @@ h3 {
   text-align: right;
 }
 
+.dashboard-record {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid rgb(23 40 38 / 13%);
+}
+
+.dashboard-record > div {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.dashboard-record__action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.75rem;
+  border-radius: 999px;
+  padding: 0.7rem 1.1rem;
+  color: var(--ink);
+  background: var(--sage);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.dashboard-record__action:hover {
+  color: var(--surface-raised);
+  background: var(--sage-deep);
+}
+
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.875rem;
+  grid-template-columns: 1fr;
+  gap: 0;
+  border-top: 1px solid rgb(23 40 38 / 13%);
 }
 
 .metric-card {
   display: grid;
-  gap: 1rem;
-  min-height: 12rem;
-  padding: 1.125rem;
+  gap: 0.75rem;
+  padding: 1.25rem 0;
+  border-bottom: 1px solid rgb(23 40 38 / 13%);
 }
 
 .metric-card__topline {
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .quality {
@@ -209,7 +322,6 @@ h3 {
 }
 
 .metric-card__detail {
-  align-self: end;
   color: #536762;
   font-size: 0.875rem;
   line-height: 1.55;
@@ -303,11 +415,12 @@ textarea {
     text-align: left;
   }
 
-  .metric-grid {
-    grid-template-columns: 1fr;
+  .dashboard-record {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
-  .metric-card {
-    min-height: 0;
+  .dashboard-record__action {
+    width: 100%;
   }
 }

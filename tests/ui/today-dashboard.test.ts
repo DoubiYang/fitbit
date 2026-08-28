@@ -26,15 +26,62 @@ const view: TodayView = {
   },
 };
 
-test('shows the action evidence and data quality instead of a metric wall', () => {
+test('renders an action-first health journal inside the primary navigation', () => {
   const html = renderToStaticMarkup(React.createElement(TodayDashboard, { view }));
 
+  assert.match(html, /<nav[^>]*aria-label="主要导航"/);
+  assert.match(html, /今日记录/);
+  assert.match(html, /记录餐食/);
+  assert.match(html, /<a[^>]*href="\/rhythm\/meals\/new"[^>]*>记录餐食<\/a>/);
   assert.match(html, /今天的建议/);
   assert.match(html, /今天建议维持原有节奏/);
   assert.match(html, /HRV · 2026-08-22：51/);
   assert.match(html, /恢复信号/);
+  assert.match(html, /睡眠完整度/);
+  assert.match(html, /训练负荷/);
   assert.match(html, /数据质量：中/);
   assert.match(html, /数据新鲜/);
-  assert.match(html, /href="\/rhythm\/meals\/new"/);
-  assert.match(html, /记录餐食/);
+  assert.equal((html.match(/<main\b/g) ?? []).length, 1);
+});
+
+test('renders missing metric scores as a dash without inventing a numeric value', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(TodayDashboard, {
+      view: {
+        ...view,
+        metrics: {
+          ...view.metrics,
+          recovery: { ...view.metrics.recovery, score: null },
+          sleep: { ...view.metrics.sleep, score: null },
+          training: { ...view.metrics.training, score: null },
+        },
+      },
+    }),
+  );
+
+  assert.equal((html.match(/<p class="metric-card__score">—<\/p>/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /<p class="metric-card__score">\d/);
+});
+
+test('distinguishes demo context from an OAuth-backed view', () => {
+  const demoHtml = renderToStaticMarkup(React.createElement(TodayDashboard, { view, variant: 'demo' }));
+  const oauthHtml = renderToStaticMarkup(React.createElement(TodayDashboard, { view, variant: 'oauth' }));
+
+  assert.match(demoHtml, /节律 · 演示/);
+  assert.doesNotMatch(oauthHtml, /节律 · 演示/);
+});
+
+test('renders the record date in the Asia/Shanghai civil day while preserving the ISO timestamp', () => {
+  const generatedAt = '2026-08-22T16:30:00.000Z';
+  const html = renderToStaticMarkup(
+    React.createElement(TodayDashboard, { view: { ...view, generatedAt } }),
+  );
+
+  assert.match(html, /<time dateTime="2026-08-22T16:30:00.000Z">记录日期 2026-08-23<\/time>/);
+});
+
+test('does not throw when a manually constructed view has an invalid timestamp', () => {
+  assert.doesNotThrow(() => renderToStaticMarkup(
+    React.createElement(TodayDashboard, { view: { ...view, generatedAt: 'not-an-iso-timestamp' } }),
+  ));
 });
