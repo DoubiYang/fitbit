@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 import './globals.css';
+import '../src/ui/shell/app-shell.module.css';
 
 export const metadata: Metadata = {
   title: '节律',

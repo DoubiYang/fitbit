@@ -1,15 +1,36 @@
 :root {
-  color: #172826;
-  background: #f6f4ee;
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --surface-canvas: #F7F6F1;
+  --surface-raised: #FFFFFF;
+  --surface-sage: #E8F0EC;
+  --ink: #172826;
+  --sage: #8EACA2;
+  --sage-deep: #2F765E;
+  --success: #2F765E;
+  --success-surface: #E6F1EB;
+  --caution: #8A5A1D;
+  --caution-surface: #FFF3D9;
+  --error: #A0443A;
+  --error-surface: #FCEBE8;
+  color: var(--ink);
+  background: var(--surface-canvas);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  background: var(--surface-canvas);
+}
+
 body {
   margin: 0;
+  min-width: 20rem;
+  min-height: 100vh;
+  color: var(--ink);
+  background: var(--surface-canvas);
 }
 
 h1,
@@ -46,7 +67,7 @@ ol {
 
 .eyebrow,
 .section-kicker {
-  color: #3b625e;
+  color: var(--sage-deep);
   font-size: 0.75rem;
   font-weight: 750;
   letter-spacing: 0.1em;
@@ -69,7 +90,7 @@ h3 {
 }
 
 .lede {
-  color: #49615d;
+  color: #536762;
   font-size: 1rem;
   line-height: 1.65;
 }
@@ -88,28 +109,28 @@ h3 {
 }
 
 .freshness--fresh {
-  color: #195c46;
-  background: #d9efe4;
+  color: var(--success);
+  background: var(--success-surface);
 }
 
 .freshness--stale {
-  color: #804906;
-  background: #f6e7ca;
+  color: var(--caution);
+  background: var(--caution-surface);
 }
 
 .action-card,
 .metric-card,
 .data-state {
-  border: 1px solid #c7d2cc;
+  border: 1px solid rgb(23 40 38 / 13%);
   border-radius: 1.1rem;
-  background: #ffffff;
+  background: var(--surface-raised);
 }
 
 .action-card {
   display: grid;
   gap: 0.875rem;
   padding: clamp(1.25rem, 3vw, 1.75rem);
-  border-color: #8bb6a6;
+  border-color: var(--sage);
   box-shadow: 0 0.75rem 2rem rgb(41 83 72 / 8%);
 }
 
@@ -123,7 +144,7 @@ h3 {
   display: grid;
   gap: 0.4rem;
   padding: 0;
-  color: #49615d;
+  color: #536762;
   font-size: 0.875rem;
   line-height: 1.5;
   list-style: none;
@@ -131,7 +152,7 @@ h3 {
 
 .evidence-list li::before {
   content: "依据  ";
-  color: #3b625e;
+  color: var(--sage-deep);
   font-weight: 700;
 }
 
@@ -145,7 +166,7 @@ h3 {
 }
 
 .section-note {
-  color: #61746f;
+  color: #667873;
   font-size: 0.8125rem;
   text-align: right;
 }
@@ -168,15 +189,15 @@ h3 {
 }
 
 .quality {
-  color: #415752;
+  color: #536762;
 }
 
 .quality[data-quality="low"] {
-  color: #804906;
+  color: var(--caution);
 }
 
 .quality[data-quality="calibrating"] {
-  color: #365d87;
+  color: var(--sage-deep);
 }
 
 .metric-card__score {
@@ -189,7 +210,7 @@ h3 {
 
 .metric-card__detail {
   align-self: end;
-  color: #49615d;
+  color: #536762;
   font-size: 0.875rem;
   line-height: 1.55;
 }
@@ -198,7 +219,7 @@ h3 {
   display: grid;
   gap: 0.75rem;
   padding: 1rem;
-  color: #49615d;
+  color: #536762;
   line-height: 1.6;
 }
 
@@ -210,23 +231,64 @@ h3 {
 
 button,
 .button-secondary {
-  border: 0;
+  min-height: 2.75rem;
+  border: 1px solid transparent;
   border-radius: 999px;
   padding: 0.7rem 1.1rem;
-  color: #f6f4ee;
-  background: #1f6b57;
+  color: var(--ink);
+  background: var(--sage);
   font: inherit;
   font-weight: 700;
   cursor: pointer;
 }
 
 .button-secondary {
-  color: #1f6b57;
-  background: #e7f3ee;
+  color: var(--sage-deep);
+  background: var(--surface-sage);
 }
 
 a {
-  color: #1f6b57;
+  color: var(--sage-deep);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
+}
+
+button:hover:not(:disabled) {
+  background: var(--sage-deep);
+  color: var(--surface-raised);
+}
+
+input,
+select,
+textarea {
+  min-height: 2.75rem;
+  border: 1px solid rgb(23 40 38 / 22%);
+  border-radius: 0.65rem;
+  color: var(--ink);
+  background: var(--surface-raised);
+  font: inherit;
+}
+
+.dashboard-header p > a:only-child {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
+
+:focus-visible {
+  outline: 3px solid var(--sage-deep);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 @media (max-width: 42rem) {
