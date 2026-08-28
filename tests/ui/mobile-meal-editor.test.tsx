@@ -52,10 +52,16 @@ const saved: EditableMealSaved = {
 test('new editor offers a consented photo upload and has no nutrient search', () => {
   const html = renderToStaticMarkup(React.createElement(MobileMealEditor));
 
-  assert.match(html, /选择餐食照片/);
+  assert.match(html, /<h1>餐食记录<\/h1>/);
+  assert.match(html, /拍照，读懂这一餐/);
+  assert.match(html, /aria-label="选择或拍摄餐食照片"/);
   assert.match(html, /type="file"/);
-  assert.match(html, /我同意将这张照片发送给 AI 识别/);
-  assert.match(html, /开始识别/);
+  assert.match(html, /<span>我同意将这张照片发送给 AI 识别<\/span>/);
+  assert.match(html, /<span>进食时间<\/span>/);
+  assert.match(html, /mealEditor__actionBar/);
+  assert.match(html, /<button[^>]*type="submit"[^>]*form="meal-upload-form"[^>]*disabled=""[^>]*>开始识别<\/button>/);
+  assert.doesNotMatch(html, /aria-label="主要导航"/);
+  assert.doesNotMatch(html, /搜索/);
   assert.doesNotMatch(html, /营养搜索|搜索营养/);
 });
 

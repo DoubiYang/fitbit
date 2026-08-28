@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
+import { Camera, LockKeyhole } from 'lucide-react';
 
 import {
   editableMealDraftSchema,
@@ -605,24 +606,33 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 
   if (!session) {
     return (
-      <main className={ui('shell')}>
-        <header className={ui('header')}>
-          <a href="/rhythm" className={ui('backLink')}>返回今日</a>
-          <p className={ui('eyebrow')}>餐食记录</p>
-          <h1>拍照审阅这一餐</h1>
-          <p className={ui('lede')}>照片只用于本次识别和当前页面预览；保存后不会保留照片或识别原文。</p>
+      <main className={`${ui('shell')} ${ui('captureShell')}`}>
+        <header className={`${ui('header')} ${ui('captureHeader')}`}>
+          <a href="/rhythm" className={ui('backLink')}>返回节律</a>
+          <p className={ui('eyebrow')}>节律</p>
+          <h1>餐食记录</h1>
+          <p className={ui('lede')}>拍照，读懂这一餐</p>
         </header>
-        <form className={ui('uploadCard')} onSubmit={submitPhoto}>
-          <label className={ui('fileLabel')}>
-            <span>选择餐食照片</span>
+        <form id="meal-upload-form" className={`${ui('uploadCard')} ${ui('captureCard')}`} onSubmit={submitPhoto}>
+          <label className={`${ui('fileLabel')} ${ui('captureSurface')}`}>
+            <Camera aria-hidden="true" focusable="false" size={28} strokeWidth={1.8} />
+            <span className={ui('captureSurfaceTitle')}>拍照或上传照片</span>
+            <span className={ui('captureSurfaceHint')}>支持 JPG、PNG、WebP</span>
             <input
+              aria-label="选择或拍摄餐食照片"
+              className={ui('visuallyHidden')}
               type="file"
               accept="image/jpeg,image/png,image/webp"
               onChange={(event) => setFile(event.target.files?.[0])}
               disabled={busy}
             />
           </label>
-          {previewUrl ? <img className={ui('photoPreview')} src={previewUrl} alt="待识别的餐食照片预览" /> : null}
+          {previewUrl ? (
+            <div className={ui('photoPreview')}>
+              <img src={previewUrl} alt="待识别的餐食照片预览" />
+              <p className={ui('photoOverlay')}>已选择照片</p>
+            </div>
+          ) : null}
           <div className={ui('fieldGrid')}>
             <label>
               <span>餐次</span>
@@ -639,9 +649,15 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
             <input type="checkbox" checked={photoConsent} onChange={(event) => setPhotoConsent(event.target.checked)} disabled={busy} />
             <span>我同意将这张照片发送给 AI 识别</span>
           </label>
-          <button type="submit" disabled={!file || !photoConsent || !eatenAt || busy}>{busy ? '正在识别…' : '开始识别'}</button>
+          <p className={ui('photoPrivacy')}>
+            <LockKeyhole aria-hidden="true" focusable="false" size={18} strokeWidth={1.8} />
+            <span>照片仅用于本次 AI 识别。</span>
+          </p>
           <Feedback notice={notice} error={error} />
         </form>
+        <div className={`${ui('actionBar')} ${ui('uploadActionBar')}`}>
+          <button type="submit" form="meal-upload-form" disabled={!file || !photoConsent || !eatenAt || busy}>{busy ? '正在识别…' : '开始识别'}</button>
+        </div>
       </main>
     );
   }
