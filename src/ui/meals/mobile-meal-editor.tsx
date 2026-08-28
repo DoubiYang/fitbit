@@ -1,7 +1,16 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
-import { Camera, LockKeyhole } from 'lucide-react';
+import {
+  Camera,
+  ChevronDown,
+  ChevronLeft,
+  Clock3,
+  LockKeyhole,
+  PencilLine,
+  RefreshCw,
+  Sparkles,
+} from 'lucide-react';
 
 import {
   editableMealDraftSchema,
@@ -71,6 +80,28 @@ export function startPendingSuggestionState(suggestions: readonly MealAiSuggesti
 
 export function actionableMealAiSuggestions(state: PendingSuggestionState): MealAiSuggestionResponse[] {
   return state.suggestions.filter((suggestion) => !state.resolvedIds.has(suggestion.id));
+}
+
+/**
+ * A current meal is intentionally immutable while a sync generation is active.
+ * Keep every AI action that can turn a suggestion into a PATCH behind the same
+ * visual and imperative lock, rather than relying only on the PATCH fallback.
+ */
+export function mealAiApplyDisabled({ editingLocked, busy }: { editingLocked: boolean; busy: boolean }): boolean {
+  return editingLocked || busy;
+}
+
+/** A new assistant request is safe only while this meal remains editable. */
+export function canSubmitMealAiQuestion({
+  editingLocked,
+  busy,
+  question,
+}: {
+  editingLocked: boolean;
+  busy: boolean;
+  question: string;
+}): boolean {
+  return !editingLocked && !busy && Boolean(question.trim());
 }
 
 /**
@@ -339,6 +370,8 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   const resolvedSuggestions = suggestionState.resolvedIds;
   const actionableSuggestions = useMemo(() => actionableMealAiSuggestions(suggestionState), [suggestionState]);
   const applyAllState = useMemo(() => mealAiApplyAllState(actionableSuggestions), [actionableSuggestions]);
+  const aiApplyDisabled = mealAiApplyDisabled({ editingLocked: Boolean(editingLocked), busy });
+  const canSendAiQuestion = canSubmitMealAiQuestion({ editingLocked: Boolean(editingLocked), busy, question });
 
   function showError(message: string) {
     setNotice(undefined);
@@ -518,7 +551,7 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 
   async function submitAiQuestion(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !question.trim()) return;
+    if (!session || !canSubmitMealAiQuestion({ editingLocked: Boolean(editingLocked), busy, question })) return;
     clearFeedback();
     const userMessage: Message = { id: messageIds.current++, role: 'user', text: question.trim() };
     setMessages((current) => [...current, userMessage]);
@@ -556,12 +589,12 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   }
 
   async function applySuggestion(suggestion: MealAiSuggestionResponse) {
-    if (resolvedSuggestions.has(suggestion.id)) return;
+    if (aiApplyDisabled || resolvedSuggestions.has(suggestion.id)) return;
     await applyPatch(mealSuggestionPatch(suggestion), { kind: 'ai_suggestion', suggestionId: suggestion.id });
   }
 
   async function applyAllSuggestions() {
-    if (applyAllState.disabled) return;
+    if (aiApplyDisabled || applyAllState.disabled) return;
     // Take a response-local snapshot so an explicit Apply all completes this
     // one non-conflicting response in its original order.
     const suggestions = actionableSuggestions;
@@ -668,27 +701,39 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
   const canSync = session.kind === 'saved' && session.canSync;
   const syncReason = session.kind === 'saved' ? session.syncReason : undefined;
 
+  const eatenAtLabel = new Date(editor.eatenAt).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+  const lockedMessage = syncState === 'recovery'
+    ? '编辑已暂停，正在核对已有的远端记录；不会创建新的写入。'
+    : '编辑已暂停，等待当前同步任务安全结束。';
+
   return (
-    <main className={ui('shell')}>
-      <header className={ui('header')}>
-        <a href="/rhythm" className={ui('backLink')}>返回今日</a>
+    <main className={`${ui('shell')} ${ui('reviewShell')}`}>
+      <header className={`${ui('header')} ${ui('reviewHeader')}`}>
+        <a href="/rhythm" className={ui('backLink')}>
+          <ChevronLeft aria-hidden="true" focusable="false" size={18} strokeWidth={2} />
+          <span>返回今日</span>
+        </a>
         <div className={ui('titleRow')}>
           <div>
-            <p className={ui('eyebrow')}>{isDraft ? '餐食草稿' : '已保存餐食'}</p>
-            <h1>{mealTypeLabel(editor.mealType)} · {new Date(editor.eatenAt).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })}</h1>
+            <p className={ui('eyebrow')}>{isDraft ? '餐食草稿 · 正在审阅' : '餐食记录'}</p>
+            <h1>{mealTypeLabel(editor.mealType)}</h1>
+            <p className={ui('mealTime')}>
+              <Clock3 aria-hidden="true" focusable="false" size={16} strokeWidth={1.9} />
+              <span>进食时间 · {eatenAtLabel}</span>
+            </p>
           </div>
-          <p className={ui('syncBadge')} data-state={syncState ?? 'draft'}>{syncState ? SYNC_LABELS[syncState] : '草稿'}</p>
+          <p className={ui('syncBadge')} data-state={syncState ?? 'draft'}>{syncState ? SYNC_LABELS[syncState] : '尚未保存'}</p>
         </div>
-        {editingLocked ? <p className={ui('lockNotice')}>编辑已暂停，等待当前同步任务安全结束。</p> : null}
+        {editingLocked ? <p className={ui('lockNotice')}>{lockedMessage}</p> : null}
         {isDraft && previewUrl ? <img className={ui('reviewPreview')} src={previewUrl} alt="本次餐食照片预览" /> : null}
       </header>
 
       <div className={ui('contentGrid')}>
         <section className={ui('mainColumn')}>
-          <section className={ui('card')} aria-labelledby="dish-heading">
+          <section className={`${ui('card')} ${ui('reviewCard')}`} aria-labelledby="dish-heading">
             <div className={ui('sectionHeading')}>
               <div><p className={ui('eyebrow')}>菜品</p><h2 id="dish-heading">菜品与食材</h2></div>
-              <p>{editingLocked ? '同步期间不可编辑' : '改食材会重算整道菜'}</p>
+              <p>{editingLocked ? '同步期间不可编辑' : '修改后会重算整道菜'}</p>
             </div>
             <div className={ui('dishList')}>
               {editor.dishes.map((dish) => (
@@ -697,17 +742,21 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
                     <h3>{dish.nameZh}</h3>
                     <p>{dish.ingredients.map((ingredient) => `${ingredient.nameZh} ${ingredient.grams}g`).join(' · ')}</p>
                   </div>
-                  <button type="button" className={ui('secondaryButton')} onClick={(event) => beginDishEdit(dish, event.currentTarget)} disabled={busy || editingLocked}>编辑此菜</button>
+                  <button type="button" className={ui('secondaryButton')} onClick={(event) => beginDishEdit(dish, event.currentTarget)} disabled={busy || editingLocked}>
+                    <PencilLine aria-hidden="true" focusable="false" size={16} strokeWidth={1.9} />
+                    <span>编辑此菜</span>
+                  </button>
                 </article>
               ))}
             </div>
           </section>
 
-          <section className={ui('card')} aria-labelledby="nutrient-heading">
+          <section className={`${ui('card')} ${ui('reviewCard')}`} aria-labelledby="nutrient-heading">
             <div className={ui('sectionHeading')}>
               <div><p className={ui('eyebrow')}>完整营养</p><h2 id="nutrient-heading">完整营养</h2></div>
               <p>点任一项直接修改</p>
             </div>
+            <p className={ui('nutrientDisclosure')}>只覆盖这一项，其他营养不会改变。</p>
             <div className={ui('nutrientGroups')}>
               {groups.map((group) => {
                 const expanded = openGroups.has(group.id);
@@ -723,7 +772,11 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
                         return next;
                       })}
                     >
-                      <span>{group.label}</span><span>{group.nutrients.length} 项 {expanded ? '收起' : '展开'}</span>
+                      <span>{group.label}</span>
+                      <span className={ui('groupMeta')}>
+                        <span>{group.nutrients.length} 项</span>
+                        <ChevronDown aria-hidden="true" focusable="false" size={18} strokeWidth={1.9} data-expanded={expanded} />
+                      </span>
                     </button>
                     {expanded ? (
                       <ul className={ui('nutrientList')}>
@@ -752,13 +805,16 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
         </section>
 
         <aside className={ui('aiColumn')}>
-          <section className={ui('aiCard')}>
+          <section className={`${ui('aiCard')} ${ui('reviewAiCard')}`}>
             <p className={ui('eyebrow')}>AI 助手</p>
-            <h2>问 AI 修改这餐</h2>
-            <p>AI 只看到这餐当前的结构化数据。建议必须由你查看并应用。</p>
-            <button type="button" onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); }} disabled={busy || editingLocked}>问 AI 修改这餐</button>
+            <h2>一起确认这餐</h2>
+            <p>AI 只看到当前餐食的结构化数据。建议必须先由你查看，才会应用。</p>
+            <button type="button" className={ui('aiLauncher')} onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); }} disabled={aiApplyDisabled}>
+              <Sparkles aria-hidden="true" focusable="false" size={18} strokeWidth={1.9} />
+              <span>询问 AI 修改这一餐</span>
+            </button>
             {actionableSuggestions.length > 0 ? (
-              <button type="button" className={ui('secondaryButton')} onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); setSuggestionsOpen(true); }}>
+              <button type="button" className={ui('secondaryButton')} onClick={(event) => { dialogTrigger.current = event.currentTarget; setAiOpen(true); setSuggestionsOpen(true); }} disabled={aiApplyDisabled}>
                 查看并应用（{actionableSuggestions.length}）
               </button>
             ) : null}
@@ -774,11 +830,10 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
 
       <footer className={ui('actionBar')}>
         {isDraft ? (
-          <button type="button" onClick={() => void saveDraft()} disabled={busy}>保存修改</button>
+          <button type="button" onClick={() => void saveDraft()} disabled={busy}>保存到本地</button>
+        ) : syncState === 'syncing' ? (
+          <p className={ui('actionStatus')} role="status">正在同步，编辑已暂停。完成后请刷新确认状态。</p>
         ) : (
-          <p className={ui('localSaveState')}>本地已保存</p>
-        )}
-        {!isDraft ? (
           <div className={ui('syncAction')}>
             <button
               type="button"
@@ -786,10 +841,14 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
               disabled={busy || !canSync}
               title={!canSync ? (SYNC_REASON_MESSAGES[syncReason ?? ''] ?? '当前无法同步这一餐') : undefined}
             >
-              {syncState === 'recovery' ? '重试这一餐' : '同步这一餐'}
+              {syncState === 'recovery' ? (
+                <><RefreshCw aria-hidden="true" focusable="false" size={18} strokeWidth={1.9} /><span>检查同步状态</span></>
+              ) : (
+                <><RefreshCw aria-hidden="true" focusable="false" size={18} strokeWidth={1.9} /><span>同步这一餐</span></>
+              )}
             </button>
           </div>
-        ) : null}
+        )}
       </footer>
 
       {editingDish ? (
@@ -833,20 +892,20 @@ export function MobileMealEditor(props: MobileMealEditorProps) {
               <div className={ui('messages')} aria-live="polite">
                 {messages.length === 0 ? <p>可以描述你想改的食材、份量或某个营养数值。</p> : messages.map((message) => <p key={message.id} data-role={message.role}><strong>{message.role === 'user' ? '你' : message.role === 'assistant' ? 'AI' : '提示'}：</strong>{message.text}</p>)}
               </div>
-              {actionableSuggestions.length > 0 ? <button type="button" className={ui('secondaryButton')} onClick={() => setSuggestionsOpen(true)}>查看并应用（{actionableSuggestions.length}）</button> : null}
+              {actionableSuggestions.length > 0 ? <button type="button" className={ui('secondaryButton')} onClick={() => setSuggestionsOpen(true)} disabled={aiApplyDisabled}>查看并应用（{actionableSuggestions.length}）</button> : null}
               <form className={ui('aiForm')} onSubmit={submitAiQuestion}>
-                <label className={ui('inputLabel')}>你的问题<textarea value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={2000} placeholder="例如：把鸡胸肉改成 150g，重新计算这道菜" disabled={busy} /></label>
-                <button type="submit" disabled={busy || !question.trim()}>{busy ? '正在请求…' : '发送给 AI'}</button>
+                <label className={ui('inputLabel')}>你的问题<textarea value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={2000} placeholder="例如：把鸡胸肉改成 150g，重新计算这道菜" disabled={aiApplyDisabled} /></label>
+                <button type="submit" disabled={!canSendAiQuestion}>{busy ? '正在请求…' : '发送给 AI'}</button>
               </form>
             </>
           ) : (
             <>
               <div className={ui('dialogHeader')}><h3>待处理建议（{actionableSuggestions.length}）</h3><button type="button" className={ui('textButton')} onClick={() => setSuggestionsOpen(false)} disabled={busy}>继续对话</button></div>
-              {applyAllState.disabled ? <p className={ui('warning')}>{applyAllState.message}</p> : <button type="button" className={ui('secondaryButton')} onClick={() => void applyAllSuggestions()} disabled={busy || actionableSuggestions.length === 0}>应用全部</button>}
+              {applyAllState.disabled ? <p className={ui('warning')}>{applyAllState.message}</p> : <button type="button" className={ui('secondaryButton')} onClick={() => void applyAllSuggestions()} disabled={aiApplyDisabled || actionableSuggestions.length === 0}>应用全部</button>}
               <ol className={ui('suggestionList')}>
               {pendingSuggestions.map((suggestion) => {
                   const done = resolvedSuggestions.has(suggestion.id);
-                  return <li key={suggestion.id}><p>{suggestion.summary}</p><p className={ui('suggestionImpact')}>{suggestion.kind === 'replace_ingredients' ? '应用后重新计算这道菜全部营养。' : '应用后只修改这一项。'}</p><div><button type="button" onClick={() => void applySuggestion(suggestion)} disabled={busy || done}>{done ? '已处理' : '应用这一条'}</button><button type="button" className={ui('textButton')} onClick={() => ignoreSuggestion(suggestion.id)} disabled={busy || done}>忽略</button></div></li>;
+                  return <li key={suggestion.id}><p>{suggestion.summary}</p><p className={ui('suggestionImpact')}>{suggestion.kind === 'replace_ingredients' ? '应用后重新计算这道菜全部营养。' : '应用后只修改这一项。'}</p><div><button type="button" onClick={() => void applySuggestion(suggestion)} disabled={aiApplyDisabled || done}>{done ? '已处理' : '应用这一条'}</button><button type="button" className={ui('textButton')} onClick={() => ignoreSuggestion(suggestion.id)} disabled={busy || done}>忽略</button></div></li>;
                 })}
               </ol>
             </>

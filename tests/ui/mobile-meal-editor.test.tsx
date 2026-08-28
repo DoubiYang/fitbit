@@ -8,8 +8,10 @@ import type { EditableMealDraft, EditableMealSaved } from '../../src/domain/meal
 import {
   MobileMealEditor,
   actionableMealAiSuggestions,
+  canSubmitMealAiQuestion,
   convertEditableNutrientUnitValue,
   mealEditorEndpoint,
+  mealAiApplyDisabled,
   mealSuggestionPatch,
   nextPendingSuggestionState,
   openAccessibleDialog,
@@ -65,19 +67,23 @@ test('new editor offers a consented photo upload and has no nutrient search', ()
   assert.doesNotMatch(html, /营养搜索|搜索营养/);
 });
 
-test('draft editor has a local save action, nutrient edit affordance, and no automatic AI apply', () => {
+test('draft editor keeps complete nutrition review local, editable, and explicitly AI-assisted', () => {
   const html = renderToStaticMarkup(React.createElement(MobileMealEditor, { initialDraft: draft }));
 
-  assert.match(html, /保存修改/);
+  assert.match(html, /保存到本地/);
   assert.doesNotMatch(html, /同步这一餐/);
   assert.match(html, /编辑此菜/);
+  assert.match(html, /完整营养/);
   assert.match(html, /能量与宏量/);
+  assert.match(html, /维生素/);
   assert.match(html, /编辑营养/);
-  assert.match(html, /问 AI 修改这餐/);
+  assert.match(html, /只覆盖这一项，其他营养不会改变/);
+  assert.match(html, /询问 AI 修改这一餐/);
   assert.doesNotMatch(html, /自动应用/);
+  assert.doesNotMatch(html, /aria-label="主要导航"/);
 });
 
-test('saved editor exposes explicit sync and recovery retries lock edits', () => {
+test('saved editor exposes explicit sync while recovery only checks existing remote state and locks edits', () => {
   const unsyncedHtml = renderToStaticMarkup(
     React.createElement(MobileMealEditor, {
       initialMeal: saved,
@@ -88,15 +94,27 @@ test('saved editor exposes explicit sync and recovery retries lock edits', () =>
   );
   assert.match(unsyncedHtml, /已保存 · 未同步/);
   assert.match(unsyncedHtml, /账户尚未开启 Google 营养数据写回/);
-  assert.match(unsyncedHtml, /<button[^>]*disabled=""[^>]*>同步这一餐<\/button>/);
+  assert.match(unsyncedHtml, /<button[^>]*disabled=""[^>]*>[\s\S]*?同步这一餐/);
   assert.match(unsyncedHtml, /同步这一餐/);
 
   const recoveryHtml = renderToStaticMarkup(
-    React.createElement(MobileMealEditor, { initialMeal: saved, initialSyncState: 'recovery' }),
+    React.createElement(MobileMealEditor, { initialMeal: saved, initialSyncState: 'recovery', initialCanSync: true }),
   );
   assert.match(recoveryHtml, /同步恢复中/);
-  assert.match(recoveryHtml, /重试这一餐/);
+  assert.match(recoveryHtml, /检查同步状态/);
+  assert.doesNotMatch(recoveryHtml, /重试这一餐/);
   assert.match(recoveryHtml, /编辑已暂停/);
+  assert.match(recoveryHtml, /<button[^>]*class="mealEditor__secondaryButton"[^>]*disabled=""/);
+  assert.match(recoveryHtml, /<button[^>]*aria-label="编辑营养 能量"[^>]*disabled=""/);
+  assert.match(recoveryHtml, /<button[^>]*class="mealEditor__aiLauncher"[^>]*disabled=""/);
+  assert.doesNotMatch(recoveryHtml, /aria-label="主要导航"/);
+
+  const syncingHtml = renderToStaticMarkup(
+    React.createElement(MobileMealEditor, { initialMeal: saved, initialSyncState: 'syncing' }),
+  );
+  assert.match(syncingHtml, /同步中/);
+  assert.match(syncingHtml, /编辑已暂停/);
+  assert.match(syncingHtml, /<button[^>]*class="mealEditor__secondaryButton"[^>]*disabled=""/);
 });
 
 test('places a blocked sync explanation above the mobile action bar instead of inside it', () => {
@@ -165,6 +183,19 @@ test('keeps compatible current AI suggestions actionable after one apply, but cl
 
   const replacement = startPendingSuggestionState([second]);
   assert.deepEqual(actionableMealAiSuggestions(replacement).map((suggestion) => suggestion.id), ['s-2']);
+});
+
+test('locks every AI suggestion application while a meal is syncing or recovering', () => {
+  assert.equal(mealAiApplyDisabled({ editingLocked: true, busy: false }), true);
+  assert.equal(mealAiApplyDisabled({ editingLocked: false, busy: true }), true);
+  assert.equal(mealAiApplyDisabled({ editingLocked: false, busy: false }), false);
+});
+
+test('does not submit a new AI question while a meal is syncing or recovering', () => {
+  assert.equal(canSubmitMealAiQuestion({ editingLocked: true, busy: false, question: '把鸡胸肉改成 150g' }), false);
+  assert.equal(canSubmitMealAiQuestion({ editingLocked: false, busy: true, question: '把鸡胸肉改成 150g' }), false);
+  assert.equal(canSubmitMealAiQuestion({ editingLocked: false, busy: false, question: '   ' }), false);
+  assert.equal(canSubmitMealAiQuestion({ editingLocked: false, busy: false, question: '把鸡胸肉改成 150g' }), true);
 });
 
 test('opens native dialogs modally, focuses inside, handles Escape, and restores launcher focus', () => {
