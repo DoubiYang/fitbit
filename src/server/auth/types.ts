@@ -1,5 +1,5 @@
 import type { VisionMeal } from '../../domain/meal-vision';
-import type { ConfirmMealInput, ConfirmMealResult, MealDraftRow, MealIngredientRow, MealNutrientRow, MealType, MealVersionRow, OutboxRow } from '../meals/types';
+import type { ConfirmMealInput, ConfirmMealResult, CurrentMealStore, MealDraftRow, MealIngredientRow, MealNutrientRow, MealSyncGenerationRow, MealSyncPointRow, MealSyncPointStatus, MealType, MealVersionRow, OutboxRow } from '../meals/types';
 import type { LocalTwFdaFood } from '../nutrition/tw-fda';
 import type { ConnectionStatus } from './scopes';
 
@@ -93,6 +93,44 @@ export type NutritionOutboxLease = {
   now: Date;
 };
 
+export type MealSyncPointClaim = {
+  now: Date;
+  leaseUntil: Date;
+  limit: number;
+  /** `batch_delete` leases one delete-only generation; `single` leases one non-batch point. */
+  mode?: 'batch_delete' | 'single';
+};
+
+export type MealSyncPointLease = {
+  id: string;
+  generationId: string;
+  userId: string;
+  leaseUntil: Date;
+  now: Date;
+};
+
+export type MealSyncGenerationState = {
+  generation: MealSyncGenerationRow;
+  pointStatusCounts: Partial<Record<MealSyncPointStatus, number>>;
+  hasUnknownPoint: boolean;
+  recoveryRequestedAt: Date | undefined;
+};
+
+/** Future sync-worker persistence contract. It deliberately does not surface any UI view. */
+export type MealSyncStore = {
+  startGeneration(input: { mealId: string; userId: string; now: Date }): Promise<MealSyncGenerationRow | undefined>;
+  beginRecovery(input: { mealId: string; userId: string; now: Date; reason: string }): Promise<MealSyncGenerationRow | undefined>;
+  claimDuePoints(input: MealSyncPointClaim): Promise<MealSyncPointRow[]>;
+  renewPointLease(input: MealSyncPointLease & { renewedLeaseUntil: Date }): Promise<boolean>;
+  finishPoint(input: MealSyncPointLease): Promise<boolean>;
+  retryPoint(input: MealSyncPointLease & { nextAttemptAt: Date; errorCode: string }): Promise<boolean>;
+  markPointUnknown(input: MealSyncPointLease & { errorCode: string }): Promise<boolean>;
+  markPointFailedActionRequired(input: MealSyncPointLease & { errorCode: string }): Promise<boolean>;
+  markPointOperationPending(input: MealSyncPointLease & { operationName: string; nextAttemptAt: Date }): Promise<boolean>;
+  requestUnknownRecovery(input: { generationId: string; pointId: string; userId: string; now: Date }): Promise<boolean>;
+  readGenerationState(input: { mealId: string; userId: string }): Promise<MealSyncGenerationState | undefined>;
+};
+
 export type SessionRow = {
   id: string;
   userId: string;
@@ -128,6 +166,8 @@ export type AuthStore = {
     listIngredients(userId: string, versionId: string): Promise<MealIngredientRow[]>;
     listNutrients(userId: string, versionId: string): Promise<MealNutrientRow[]>;
   };
+  currentMeals: CurrentMealStore;
+  mealSync?: MealSyncStore;
   connections: {
     findByHealthUserId(healthUserId: string): Promise<ConnectionRow | undefined>;
     findByUserId(userId: string): Promise<ConnectionRow | undefined>;

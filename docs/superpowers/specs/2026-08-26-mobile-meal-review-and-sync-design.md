@@ -1,6 +1,6 @@
 # 手机端餐食审阅、AI 修改与显式同步设计
 
-**状态：** 用户确认，待实现
+**状态：** 已实现，并完成回归验证
 
 **日期：** 2026-08-26
 **补充并取代范围：** 本文取代 `2026-08-26-photo-nutrition-google-health-design.md` 中一期餐食编辑后的版本保留和写回触发方式；照片校验、台湾食药署数值来源、Google Health payload 映射与 outbox 的可靠性约束仍然有效。
@@ -185,3 +185,11 @@ AI 建议卡显示“待处理建议 N”。点“查看建议（N）”进入�
 - “保存修改”从不调用 Google；只有“同步这一餐”会为该餐入队。
 - 已同步餐食编辑后回到未同步状态；下一次同步先删旧 point、再建新 point，编辑锁定至 generation 结束。`unknown` 只可 GET 恢复、不重发写请求；失败重试不新增 name，旧、新 Google log 不会双计。
 - 不持久化照片、原始识别值、营养修正历史或聊天消息；日志不含图片、token 或 payload。
+
+### 已验证的非功能约束（2026-08-27）
+
+`tests/server/mobile-meal-regression.test.ts` 使用受控的识别结果、食物库、AI 和 Google client 串联验证以下边界：
+
+- 保存草稿只建立本地当前餐食，不创建旧/新 outbox 或 Google 写任务；只有显式同步才由 worker 发起首次 create。
+- 已同步餐食编辑后的重新同步严格先 delete、后 create；创建结果未知时恢复流程只对原 point name 执行精确 GET，绝不重复 POST。
+- 已保存餐食读取与传给餐食助手的请求均不包含原始识别、照片、历史或聊天；助手请求也不包含 OAuth token。

@@ -1,58 +1,92 @@
 import type { TodayView } from '../../server/dashboard/build-today';
+import { civilDate } from '../../server/time/civil-date';
+import { AppShell } from '../shell/app-shell';
 
 import { DataState, EvidenceList } from './data-state';
-import { MetricCard } from './metric-card';
+import { formatMetricQuality, formatMetricScore, MetricCard } from './metric-card';
+
+function recordDate(generatedAt: string): string {
+  const instant = new Date(generatedAt);
+
+  return Number.isNaN(instant.valueOf()) ? '日期未知' : civilDate(instant);
+}
 
 export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; variant?: 'demo' | 'oauth' }) {
   const action = view.primaryAction;
+  const recovery = view.metrics.recovery;
 
   return (
-    <main className="dashboard">
-      <header className="dashboard-header">
-        <p className="eyebrow">{variant === 'demo' ? '节律 · 演示' : '节律'}</p>
-        <div className="dashboard-header__title-row">
-          <h1>今日节律</h1>
-          <p className={view.freshness === 'fresh' ? 'freshness freshness--fresh' : 'freshness freshness--stale'}>
-            {view.freshness === 'fresh' ? '数据新鲜' : '等待同步'}
+    <AppShell active="today">
+      <main className="dashboard dashboard--today">
+        <header className="dashboard-header">
+          <p className="eyebrow">{variant === 'demo' ? '节律 · 演示' : '节律'}</p>
+          <h1>今日记录</h1>
+          <p className="dashboard-sync">
+            <time dateTime={view.generatedAt}>记录日期 {recordDate(view.generatedAt)}</time>
+            <span className={view.freshness === 'fresh' ? 'freshness freshness--fresh' : 'freshness freshness--stale'}>
+              {view.freshness === 'fresh' ? '数据新鲜' : '等待同步'}
+            </span>
           </p>
-        </div>
-        <p className="lede">
+        </header>
+
+        <section className="recovery-status" aria-labelledby="recovery-status-heading">
+          <div>
+            <p className="section-kicker">恢复状态</p>
+            <h2 id="recovery-status-heading">{recovery.label}</h2>
+          </div>
+          <p className="recovery-status__summary">
+            <span className="recovery-status__score">{formatMetricScore(recovery.score)}</span>
+            <span className="quality" data-quality={recovery.quality}>
+              数据质量：{formatMetricQuality(recovery.quality)}
+            </span>
+          </p>
+          <p className="recovery-status__detail">{recovery.detail}</p>
+        </section>
+
+        <section className="today-advice" aria-labelledby="today-action-heading">
+          <div className="today-advice__heading">
+            <p className="section-kicker">今日建议</p>
+            <h2 id="today-action-heading">今天的建议</h2>
+          </div>
+          {action.kind === 'recommendation' ? (
+            <>
+              <p className="today-advice__text">{action.text}</p>
+              <EvidenceList evidence={action.evidence} />
+            </>
+          ) : (
+            <DataState text={action.text} evidence={action.evidence} />
+          )}
+        </section>
+
+        <section className="dashboard-record" aria-labelledby="meal-record-heading">
+          <div>
+            <p className="section-kicker">行动</p>
+            <h2 id="meal-record-heading">为今天留下一笔</h2>
+          </div>
+          <a className="dashboard-record__action" href="/rhythm/meals/new">记录餐食</a>
+        </section>
+
+        <p className="lede dashboard-context">
           {variant === 'demo'
             ? '基于演示样本生成。分数只作辅助，建议始终保留给你的主观感受。'
             : '基于你最近同步的睡眠、恢复与训练记录生成。分数只作辅助，建议始终保留给你的主观感受。'}
         </p>
-        <p>
-          <a href="/rhythm/account">账户</a>
-        </p>
-      </header>
 
-      <section className="action-card" aria-labelledby="today-action-heading">
-        <p className="section-kicker">优先事项</p>
-        <h2 id="today-action-heading">今天的建议</h2>
-        {action.kind === 'recommendation' ? (
-          <>
-            <p className="action-card__text">{action.text}</p>
-            <EvidenceList evidence={action.evidence} />
-          </>
-        ) : (
-          <DataState text={action.text} evidence={action.evidence} />
-        )}
-      </section>
-
-      <section aria-labelledby="metric-heading">
-        <div className="section-heading">
-          <div>
-            <p className="section-kicker">今日三项</p>
-            <h2 id="metric-heading">可解释的指标</h2>
+        <section aria-labelledby="metric-heading">
+          <div className="section-heading">
+            <div>
+              <p className="section-kicker">今日三项</p>
+              <h2 id="metric-heading">可解释的指标</h2>
+            </div>
+            <p className="section-note">数据质量会影响参考程度</p>
           </div>
-          <p className="section-note">数据质量会影响参考程度</p>
-        </div>
-        <div className="metric-grid">
-          <MetricCard metric={view.metrics.recovery} />
-          <MetricCard metric={view.metrics.sleep} />
-          <MetricCard metric={view.metrics.training} />
-        </div>
-      </section>
-    </main>
+          <div className="metric-grid">
+            <MetricCard metric={recovery} />
+            <MetricCard metric={view.metrics.sleep} />
+            <MetricCard metric={view.metrics.training} />
+          </div>
+        </section>
+      </main>
+    </AppShell>
   );
 }

@@ -67,6 +67,11 @@ const GOOGLE_NUTRIENTS = new Set([
   'ZINC',
 ]);
 
+/** Whether a nutrient code has a representation in a Google nutrition log. */
+export function isGoogleSupportedNutrient(nutrientCode: string): boolean {
+  return nutrientCode === 'ENERGY' || nutrientCode === 'FAT' || GOOGLE_NUTRIENTS.has(nutrientCode);
+}
+
 const MICROGRAM_NUTRIENTS = new Set([
   'BIOTIN',
   'CHROMIUM',
@@ -162,7 +167,13 @@ export function buildGoogleNutritionDataPoint(input: {
   const fat = rows.get('FAT')?.grams;
   const carbohydrates = rows.get('CARBOHYDRATES')?.grams;
   const microAndOther = [...rows.entries()]
-    .filter(([code, row]) => code !== 'CARBOHYDRATES' && GOOGLE_NUTRIENTS.has(code) && isKnownAmount(row.grams))
+    .filter(([code, row]) => (
+      code !== 'ENERGY'
+      && code !== 'FAT'
+      && code !== 'CARBOHYDRATES'
+      && isGoogleSupportedNutrient(code)
+      && isKnownAmount(row.grams)
+    ))
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([nutrient, row]) => ({ nutrient, quantity: weight(nutrient, row.grams!) }));
   if (!isKnownAmount(energy) && !isKnownAmount(fat) && !isKnownAmount(carbohydrates) && microAndOther.length === 0) {

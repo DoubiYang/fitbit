@@ -9,7 +9,7 @@ import Home, { dynamic } from '../app/page';
 test('renders the controlled today dashboard for the demo user', async () => {
   const html = renderToStaticMarkup(await Home());
 
-  assert.match(html, /今日节律/);
+  assert.match(html, /今日记录/);
   assert.match(html, /今天的建议/);
   assert.match(html, /恢复信号/);
   assert.match(html, /数据新鲜/);

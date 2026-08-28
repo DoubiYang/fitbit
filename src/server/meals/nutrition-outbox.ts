@@ -3,14 +3,14 @@ import { canonicalNutritionHash, type GoogleNutritionDataPoint } from './google-
 import type { OutboxRow } from './types';
 
 const GOOGLE_HEALTH_API = 'https://health.googleapis.com/v4';
-const LEASE_MS = 2 * 60 * 1_000;
-const OPERATION_RECHECK_MS = 60 * 1_000;
+export const LEASE_MS = 2 * 60 * 1_000;
+export const OPERATION_RECHECK_MS = 60 * 1_000;
 // Keep every outbound request well inside the two-minute DB lease. A timed-out
 // create is reconciled by its deterministic data-point name and is never retried
 // automatically, preventing a second worker from duplicating a late write.
 // A row can need token retrieval, create and exact-name recovery in sequence.
 // At 30 seconds each their worst case is still below the two-minute lease.
-const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1_000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 1_000;
 
 export class GoogleNutritionWriteError extends Error {
   constructor(readonly status: number) {
@@ -41,6 +41,7 @@ export type GoogleNutritionOperation = {
 
 export type GoogleNutritionOutboxClient = {
   create(accessToken: string, payload: GoogleNutritionDataPoint, signal?: AbortSignal): Promise<GoogleNutritionOperation>;
+  batchDelete(accessToken: string, pointNames: string[], signal?: AbortSignal): Promise<GoogleNutritionOperation>;
   getDataPoint(accessToken: string, name: string, signal?: AbortSignal): Promise<GoogleNutritionDataPoint | undefined>;
   getOperation(accessToken: string, name: string, signal?: AbortSignal): Promise<GoogleNutritionOperation>;
 };
@@ -56,6 +57,19 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
       },
     });
   }
+
+  async function parseOperation(response: Response, fallbackName?: string): Promise<GoogleNutritionOperation> {
+    if (!response.ok) {
+      throw new GoogleNutritionWriteError(response.status);
+    }
+    const body = (await response.json()) as Partial<GoogleNutritionOperation>;
+    return {
+      done: body.done === true,
+      name: typeof body.name === 'string' ? body.name : fallbackName,
+      error: body.error,
+    };
+  }
+
   return {
     async create(accessToken, payload, signal) {
       const response = await request(accessToken, 'users/me/dataTypes/nutrition-log/dataPoints', {
@@ -63,15 +77,19 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       }, signal);
-      if (!response.ok) {
-        throw new GoogleNutritionWriteError(response.status);
+      return parseOperation(response);
+    },
+    async batchDelete(accessToken, pointNames, signal) {
+      const names = [...new Set(pointNames)];
+      if (names.length === 0) {
+        throw new Error('batchDelete requires at least one data point name');
       }
-      const body = (await response.json()) as Partial<GoogleNutritionOperation>;
-      return {
-        done: body.done === true,
-        name: typeof body.name === 'string' ? body.name : undefined,
-        error: body.error,
-      };
+      const response = await request(accessToken, 'users/me/dataTypes/nutrition-log/dataPoints:batchDelete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names }),
+      }, signal);
+      return parseOperation(response);
     },
     async getDataPoint(accessToken, name, signal) {
       const response = await request(accessToken, name, undefined, signal);
@@ -85,20 +103,12 @@ export function createGoogleNutritionOutboxClient(fetchImpl: typeof fetch = fetc
     },
     async getOperation(accessToken, name, signal) {
       const response = await request(accessToken, name, undefined, signal);
-      if (!response.ok) {
-        throw new GoogleNutritionWriteError(response.status);
-      }
-      const body = (await response.json()) as Partial<GoogleNutritionOperation>;
-      return {
-        done: body.done === true,
-        name: typeof body.name === 'string' ? body.name : name,
-        error: body.error,
-      };
+      return parseOperation(response, name);
     },
   };
 }
 
-function errorCode(error: unknown): string {
+export function errorCode(error: unknown): string {
   if (error instanceof GoogleNutritionWriteError) {
     return `google_${error.status}`;
   }
@@ -111,14 +121,14 @@ function errorCode(error: unknown): string {
   return 'indeterminate_create';
 }
 
-function rejectErroredOperation(operation: GoogleNutritionOperation): GoogleNutritionOperation {
+export function rejectErroredOperation(operation: GoogleNutritionOperation): GoogleNutritionOperation {
   if (operation.error !== undefined && operation.error !== null) {
     throw new GoogleNutritionOperationError();
   }
   return operation;
 }
 
-async function withLeaseSafeTimeout<T>(
+export async function withLeaseSafeTimeout<T>(
   call: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
 ): Promise<T> {
@@ -139,7 +149,7 @@ async function withLeaseSafeTimeout<T>(
   }
 }
 
-function requestTimeout(input: number | undefined): number {
+export function requestTimeout(input: number | undefined): number {
   const requested = input ?? DEFAULT_REQUEST_TIMEOUT_MS;
   if (!Number.isFinite(requested) || requested <= 0) {
     throw new Error('requestTimeoutMs must be a positive finite number');
@@ -150,7 +160,7 @@ function requestTimeout(input: number | undefined): number {
   return Math.min(requested, LEASE_MS / 4);
 }
 
-function retryAt(now: Date, attemptCount: number): Date {
+export function retryAt(now: Date, attemptCount: number): Date {
   const delay = attemptCount <= 1 ? 60_000 : attemptCount === 2 ? 5 * 60_000 : 30 * 60_000;
   return new Date(now.getTime() + delay);
 }

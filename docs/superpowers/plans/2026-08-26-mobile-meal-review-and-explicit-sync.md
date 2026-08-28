@@ -307,7 +307,7 @@
 - Modify: `tests/server/nutrition-outbox.test.ts`
 - Create: `tests/server/google-nutrition-batch-delete.test.ts`
 
-- [ ] **Step 1: 写失败测试。** mock fetch 并断言 `batchDelete` 调用 `POST users/me/dataTypes/nutrition-log/dataPoints:batchDelete`，body 为 `{ dataPointNames: [...] }`，拥有 bearer token，非 2xx 抛 `GoogleNutritionWriteError`，404 的单点 GET 仍返回 undefined。再断言现有 `runNutritionOutbox` create 测试不变。
+- [ ] **Step 1: 写失败测试。** mock fetch 并断言 `batchDelete` 调用 `POST users/me/dataTypes/nutrition-log/dataPoints:batchDelete`，body 为 Google Health REST schema 要求的 `{ names: [...] }`，拥有 bearer token，非 2xx 抛 `GoogleNutritionWriteError`，404 的单点 GET 仍返回 undefined。再断言现有 `runNutritionOutbox` create 测试不变。
 
 - [ ] **Step 2: 运行失败测试。**
 

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   mapTwFdaNutrient,
+  resolveEditableTwFdaDishIngredients,
   resolveTwFdaDishIngredients,
   resolveExactTwFdaFood,
   type LocalTwFdaFood,
@@ -143,4 +144,78 @@ test('adds vitamin D components only when the FDA total is unavailable', async (
   );
 
   assert.ok(Math.abs((resolved.totals.nutrients.VITAMIN_D ?? 0) - 0.000003) < 1e-12);
+});
+
+test('recalculates editable ingredient grams directly and retains local FDA-only facts', async () => {
+  const catalog = {
+    async findExact(nameZh: string) {
+      if (nameZh === '雞肉') {
+        return {
+          sourceRevision: 'source-sha',
+          officialFoodId: 'CHICKEN',
+          nameZh: '雞肉',
+          aliases: [],
+          nutrients: [
+            { officialName: '熱量', rawUnit: 'kcal', per100gValue: 200 },
+            { officialName: '粗蛋白', rawUnit: 'g', per100gValue: 20 },
+            { officialName: '膽鹼', rawUnit: 'mg', per100gValue: 80 },
+          ],
+        };
+      }
+      if (nameZh === '白飯') {
+        return {
+          sourceRevision: 'source-sha',
+          officialFoodId: 'RICE',
+          nameZh: '白飯',
+          aliases: [],
+          nutrients: [
+            { officialName: '熱量', rawUnit: 'kcal', per100gValue: 100 },
+            { officialName: '總碳水化合物', rawUnit: 'g', per100gValue: 25 },
+          ],
+        };
+      }
+      return undefined;
+    },
+  };
+
+  const mostlyChicken = await resolveEditableTwFdaDishIngredients(
+    { nameZh: '雞肉飯', ingredients: [{ nameZh: '雞肉', grams: 75 }, { nameZh: '白飯', grams: 25 }] },
+    catalog,
+  );
+  const mostlyRice = await resolveEditableTwFdaDishIngredients(
+    { nameZh: '雞肉飯', ingredients: [{ nameZh: '雞肉', grams: 25 }, { nameZh: '白飯', grams: 75 }] },
+    catalog,
+  );
+
+  assert.equal(mostlyChicken.dishGrams, 100);
+  assert.equal(mostlyChicken.totals.energyKcal, 175);
+  assert.equal(mostlyChicken.totals.nutrients.PROTEIN, 15);
+  assert.equal(mostlyChicken.totals.nutrients.CARBOHYDRATES, 6.25);
+  assert.equal(mostlyChicken.totals.nutrients['TW_FDA:膽鹼'], 0.06);
+  assert.equal(mostlyRice.totals.energyKcal, 125);
+  assert.equal(mostlyRice.totals.nutrients.PROTEIN, 5);
+  assert.equal(mostlyRice.totals.nutrients.CARBOHYDRATES, 18.75);
+});
+
+test('keeps unmatched editable ingredients unknown without inventing nutrients', async () => {
+  const resolved = await resolveEditableTwFdaDishIngredients(
+    { nameZh: '未知料理', ingredients: [{ nameZh: '未知食材', grams: 42 }] },
+    { async findExact() { return undefined; } },
+  );
+
+  assert.deepEqual(resolved.ingredients[0], {
+    nameZh: '未知食材',
+    grams: 42,
+    matchedDisplayName: undefined,
+    foodName: undefined,
+    foodSource: 'unmatched',
+    foodSourceVersion: undefined,
+    energyKcal: undefined,
+    proteinGrams: undefined,
+    carbGrams: undefined,
+    fatGrams: undefined,
+    nutrients: {},
+  });
+  assert.equal(resolved.totals.energyKcal, undefined);
+  assert.deepEqual(resolved.totals.nutrients, {});
 });

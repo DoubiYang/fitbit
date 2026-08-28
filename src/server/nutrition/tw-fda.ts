@@ -20,6 +20,11 @@ export type TwFdaFoodCatalog = {
   findExact(nameZh: string): Promise<LocalTwFdaFood | undefined>;
 };
 
+export type EditableTwFdaDish = {
+  nameZh: string;
+  ingredients: Array<{ nameZh: string; grams: number }>;
+};
+
 export type MappedTwFdaNutrient =
   | { nutrientCode: 'ENERGY'; kcalPer100g: number }
   | {
@@ -233,38 +238,46 @@ function scaleFoodNutrients(food: LocalTwFdaFood | undefined, grams: number): {
   return { energyKcal, nutrients };
 }
 
-export async function resolveTwFdaDishIngredients(dish: VisionDish, catalog: TwFdaFoodCatalog): Promise<ResolvedDish> {
-  const grams = dishGrams(dish);
-  const ingredients = await Promise.all(
-    allocateIngredientGrams(dish.ingredients, grams).map(async (part) => {
-      const food = await catalog.findExact(part.nameZh);
-      const nutrition = scaleFoodNutrients(food, part.grams);
-      return {
-        nameZh: part.nameZh,
-        grams: part.grams,
-        matchedDisplayName: food?.nameZh,
-        foodName: food?.officialFoodId,
-        foodSource: food ? ('tw_fda' as const) : ('unmatched' as const),
-        foodSourceVersion: food?.sourceRevision,
-        energyKcal: nutrition.energyKcal,
-        proteinGrams: nutrition.nutrients.PROTEIN,
-        carbGrams: nutrition.nutrients.CARBOHYDRATES,
-        fatGrams: nutrition.nutrients.FAT,
-        nutrients: nutrition.nutrients,
-      };
-    }),
-  );
+async function resolveTwFdaIngredients(
+  parts: Array<{ nameZh: string; grams: number }>,
+  catalog: TwFdaFoodCatalog,
+) {
+  return Promise.all(parts.map(async (part) => {
+    const food = await catalog.findExact(part.nameZh);
+    const nutrition = scaleFoodNutrients(food, part.grams);
+    return {
+      nameZh: part.nameZh,
+      grams: part.grams,
+      matchedDisplayName: food?.nameZh,
+      foodName: food?.officialFoodId,
+      foodSource: food ? ('tw_fda' as const) : ('unmatched' as const),
+      foodSourceVersion: food?.sourceRevision,
+      energyKcal: nutrition.energyKcal,
+      proteinGrams: nutrition.nutrients.PROTEIN,
+      carbGrams: nutrition.nutrients.CARBOHYDRATES,
+      fatGrams: nutrition.nutrients.FAT,
+      nutrients: nutrition.nutrients,
+    };
+  }));
+}
+
+function resolvedTwFdaDish(input: {
+  dishNameZh: string;
+  dishGrams: number;
+  needsConfirmation: string[];
+  ingredients: Awaited<ReturnType<typeof resolveTwFdaIngredients>>;
+}): ResolvedDish {
   return {
-    dishNameZh: dish.nameZh,
-    dishGrams: grams,
-    needsConfirmation: dish.needsConfirmation,
-    ingredients,
+    dishNameZh: input.dishNameZh,
+    dishGrams: input.dishGrams,
+    needsConfirmation: input.needsConfirmation,
+    ingredients: input.ingredients,
     totals: {
-      energyKcal: ingredients.reduce((sum, item) => add(sum, item.energyKcal), undefined as number | undefined),
-      proteinGrams: ingredients.reduce((sum, item) => add(sum, item.proteinGrams), undefined as number | undefined),
-      carbGrams: ingredients.reduce((sum, item) => add(sum, item.carbGrams), undefined as number | undefined),
-      fatGrams: ingredients.reduce((sum, item) => add(sum, item.fatGrams), undefined as number | undefined),
-      nutrients: ingredients.reduce<Record<string, number>>((totals, item) => {
+      energyKcal: input.ingredients.reduce((sum, item) => add(sum, item.energyKcal), undefined as number | undefined),
+      proteinGrams: input.ingredients.reduce((sum, item) => add(sum, item.proteinGrams), undefined as number | undefined),
+      carbGrams: input.ingredients.reduce((sum, item) => add(sum, item.carbGrams), undefined as number | undefined),
+      fatGrams: input.ingredients.reduce((sum, item) => add(sum, item.fatGrams), undefined as number | undefined),
+      nutrients: input.ingredients.reduce<Record<string, number>>((totals, item) => {
         for (const [code, value] of Object.entries(item.nutrients)) {
           totals[code] = (totals[code] ?? 0) + value;
         }
@@ -272,4 +285,29 @@ export async function resolveTwFdaDishIngredients(dish: VisionDish, catalog: TwF
       }, {}),
     },
   };
+}
+
+export async function resolveTwFdaDishIngredients(dish: VisionDish, catalog: TwFdaFoodCatalog): Promise<ResolvedDish> {
+  const grams = dishGrams(dish);
+  const ingredients = await resolveTwFdaIngredients(allocateIngredientGrams(dish.ingredients, grams), catalog);
+  return resolvedTwFdaDish({
+    dishNameZh: dish.nameZh,
+    dishGrams: grams,
+    needsConfirmation: dish.needsConfirmation,
+    ingredients,
+  });
+}
+
+/** Recalculates a user-editable dish from its exact ingredient grams. */
+export async function resolveEditableTwFdaDishIngredients(
+  dish: EditableTwFdaDish,
+  catalog: TwFdaFoodCatalog,
+): Promise<ResolvedDish> {
+  const ingredients = await resolveTwFdaIngredients(dish.ingredients, catalog);
+  return resolvedTwFdaDish({
+    dishNameZh: dish.nameZh,
+    dishGrams: dish.ingredients.reduce((total, ingredient) => total + ingredient.grams, 0),
+    needsConfirmation: [],
+    ingredients,
+  });
 }
