@@ -29,3 +29,15 @@ test('marks the account navigation item as the current page semantically', () =>
   assert.match(html, /href="\/rhythm\/account"[^>]*aria-current="page"/);
   assert.doesNotMatch(html, /href="\/rhythm"[^>]*aria-current="page"/);
 });
+
+test('does not add a main landmark around the caller-owned main content', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(AppShell, {
+      active: 'today',
+      children: React.createElement('main', null, '页面内容'),
+    }),
+  );
+
+  assert.equal((html.match(/<main\b/g) ?? []).length, 1);
+  assert.match(html, /<main>页面内容<\/main><\/div><nav/);
+});

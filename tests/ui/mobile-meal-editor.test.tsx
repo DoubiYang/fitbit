@@ -60,8 +60,12 @@ test('new editor offers a consented photo upload and has no nutrient search', ()
   assert.match(html, /type="file"/);
   assert.match(html, /<span>我同意将这张照片发送给 AI 识别<\/span>/);
   assert.match(html, /<span>进食时间<\/span>/);
+  assert.match(html, /<label><span>餐次<\/span><select/);
+  assert.match(html, /<label><span>进食时间<\/span><input[^>]*type="datetime-local"/);
   assert.match(html, /mealEditor__actionBar/);
   assert.match(html, /<button[^>]*type="submit"[^>]*form="meal-upload-form"[^>]*disabled=""[^>]*>开始识别<\/button>/);
+  assert.equal((html.match(/<main\b/g) ?? []).length, 1);
+  assert.equal((html.match(/mealEditor__actionBar/g) ?? []).length, 1);
   assert.doesNotMatch(html, /aria-label="主要导航"/);
   assert.doesNotMatch(html, /搜索/);
   assert.doesNotMatch(html, /营养搜索|搜索营养/);
@@ -79,6 +83,8 @@ test('draft editor keeps complete nutrition review local, editable, and explicit
   assert.match(html, /编辑营养/);
   assert.match(html, /只覆盖这一项，其他营养不会改变/);
   assert.match(html, /询问 AI 修改这一餐/);
+  assert.equal((html.match(/<main\b/g) ?? []).length, 1);
+  assert.equal((html.match(/mealEditor__actionBar/g) ?? []).length, 1);
   assert.doesNotMatch(html, /自动应用/);
   assert.doesNotMatch(html, /aria-label="主要导航"/);
 });
@@ -107,6 +113,8 @@ test('saved editor exposes explicit sync while recovery only checks existing rem
   assert.match(recoveryHtml, /<button[^>]*class="mealEditor__secondaryButton"[^>]*disabled=""/);
   assert.match(recoveryHtml, /<button[^>]*aria-label="编辑营养 能量"[^>]*disabled=""/);
   assert.match(recoveryHtml, /<button[^>]*class="mealEditor__aiLauncher"[^>]*disabled=""/);
+  assert.equal((recoveryHtml.match(/<main\b/g) ?? []).length, 1);
+  assert.equal((recoveryHtml.match(/mealEditor__actionBar/g) ?? []).length, 1);
   assert.doesNotMatch(recoveryHtml, /aria-label="主要导航"/);
 
   const syncingHtml = renderToStaticMarkup(

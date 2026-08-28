@@ -32,8 +32,12 @@
   background: #f8f5ed;
 }
 
-:global(.mealEditor__captureHeader) { gap: 0.5rem; }
-:global(.mealEditor__captureHeader) h1 { color: #172826; }
+:global(.mealEditor__captureHeader) { gap: 0.6rem; }
+:global(.mealEditor__header.mealEditor__captureHeader) h1 {
+  color: #172826;
+  font-size: clamp(2.1rem, 8.5vw, 2.75rem);
+  letter-spacing: -0.07em;
+}
 :global(.mealEditor__captureHeader) :global(.mealEditor__lede) { color: #526b63; font-size: 1rem; }
 
 :global(.mealEditor__backLink),
@@ -175,11 +179,12 @@
 :global(.mealEditor__uploadCard) { max-width: 42rem; margin-top: 1.25rem; }
 
 :global(.mealEditor__captureCard) {
-  gap: 1.25rem;
-  border-color: #d7dfd5;
-  border-radius: 1.5rem;
-  background: #fffdf8;
-  box-shadow: 0 0.75rem 2rem rgb(52 76 66 / 8%);
+  gap: 1.35rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 :global(.mealEditor__fileLabel),
@@ -205,14 +210,14 @@
 :global(.mealEditor__fileLabel) input { max-width: 100%; font: inherit; font-weight: 500; }
 
 :global(.mealEditor__captureSurface) {
-  min-height: 17rem;
+  min-height: 17.5rem;
   place-items: center;
   align-content: center;
-  border: 1px dashed #84a899;
-  border-radius: 1.2rem;
+  border: 1px dashed #9cb9ac;
+  border-radius: 1.45rem;
   color: #245c4b;
-  background: #edf4eb;
-  box-shadow: inset 0 0 0 0.35rem rgb(255 253 248 / 55%);
+  background: #e8f0ec;
+  box-shadow: inset 0 0 0 0.35rem rgb(255 253 248 / 62%);
   cursor: pointer;
 }
 
@@ -258,6 +263,17 @@
 :global(.mealEditor__reviewPreview) { max-width: 22rem; object-fit: cover; }
 
 :global(.mealEditor__fieldGrid) { display: grid; grid-template-columns: 1fr; gap: 0.85rem; }
+:global(.mealEditor__captureCard) :global(.mealEditor__fieldGrid) { gap: 1rem; }
+:global(.mealEditor__captureCard) :global(.mealEditor__fieldGrid) > label { gap: 0.55rem; }
+:global(.mealEditor__captureCard) :global(.mealEditor__fieldGrid) select,
+:global(.mealEditor__captureCard) :global(.mealEditor__fieldGrid) input {
+  min-height: 3.5rem;
+  padding: 0.85rem 0.95rem;
+  border-color: #e1e6df;
+  border-radius: 1rem;
+  background: #fffdf8;
+  box-shadow: 0 0.45rem 1.25rem rgb(52 76 66 / 6%);
+}
 
 input,
 select,
@@ -299,6 +315,33 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 :global(.mealEditor__consent) { grid-template-columns: auto 1fr; align-items: center; }
 :global(.mealEditor__consent) input { width: 1.25rem; min-height: 1.25rem; }
 :global(.mealEditor__captureCard) :global(.mealEditor__consent) { min-height: 2.75rem; padding: 0.35rem 0; }
+:global(.mealEditor__captureCard) :global(.mealEditor__consent) input {
+  position: relative;
+  width: 3rem;
+  min-height: 1.75rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #b8c9c0;
+  box-shadow: inset 0 0 0 1px rgb(23 40 38 / 10%);
+  transition: background-color 160ms ease;
+}
+:global(.mealEditor__captureCard) :global(.mealEditor__consent) input::after {
+  position: absolute;
+  top: 0.2rem;
+  left: 0.2rem;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  background: #fffdf8;
+  box-shadow: 0 0.1rem 0.3rem rgb(23 40 38 / 18%);
+  content: '';
+  transition: transform 160ms ease;
+}
+:global(.mealEditor__captureCard) :global(.mealEditor__consent) input:checked { background: #477c63; }
+:global(.mealEditor__captureCard) :global(.mealEditor__consent) input:checked::after { transform: translateX(1.25rem); }
 :global(.mealEditor__photoPrivacy) { display: flex; align-items: center; gap: 0.55rem; margin: 0; color: #526b63; font-size: 0.88rem; line-height: 1.45; }
 :global(.mealEditor__photoPrivacy) svg { flex: 0 0 auto; color: #245c4b; }
 
