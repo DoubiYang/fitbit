@@ -1,9 +1,10 @@
 import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow } from '../auth/types';
 import { TokenRefreshError } from './access-token';
+import { connectionNextSyncAt, HOURLY_SYNC_MS } from './cardio-sync';
 import { syncUserConnection } from './run-sync';
 
-const SIX_HOURS_MS = 6 * 60 * 60 * 1_000;
+const HOUR_MS = HOURLY_SYNC_MS;
 const LEASE_MS = 15 * 60 * 1_000;
 const RETRY_DELAYS_MS = [30 * 60 * 1_000, 60 * 60 * 1_000, 2 * 60 * 60 * 1_000] as const;
 
@@ -25,7 +26,7 @@ function failureSchedule(now: Date, retryCount: number): { nextSyncAt: Date; syn
       syncRetryCount: retryCount + 1,
     };
   }
-  return { nextSyncAt: new Date(now.getTime() + SIX_HOURS_MS), syncRetryCount: 0 };
+  return { nextSyncAt: new Date(now.getTime() + HOUR_MS), syncRetryCount: 0 };
 }
 
 function errorCode(error: unknown): string {
@@ -67,12 +68,13 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
     }
     try {
       await syncConnection(connection);
+      const cursors = await input.store.healthMetrics.listCursors({ connectionId: connection.id });
       const finished = await input.store.connections.finishScheduledSync({
         id: connection.id,
         userId: connection.userId,
         leaseUntil: connection.syncLeaseUntil,
         now,
-        nextSyncAt: new Date(now.getTime() + SIX_HOURS_MS),
+        nextSyncAt: connectionNextSyncAt(cursors, now),
         syncRetryCount: 0,
         lastErrorCode: undefined,
       });

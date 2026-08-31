@@ -3,10 +3,15 @@ import test from 'node:test';
 
 import type { ConnectionRow } from '../../src/server/auth/types';
 import { loadConfig } from '../../src/server/config/env';
+import { encryptTokenEnvelope } from '../../src/server/crypto/token-envelope';
 import { createMemoryStore } from '../../src/server/db/memory-store';
+import type { HealthApiClient } from '../../src/server/health/health-api';
+import type { GoogleDataPoint } from '../../src/server/health/map-records';
+import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
 import { syncUserConnection } from '../../src/server/health/run-sync';
 
 const key = Buffer.alloc(32, 3).toString('base64');
+const keyBuffer = Buffer.alloc(32, 3);
 
 function oauthConfig() {
   const config = loadConfig({
@@ -42,7 +47,7 @@ function connection(overrides: Partial<ConnectionRow> & Pick<ConnectionRow, 'id'
   };
 }
 
-test('initial sync only reads the selected active user for the recent 14-day range', async () => {
+test('initial sync only reads the selected active user for the recent 35-day UTC range', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.users.insert('u2');
@@ -63,10 +68,10 @@ test('initial sync only reads the selected active user for the recent 14-day ran
   });
 
   assert.equal(result, true);
-  assert.deepEqual(seen, ['u1:2026-08-11:2026-08-24']);
+  assert.deepEqual(seen, ['u1:2026-07-21:2026-08-24']);
 });
 
-test('14-day sync window uses Asia/Shanghai civil dates, not the UTC calendar date', async () => {
+test('35-day snapshot window uses UTC civil dates, not Asia/Shanghai', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.connections.insert(connection({ id: 'c1', userId: 'u1', healthUserId: 'h1' }));
@@ -82,7 +87,8 @@ test('14-day sync window uses Asia/Shanghai civil dates, not the UTC calendar da
     },
   });
 
-  assert.deepEqual(seen, ['u1:2026-08-11:2026-08-24']);
+  assert.deepEqual(seen, ['u1:2026-07-20:2026-08-23']);
+  assert.notEqual(seen[0], 'u1:2026-07-21:2026-08-24');
 });
 
 test('initial sync does not read an expired or disconnected connection', async () => {
@@ -101,3 +107,151 @@ test('initial sync does not read an expired or disconnected connection', async (
 
   assert.equal(result, false);
 });
+
+function liveConnection(userId: string, connectionId: string): ConnectionRow {
+  const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, keyBuffer, connectionId, userId);
+  return connection({
+    id: connectionId,
+    userId,
+    healthUserId: `h-${userId}`,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+  });
+}
+
+function createFakeApi(pages: Partial<Record<string, GoogleDataPoint[][]>>) {
+  const requests: Array<{ dataType: string; filter: string }> = [];
+  async function* iterate(input: { dataType: string; filter: string }) {
+    requests.push({ dataType: input.dataType, filter: input.filter });
+    for (const page of pages[input.dataType] ?? [[]]) {
+      yield page;
+    }
+  }
+  const api: HealthApiClient & { requests: typeof requests } = {
+    requests,
+    async *iterateReconciledDataPoints(input) {
+      yield* iterate(input);
+    },
+    async listDataPoints(input) {
+      if (input.dataType === 'heart-rate' || input.dataType === 'activity-level') {
+        throw new Error(`${input.dataType} must use iterateReconciledDataPoints`);
+      }
+      const collected: GoogleDataPoint[] = [];
+      for await (const page of iterate(input)) collected.push(...page);
+      return collected;
+    },
+  };
+  return api;
+}
+
+test('live sync applies snapshot sleep before cardio recompute and sets hourly nextSyncAt', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const snapshot: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    sleepSessions: [
+      {
+        userId: 'u1',
+        source: 'google_health',
+        sourceRecordId: 'sleep-1',
+        id: 'sleep-1',
+        startTime: '2026-08-22T11:30:00.000Z',
+        endTime: '2026-08-22T12:30:00.000Z',
+        civilEndDate: '2026-08-22',
+        utcOffsetMinutes: 0,
+        minutesAsleep: 400,
+        timeInBedMinutes: 480,
+        awakeMinutes: 80,
+        isNap: true,
+        processed: true,
+      },
+    ],
+  };
+  let persisted: UserHealthRecords | undefined;
+  const api = createFakeApi({
+    sleep: [
+      [
+        {
+          name: 'sleep-1',
+          sleep: {
+            type: 'STAGES',
+            interval: {
+              startTime: '2026-08-22T11:30:00.000Z',
+              endTime: '2026-08-22T12:30:00.000Z',
+              endUtcOffset: '0s',
+              civilEndTime: { date: { year: 2026, month: 8, day: 22 } },
+            },
+            metadata: { nap: true, processed: true },
+            summary: { minutesAsleep: '400', minutesInSleepPeriod: '480', minutesAwake: '80' },
+          },
+        },
+      ],
+    ],
+    'heart-rate': [
+      [
+        {
+          heartRate: {
+            sampleTime: { physicalTime: '2026-08-22T12:00:00.000Z', utcOffset: '0s' },
+            beatsPerMinute: '110',
+          },
+        },
+      ],
+    ],
+    'activity-level': [
+      [
+        {
+          activityLevel: {
+            interval: { startTime: '2026-08-22T12:00:00.000Z', endTime: '2026-08-22T12:01:00.000Z' },
+            activityLevelType: 'LIGHTLY_ACTIVE',
+          },
+        },
+      ],
+    ],
+    'daily-heart-rate-zones': [
+      [
+        {
+          dailyHeartRateZones: {
+            date: { year: 2026, month: 8, day: 22 },
+            heartRateZones: [
+              { heartRateZoneType: 'LIGHT', minBeatsPerMinute: '97', maxBeatsPerMinute: '116' },
+              { heartRateZoneType: 'MODERATE', minBeatsPerMinute: '117', maxBeatsPerMinute: '136' },
+              { heartRateZoneType: 'VIGOROUS', minBeatsPerMinute: '137', maxBeatsPerMinute: '155' },
+              { heartRateZoneType: 'PEAK', minBeatsPerMinute: '156', maxBeatsPerMinute: '200' },
+            ],
+          },
+        },
+      ],
+    ],
+  });
+
+  const result = await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    api,
+    persistSnapshot: async (_userId, records) => {
+      persisted = records;
+    },
+    loadSnapshot: async () => ({ records: snapshot, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    loadRecords: async () => persisted ?? snapshot,
+    refresher: {
+      async refresh() {
+        throw new Error('should not refresh');
+      },
+    },
+  });
+
+  assert.equal(result, true);
+  const cardio = await store.healthMetrics.getDailyCardio({ userId: 'u1', civilDate: '2026-08-22' });
+  assert.equal(cardio?.dose, 0);
+  assert.equal(cardio?.attributedMinutes, 0);
+  const scheduled = await store.connections.findByUserId('u1');
+  assert.equal(scheduled?.nextSyncAt?.toISOString(), '2026-08-24T13:00:00.000Z');
+  assert.ok(api.requests.some((request) => request.dataType === 'sleep'));
+  assert.ok(api.requests.some((request) => request.dataType === 'heart-rate'));
+});
+

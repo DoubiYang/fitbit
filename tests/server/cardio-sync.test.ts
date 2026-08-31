@@ -1,0 +1,631 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { parseSleepGoal } from '../../src/domain/cardio-records';
+import { parseDailyHrv, parseSleepSession } from '../../src/domain/health-records';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
+import type { ConnectionRow } from '../../src/server/auth/types';
+import { createMemoryStore } from '../../src/server/db/memory-store';
+import {
+  connectionNextSyncAt,
+  recomputeAffectedDays,
+  syncCardioConnection,
+  type CardioSyncState,
+} from '../../src/server/health/cardio-sync';
+import type { HealthSyncDataType } from '../../src/server/health/cardio-store';
+import { HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from '../../src/server/health/filters';
+import type { HealthApiClient } from '../../src/server/health/health-api';
+import type { GoogleDataPoint } from '../../src/server/health/map-records';
+import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
+
+const userId = 'u1';
+const connectionId = 'c1';
+const NOW = new Date('2026-08-24T12:00:00.000Z');
+const INITIAL_HR_FROM = '2026-07-18T12:00:00.000Z';
+const ZONES = {
+  LIGHT: { minBeatsPerMinute: '97', maxBeatsPerMinute: '116' },
+  MODERATE: { minBeatsPerMinute: '117', maxBeatsPerMinute: '136' },
+  VIGOROUS: { minBeatsPerMinute: '137', maxBeatsPerMinute: '155' },
+  PEAK: { minBeatsPerMinute: '156', maxBeatsPerMinute: '200' },
+} as const;
+
+type PageOrError = GoogleDataPoint[] | Error;
+type RecordedRequest = { dataType: string; filter: string; pageSize?: number };
+
+function connection(): ConnectionRow {
+  return {
+    id: connectionId,
+    userId,
+    healthUserId: 'h1',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: Buffer.from('ciphertext'),
+    tokenEnvelopeIv: Buffer.alloc(12),
+    tokenEnvelopeAuthTag: Buffer.alloc(16),
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2099-01-08T00:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active',
+    lastErrorCode: undefined,
+    connectedAt: new Date('2026-08-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-08-01T00:00:00.000Z'),
+    lastSuccessfulSyncAt: undefined,
+  };
+}
+
+function addCivilDays(date: string, days: number): string {
+  const next = new Date(`${date}T00:00:00.000Z`);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next.toISOString().slice(0, 10);
+}
+
+function civilParts(date: string): { year: number; month: number; day: number } {
+  const [year, month, day] = date.split('-').map(Number);
+  return { year, month, day };
+}
+
+function filterBounds(filter: string): { from: string; untilExclusive: string } {
+  const from = filter.match(/>= "([^"]+)"/)?.[1];
+  const untilExclusive = filter.match(/< "([^"]+)"/)?.[1];
+  assert.ok(from && untilExclusive, filter);
+  return { from, untilExclusive };
+}
+
+function requestFor(requests: RecordedRequest[], dataType: string): RecordedRequest {
+  const match = requests.find((request) => request.dataType === dataType);
+  assert.ok(match, `missing request for ${dataType}`);
+  return match;
+}
+
+function hrPoint(physicalTime: string, bpm: number, utcOffset = '0s'): GoogleDataPoint {
+  return {
+    heartRate: {
+      sampleTime: { physicalTime, utcOffset },
+      beatsPerMinute: String(bpm),
+    },
+  };
+}
+
+function activityPoint(startTime: string, activityLevelType: string, durationMs = 60_000): GoogleDataPoint {
+  return {
+    activityLevel: {
+      interval: {
+        startTime,
+        endTime: new Date(Date.parse(startTime) + durationMs).toISOString(),
+      },
+      activityLevelType,
+    },
+  };
+}
+
+function zonesPoint(date: string): GoogleDataPoint {
+  return {
+    dailyHeartRateZones: {
+      date: civilParts(date),
+      heartRateZones: Object.entries(ZONES).map(([heartRateZoneType, bounds]) => ({
+        heartRateZoneType,
+        ...bounds,
+      })),
+    },
+  };
+}
+
+function timeInZonePoint(startTime: string, heartRateZoneType = 'LIGHT', utcOffset = '0s'): GoogleDataPoint {
+  return {
+    timeInHeartRateZone: {
+      interval: {
+        startTime,
+        endTime: new Date(Date.parse(startTime) + 60_000).toISOString(),
+        startUtcOffset: utcOffset,
+      },
+      heartRateZoneType,
+    },
+  };
+}
+
+function exercisePoint(startTime: string, date: string, id = 'exercise-1'): GoogleDataPoint {
+  return {
+    name: id,
+    exercise: {
+      interval: {
+        startTime,
+        endTime: new Date(Date.parse(startTime) + 60_000).toISOString(),
+        startUtcOffset: '0s',
+        civilStartTime: { date: civilParts(date) },
+      },
+    },
+  };
+}
+
+function sleepSession(civilEndDate: string, overrides: Partial<{ startTime: string; endTime: string; minutesAsleep: number }> = {}) {
+  return parseSleepSession({
+    userId,
+    source: 'google_health',
+    sourceRecordId: `sleep-${civilEndDate}`,
+    id: `sleep-${civilEndDate}`,
+    startTime: overrides.startTime ?? `${addCivilDays(civilEndDate, -1)}T22:00:00.000Z`,
+    endTime: overrides.endTime ?? `${civilEndDate}T06:00:00.000Z`,
+    civilEndDate,
+    utcOffsetMinutes: 0,
+    minutesAsleep: overrides.minutesAsleep ?? 420,
+    timeInBedMinutes: 480,
+    awakeMinutes: 60,
+    isNap: false,
+    processed: true,
+  });
+}
+
+function createFakeApi(initial: Partial<Record<string, PageOrError[]>> = {}) {
+  const requests: RecordedRequest[] = [];
+  const pages = new Map<string, PageOrError[]>();
+  for (const [dataType, sequence] of Object.entries(initial)) {
+    if (sequence) {
+      pages.set(dataType, sequence);
+    }
+  }
+  const afterPage1 = new Map<string, () => Promise<void>>();
+
+  async function* iterate(input: { dataType: string; filter: string; pageSize?: number }) {
+    requests.push({ dataType: input.dataType, filter: input.filter, pageSize: input.pageSize });
+    const sequence = pages.get(input.dataType) ?? [[]];
+    for (const [index, page] of sequence.entries()) {
+      if (page instanceof Error) {
+        throw page;
+      }
+      yield page;
+      const hook = afterPage1.get(input.dataType);
+      if (index === 0 && hook) {
+        await hook();
+      }
+    }
+  }
+
+  const api: HealthApiClient & {
+    requests: RecordedRequest[];
+    setPages: (dataType: string, sequence: PageOrError[]) => void;
+    onAfterFirstPage: (dataType: string, hook: () => Promise<void>) => void;
+    resetRequests: () => void;
+  } = {
+    requests,
+    setPages(dataType, sequence) {
+      pages.set(dataType, sequence);
+    },
+    onAfterFirstPage(dataType, hook) {
+      afterPage1.set(dataType, hook);
+    },
+    resetRequests() {
+      requests.length = 0;
+    },
+    async *iterateReconciledDataPoints(input) {
+      yield* iterate(input);
+    },
+    async listDataPoints(input) {
+      if (input.dataType === 'heart-rate' || input.dataType === 'activity-level') {
+        throw new Error(`${input.dataType} must use iterateReconciledDataPoints`);
+      }
+      const collected: GoogleDataPoint[] = [];
+      for await (const page of iterate(input)) {
+        collected.push(...page);
+      }
+      return collected;
+    },
+  };
+  return api;
+}
+
+async function seedStore(options: { timeZone?: string; goal?: boolean } = {}) {
+  const store = createMemoryStore();
+  await store.users.insert(userId);
+  await store.connections.insert(connection());
+  if (options.timeZone) {
+    await store.healthMetrics.insertTimeZoneHistory({
+      userId,
+      ianaTimeZone: options.timeZone,
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      isBackfillAnchor: true,
+    });
+  }
+  if (options.goal) {
+    await store.healthMetrics.insertSleepGoal(parseSleepGoal({ userId, goalMinutes: 480, effectiveCivilDate: '2026-08-01' }));
+  }
+  return store;
+}
+
+async function runSync(
+  store: ReturnType<typeof createMemoryStore>,
+  api: HealthApiClient,
+  options: {
+    now?: Date;
+    records?: UserHealthRecords;
+    dataTypes?: HealthSyncDataType[];
+  } = {},
+): Promise<CardioSyncState> {
+  const row = await store.connections.findByUserId(userId);
+  assert.ok(row);
+  return syncCardioConnection({
+    store,
+    connection: row,
+    api,
+    accessToken: 'access',
+    now: options.now ?? NOW,
+    dataTypes: options.dataTypes,
+    loadRecords: async () => options.records ?? emptyUserHealthRecords(),
+  });
+}
+
+function containsRawPoint(value: unknown): boolean {
+  const json = JSON.stringify(value);
+  return json.includes('beatsPerMinute') || json.includes('"heartRate"') || json.includes('dataPoints');
+}
+
+test('initial raw HR and activity-level windows are now minus 37 days through now', async () => {
+  const store = await seedStore();
+  const api = createFakeApi();
+  await runSync(store, api);
+
+  const heartRate = filterBounds(requestFor(api.requests, 'heart-rate').filter);
+  const activity = filterBounds(requestFor(api.requests, 'activity-level').filter);
+  assert.equal(heartRate.from, INITIAL_HR_FROM);
+  assert.equal(heartRate.untilExclusive, NOW.toISOString());
+  assert.deepEqual(activity, heartRate);
+  assert.equal(requestFor(api.requests, 'heart-rate').pageSize, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE);
+  assert.equal(requestFor(api.requests, 'activity-level').pageSize, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE);
+});
+
+test('initial daily zone window is UTC date minus 36 days to plus 1 day exclusive, not Asia/Shanghai', async () => {
+  const store = await seedStore();
+  const api = createFakeApi();
+  const now = new Date('2026-08-23T23:00:00.000Z');
+  await runSync(store, api, { now });
+
+  const zones = filterBounds(requestFor(api.requests, 'daily-heart-rate-zones').filter);
+  assert.equal(zones.from, '2026-07-18');
+  assert.equal(zones.untilExclusive, '2026-08-24');
+  assert.notEqual(zones.from, '2026-07-19');
+  assert.notEqual(zones.untilExclusive, '2026-08-25');
+  assert.equal(requestFor(api.requests, 'daily-heart-rate-zones').filter.includes('Asia/Shanghai'), false);
+});
+
+test('initial physical window covers a 35 local-day UTC+14 boundary', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({
+    'heart-rate': [[hrPoint(INITIAL_HR_FROM, 72, '50400s')]],
+  });
+  await runSync(store, api);
+
+  const heartRate = filterBounds(requestFor(api.requests, 'heart-rate').filter);
+  assert.equal(heartRate.from, INITIAL_HR_FROM);
+  const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-07-19' });
+  assert.ok(minutes.some((minute) => minute.utcOffsetMinutes === 840 && minute.minuteStartUtc === INITIAL_HR_FROM));
+  assert.equal(minutes[0]?.civilDate, '2026-07-19');
+});
+
+test('incremental HR, activity-level, and exercise use watermark minus two hours', async () => {
+  const store = await seedStore();
+  for (const dataType of ['heart-rate', 'activity-level', 'exercise'] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId,
+      dataType,
+      successfulWatermark: NOW,
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: NOW,
+    });
+  }
+  const api = createFakeApi();
+  await runSync(store, api);
+
+  const from = '2026-08-24T10:00:00.000Z';
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'heart-rate').filter), {
+    from,
+    untilExclusive: NOW.toISOString(),
+  });
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'activity-level').filter), {
+    from,
+    untilExclusive: NOW.toISOString(),
+  });
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'exercise').filter), {
+    from: '2026-08-24',
+    untilExclusive: '2026-08-25',
+  });
+});
+
+test('incremental sleep-style and daily types use a 48-hour overlap ending at now', async () => {
+  const store = await seedStore();
+  for (const dataType of ['daily-heart-rate-zones', 'time-in-heart-rate-zone'] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId,
+      dataType,
+      successfulWatermark: NOW,
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: NOW,
+    });
+  }
+  const api = createFakeApi();
+  await runSync(store, api);
+
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'daily-heart-rate-zones').filter), {
+    from: '2026-08-22',
+    untilExclusive: '2026-08-25',
+  });
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'time-in-heart-rate-zone').filter), {
+    from: '2026-08-22T12:00:00.000Z',
+    untilExclusive: NOW.toISOString(),
+  });
+});
+
+test('DST offsets that match IANA history stay unambiguous after recompute', async () => {
+  const store = await seedStore({ timeZone: 'America/New_York' });
+  const api = createFakeApi({
+    'heart-rate': [[hrPoint('2026-03-08T16:00:00.000Z', 110, '-14400s')]],
+    'activity-level': [[activityPoint('2026-03-08T16:00:00.000Z', 'LIGHTLY_ACTIVE')]],
+    'daily-heart-rate-zones': [[zonesPoint('2026-03-08')]],
+  });
+  await runSync(store, api, { now: new Date('2026-03-09T12:00:00.000Z') });
+
+  const cardio = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-03-08' });
+  assert.ok(cardio);
+  assert.notEqual(cardio.status, 'timezone_ambiguous');
+  assert.equal(cardio.metricVersion, WHOOP_STYLE_METRIC_VERSION);
+});
+
+test('pages flush with lookahead and a second-page 429 leaves the watermark unchanged', async () => {
+  const store = await seedStore();
+  const page1 = [hrPoint('2026-08-24T11:59:20.000Z', 110), hrPoint('2026-08-24T11:59:10.000Z', 110)];
+  const page2 = [hrPoint('2026-08-24T11:59:00.000Z', 110)];
+  const api = createFakeApi({
+    'heart-rate': [page1, new Error('health api 429')],
+    'daily-heart-rate-zones': [[zonesPoint('2026-08-24')]],
+    'activity-level': [[activityPoint('2026-08-24T11:59:00.000Z', 'LIGHTLY_ACTIVE', 60_000)]],
+  });
+  let flushedAfterPage1 = false;
+  api.onAfterFirstPage('heart-rate', async () => {
+    flushedAfterPage1 = (await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-24' })).length > 0;
+  });
+
+  const failed = await runSync(store, api);
+  assert.equal(flushedAfterPage1, true);
+  const failedCursor = await store.healthMetrics.readCursor({ connectionId, dataType: 'heart-rate' });
+  assert.equal(failedCursor?.successfulWatermark, undefined);
+  assert.equal(failedCursor?.lastErrorCode, 'rate_limited');
+  assert.equal(failedCursor?.retryCount, 1);
+  assert.equal(failedCursor?.nextAttemptAt?.toISOString(), '2026-08-24T12:30:00.000Z');
+  assert.equal(failed.nextSyncAt.toISOString(), '2026-08-24T12:30:00.000Z');
+  assert.equal(containsRawPoint(failed), false);
+
+  api.setPages('heart-rate', [page1, page2]);
+  api.resetRequests();
+  const retried = await runSync(store, api);
+  const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-24' });
+  const cardio = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' });
+  assert.equal(minutes.length, 1);
+  assert.equal(minutes[0]?.minuteStartUtc, '2026-08-24T11:59:00.000Z');
+  assert.equal(minutes[0]?.coverageSeconds, 60);
+  assert.equal(minutes[0]?.sampleCount, 3);
+  assert.equal(cardio?.dose, 0.5);
+  assert.equal(cardio?.attributedMinutes, 1);
+  assert.ok(retried.cursors.find((cursor) => cursor.dataType === 'heart-rate')?.successfulWatermark);
+
+  api.resetRequests();
+  await runSync(store, api);
+  const again = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-24' });
+  const cardioAgain = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' });
+  assert.equal(again.length, 1);
+  assert.equal(again[0]?.coverageSeconds, 60);
+  assert.equal(again[0]?.sampleCount, 3);
+  assert.equal(cardioAgain?.dose, cardio?.dose);
+  assert.equal(cardioAgain?.attributedMinutes, 1);
+});
+
+test('Strain(D) recompute writes Sleep Performance and Recovery for D+1', async () => {
+  const store = await seedStore({ goal: true, timeZone: 'UTC' });
+  const api = createFakeApi({
+    'heart-rate': [[hrPoint('2026-08-22T12:00:00.000Z', 110)]],
+    'activity-level': [[activityPoint('2026-08-22T12:00:00.000Z', 'LIGHTLY_ACTIVE')]],
+    'daily-heart-rate-zones': [[zonesPoint('2026-08-22')]],
+  });
+  const records: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    sleepSessions: [sleepSession('2026-08-23')],
+    dailyHrv: [
+      parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 50 }),
+    ],
+  };
+  await runSync(store, api, { records });
+
+  const strain = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-22',
+    metricName: 'strain',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  });
+  const sleep = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-23',
+    metricName: 'sleep_performance',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  });
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  });
+  assert.ok(strain);
+  assert.ok(sleep);
+  assert.ok(recovery);
+  assert.equal(sleep.score !== null, true);
+});
+
+test('a 429 on one type schedules only that cursor while another type advances', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({
+    'heart-rate': [new Error('health api 429')],
+    'daily-heart-rate-zones': [[zonesPoint('2026-08-22')]],
+  });
+  const state = await runSync(store, api);
+
+  const heartRate = await store.healthMetrics.readCursor({ connectionId, dataType: 'heart-rate' });
+  const zones = await store.healthMetrics.readCursor({ connectionId, dataType: 'daily-heart-rate-zones' });
+  assert.equal(heartRate?.successfulWatermark, undefined);
+  assert.equal(heartRate?.lastErrorCode, 'rate_limited');
+  assert.equal(heartRate?.retryCount, 1);
+  assert.equal(heartRate?.nextAttemptAt?.toISOString(), '2026-08-24T12:30:00.000Z');
+  assert.equal(zones?.successfulWatermark?.toISOString(), NOW.toISOString());
+  assert.equal(zones?.lastErrorCode, undefined);
+  assert.equal(zones?.retryCount, 0);
+  assert.equal(state.nextSyncAt.toISOString(), '2026-08-24T12:30:00.000Z');
+  assert.equal(
+    connectionNextSyncAt(state.cursors, NOW).toISOString(),
+    '2026-08-24T12:30:00.000Z',
+  );
+});
+
+test('HR then activity-level versus activity-level then HR produce the same strain', async () => {
+  const sampleAt = '2026-08-22T12:00:00.000Z';
+  const hrPages = [[hrPoint(sampleAt, 110)]];
+  const activityPages = [[activityPoint(sampleAt, 'LIGHTLY_ACTIVE')]];
+  const zonePages = [[zonesPoint('2026-08-22')]];
+
+  async function ingest(order: Array<['heart-rate' | 'activity-level' | 'daily-heart-rate-zones', PageOrError[]]>) {
+    const store = await seedStore({ timeZone: 'UTC' });
+    for (const [dataType, pages] of order) {
+      const api = createFakeApi({
+        'heart-rate': [[]],
+        'activity-level': [[]],
+        'daily-heart-rate-zones': [[]],
+        [dataType]: pages,
+      });
+      await runSync(store, api, { dataTypes: [dataType] });
+    }
+    return store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-22' });
+  }
+
+  const hrFirst = await ingest([
+    ['daily-heart-rate-zones', zonePages],
+    ['heart-rate', hrPages],
+    ['activity-level', activityPages],
+  ]);
+  const activityFirst = await ingest([
+    ['daily-heart-rate-zones', zonePages],
+    ['activity-level', activityPages],
+    ['heart-rate', hrPages],
+  ]);
+  assert.ok(hrFirst);
+  assert.deepEqual(
+    { dose: hrFirst.dose, strain: hrFirst.strain, attributedMinutes: hrFirst.attributedMinutes },
+    { dose: activityFirst?.dose, strain: activityFirst?.strain, attributedMinutes: activityFirst?.attributedMinutes },
+  );
+  assert.equal(hrFirst.dose, 0.5);
+});
+
+test('exercise arriving before or after heart-rate yields the same attributed dose', async () => {
+  const sampleAt = '2026-08-22T12:00:00.000Z';
+  const hrPages = [[hrPoint(sampleAt, 110)]];
+  const exercisePages = [[exercisePoint(sampleAt, '2026-08-22')]];
+  const zonePages = [[zonesPoint('2026-08-22')]];
+
+  async function ingest(order: Array<['heart-rate' | 'exercise' | 'daily-heart-rate-zones', PageOrError[]]>) {
+    const store = await seedStore({ timeZone: 'UTC' });
+    for (const [dataType, pages] of order) {
+      const api = createFakeApi({
+        'heart-rate': [[]],
+        exercise: [[]],
+        'daily-heart-rate-zones': [[]],
+        [dataType]: pages,
+      });
+      await runSync(store, api, { dataTypes: [dataType] });
+    }
+    return store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-22' });
+  }
+
+  const hrFirst = await ingest([
+    ['daily-heart-rate-zones', zonePages],
+    ['heart-rate', hrPages],
+    ['exercise', exercisePages],
+  ]);
+  const exerciseFirst = await ingest([
+    ['daily-heart-rate-zones', zonePages],
+    ['exercise', exercisePages],
+    ['heart-rate', hrPages],
+  ]);
+  assert.equal(hrFirst?.dose, exerciseFirst?.dose);
+  assert.ok((hrFirst?.dose ?? 0) > 0);
+});
+
+test('returned sync state does not retain raw Google data points', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({
+    'heart-rate': [[hrPoint('2026-08-22T12:00:00.000Z', 110)]],
+    'time-in-heart-rate-zone': [[timeInZonePoint('2026-08-22T12:00:00.000Z')]],
+  });
+  const state = await runSync(store, api);
+  assert.equal(containsRawPoint(state), false);
+  assert.equal('points' in state, false);
+  assert.equal(healthMetricsHasRawSamples(store), false);
+});
+
+test('recomputeAffectedDays reads only persisted inputs', async () => {
+  const store = await seedStore({ timeZone: 'UTC', goal: true });
+  await store.healthMetrics.upsertMinutes([
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-22T12:00:00.000Z',
+      civilDate: '2026-08-22',
+      utcOffsetMinutes: 0,
+      ianaTimeZone: 'UTC',
+      localMinuteOfDay: 720,
+      avgBpm: 110,
+      minBpm: 110,
+      maxBpm: 110,
+      sampleCount: 4,
+      coverageSeconds: 60,
+      activityLevel: 'unknown',
+    },
+  ]);
+  await store.healthMetrics.upsertActivityLevelIntervals([
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      startTime: '2026-08-22T12:00:00.000Z',
+      endTime: '2026-08-22T12:01:00.000Z',
+      activityLevelType: 'LIGHTLY_ACTIVE',
+    },
+  ]);
+  await store.healthMetrics.replaceHeartRateZones({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-08-22',
+    zones: {
+      LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
+      MODERATE: { minBeatsPerMinute: 117, maxBeatsPerMinute: 136 },
+      VIGOROUS: { minBeatsPerMinute: 137, maxBeatsPerMinute: 155 },
+      PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
+    },
+  });
+  const api = createFakeApi({ 'heart-rate': [new Error('must not fetch Google Health')] });
+  await recomputeAffectedDays(store, {
+    userId,
+    dates: ['2026-08-22'],
+    now: NOW,
+    loadRecords: async () => ({
+      ...emptyUserHealthRecords(),
+      sleepSessions: [sleepSession('2026-08-23')],
+    }),
+  });
+  assert.equal(api.requests.length, 0);
+  assert.ok(await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-22' }));
+  assert.ok(
+    await store.healthMetrics.getMetricResult({
+      userId,
+      civilDate: '2026-08-23',
+      metricName: 'sleep_performance',
+    }),
+  );
+});
+
+function healthMetricsHasRawSamples(store: ReturnType<typeof createMemoryStore>): boolean {
+  return Object.keys(store.healthMetrics).some((name) => /sample/i.test(name));
+}

@@ -4,7 +4,8 @@ import { emptyUserHealthRecords, type HealthDateRange, type HealthProvider, type
 import { createHealthApiClient, type HealthApiClient } from './health-api';
 import { createGoogleTokenRefresher, resolveAccessToken, type TokenRefresher } from './access-token';
 import { dataPointFilter, exclusiveEnd } from './filters';
-import { mapDailyHrv, mapDailyRhr, mapSleepSession, mapTrainingDays, type GoogleDataPoint } from './map-records';
+import { mapDailyHrv, mapDailyRhr, mapSleepSession, mapTrainingDays } from './map-records';
+import { mergeHealthRecords, type HealthSnapshot } from './snapshot-store';
 
 export class IntegrationUnavailableError extends Error {
   readonly code = 'integration_unavailable';
@@ -23,6 +24,7 @@ type LiveProviderInput = {
   refresher?: TokenRefresher;
   now?: Date;
   persistSnapshot?: (records: UserHealthRecords, syncedAt: Date) => Promise<void>;
+  loadSnapshot?: (userId: string) => Promise<HealthSnapshot | undefined>;
 };
 
 function isSyncable(connection: ConnectionRow | undefined): connection is ConnectionRow {
@@ -38,6 +40,13 @@ function inclusiveDates(from: string, to: string): string[] {
     current.setUTCDate(current.getUTCDate() + 1);
   }
   return dates;
+}
+
+function fortyEightHourRange(now: Date): HealthDateRange {
+  return {
+    from: new Date(now.getTime() - 48 * 60 * 60 * 1_000).toISOString().slice(0, 10),
+    to: now.toISOString().slice(0, 10),
+  };
 }
 
 export class GoogleHealthProvider implements HealthProvider {
@@ -57,33 +66,36 @@ export class GoogleHealthProvider implements HealthProvider {
       now: this.input.now,
     });
     const api = this.input.api ?? createHealthApiClient();
-    const until = exclusiveEnd(range.to);
+    const syncedAt = this.input.now ?? new Date();
+    const previous = this.input.loadSnapshot ? await this.input.loadSnapshot(userId) : undefined;
+    const queryRange = previous ? fortyEightHourRange(syncedAt) : range;
+    const until = exclusiveEnd(queryRange.to);
     const [sleepPoints, hrvPoints, rhrPoints, exercisePoints] = await Promise.all([
       api.listDataPoints({
         accessToken,
         dataType: 'sleep',
-        filter: dataPointFilter('sleep', range.from, until),
+        filter: dataPointFilter('sleep', queryRange.from, until),
         pageSize: 25,
       }),
       api.listDataPoints({
         accessToken,
         dataType: 'daily-heart-rate-variability',
-        filter: dataPointFilter('daily-heart-rate-variability', range.from, until),
+        filter: dataPointFilter('daily-heart-rate-variability', queryRange.from, until),
       }),
       api.listDataPoints({
         accessToken,
         dataType: 'daily-resting-heart-rate',
-        filter: dataPointFilter('daily-resting-heart-rate', range.from, until),
+        filter: dataPointFilter('daily-resting-heart-rate', queryRange.from, until),
       }),
       api.listDataPoints({
         accessToken,
         dataType: 'exercise',
-        filter: dataPointFilter('exercise', range.from, until),
+        filter: dataPointFilter('exercise', queryRange.from, until),
         pageSize: 25,
       }),
     ]);
 
-    const records: UserHealthRecords = {
+    const incoming: UserHealthRecords = {
       sleepSessions: sleepPoints.flatMap((point) => {
         const mapped = mapSleepSession(point, userId);
         return mapped ? [mapped] : [];
@@ -96,10 +108,9 @@ export class GoogleHealthProvider implements HealthProvider {
         const mapped = mapDailyRhr(point, userId);
         return mapped ? [mapped] : [];
       }),
-      trainingDays: mapTrainingDays(exercisePoints, userId, inclusiveDates(range.from, range.to)),
+      trainingDays: mapTrainingDays(exercisePoints, userId, inclusiveDates(queryRange.from, queryRange.to)),
     };
-
-    const syncedAt = this.input.now ?? new Date();
+    const records = mergeHealthRecords(previous?.records, incoming, { retainCivilDays: 35, now: syncedAt });
     const beforePersist = await this.input.store.connections.findByUserId(userId);
     if (!isSyncable(beforePersist)) {
       throw new Error('connection no longer syncable');

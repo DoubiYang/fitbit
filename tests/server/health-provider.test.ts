@@ -6,6 +6,8 @@ import { loadConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { DemoHealthProvider } from '../../src/server/health/demo-provider';
 import { GoogleHealthProvider } from '../../src/server/health/google-health-provider';
+import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
+import { mergeHealthRecords } from '../../src/server/health/snapshot-store';
 import { getCurrentUser } from '../../src/server/session/current-user';
 
 const range = { from: '2026-07-24', to: '2026-08-22' };
@@ -426,4 +428,119 @@ test('uses a server-owned demo session rather than a client-supplied health user
   const user = await getCurrentUser();
 
   assert.deepEqual(user, { id: 'demo_user', mode: 'demo' });
+});
+
+test('mergeHealthRecords keeps 35 civil days of HRV and lets incoming records win', () => {
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const existing: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-old', date: '2026-07-10', valueMs: 40 },
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-keep', date: '2026-08-04', valueMs: 42 },
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-today', date: '2026-08-24', valueMs: 41 },
+    ],
+  };
+  const incoming: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [{ userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-today', date: '2026-08-24', valueMs: 55 }],
+  };
+
+  const merged = mergeHealthRecords(existing, incoming, { retainCivilDays: 35, now });
+  assert.deepEqual(
+    merged.dailyHrv.map((row) => [row.date, row.valueMs]),
+    [
+      ['2026-08-04', 42],
+      ['2026-08-24', 55],
+    ],
+  );
+});
+
+test('a 48-hour refresh does not drop a 20-day-old HRV snapshot', async () => {
+  const config = loadConfig({
+    DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+    GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+    TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
+    APP_ORIGIN: 'http://localhost:3000',
+  });
+  assert.equal(config.kind, 'oauth');
+  if (config.kind !== 'oauth') {
+    return;
+  }
+  const store = createMemoryStore();
+  const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, key, 'c7', 'u7');
+  const connection = {
+    id: 'c7',
+    userId: 'u7',
+    healthUserId: 'h7',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2099-01-08T00:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active' as const,
+    lastErrorCode: undefined,
+    connectedAt: new Date('2026-08-24T00:00:00.000Z'),
+    updatedAt: new Date('2026-08-24T00:00:00.000Z'),
+    lastSuccessfulSyncAt: new Date('2026-08-23T12:00:00.000Z'),
+  };
+  await store.users.insert('u7');
+  await store.connections.insert(connection);
+  const existing: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [{ userId: 'u7', source: 'google_health', sourceRecordId: 'hrv-20d', date: '2026-08-04', valueMs: 48 }],
+  };
+  const filters: string[] = [];
+  let persisted: UserHealthRecords | undefined;
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const provider = new GoogleHealthProvider({
+    config,
+    store,
+    connection,
+    now,
+    loadSnapshot: async () => ({ records: existing, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    persistSnapshot: async (records) => {
+      persisted = records;
+    },
+    api: {
+      async *iterateReconciledDataPoints() {},
+      async listDataPoints(input) {
+        filters.push(`${input.dataType}:${input.filter}`);
+        if (input.dataType === 'daily-heart-rate-variability') {
+          return [
+            {
+              name: 'hrv-today',
+              dailyHeartRateVariability: {
+                date: { year: 2026, month: 8, day: 24 },
+                averageHeartRateVariabilityMilliseconds: 52,
+              },
+            },
+          ];
+        }
+        return [];
+      },
+    },
+    refresher: {
+      async refresh() {
+        throw new Error('should not refresh');
+      },
+    },
+  });
+
+  const records = await provider.listRecords('u7', range);
+  assert.equal(records.dailyHrv.some((row) => row.date === '2026-08-04' && row.valueMs === 48), true);
+  assert.equal(records.dailyHrv.some((row) => row.date === '2026-08-24' && row.valueMs === 52), true);
+  assert.equal(persisted?.dailyHrv.some((row) => row.date === '2026-08-04'), true);
+  assert.equal(
+    filters.some((filter) => filter.startsWith('daily-heart-rate-variability:') && filter.includes('2026-08-22')),
+    true,
+  );
+  assert.equal(
+    filters.some((filter) => filter.startsWith('daily-heart-rate-variability:') && filter.includes('2026-07-24')),
+    false,
+  );
 });
