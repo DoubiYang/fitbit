@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { parseDailyCardio, parseDailyHeartRateZones, parseDailyTimeInZone } from '../../src/domain/cardio-records';
 import { parseSleepSession, type SleepSession } from '../../src/domain/health-records';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { DemoHealthProvider } from '../../src/server/health/demo-provider';
 import { emptyUserHealthRecords, type HealthProvider, type UserHealthRecords } from '../../src/server/health/provider';
+import { createMemoryStore } from '../../src/server/db/memory-store';
 import { buildTodayView } from '../../src/server/dashboard/build-today';
 
 function assertNoTrainingPermission(text: string): void {
@@ -131,6 +134,60 @@ test('does not allow provider records for another user into the view', async () 
   assert.equal(view.primaryAction.kind, 'data_state');
   assert.equal(view.metrics.sleepPerformance.score, null);
   assert.equal(JSON.stringify(view).includes('another_user'), false);
+});
+
+test('store-backed today view passes Google zone thresholds and all-day zone time through without inventing values', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.replaceHeartRateZones(parseDailyHeartRateZones({
+    userId: 'u1',
+    sourceFamily: 'google-wearables',
+    date: '2026-08-22',
+    zones: {
+      LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
+      MODERATE: { minBeatsPerMinute: 117, maxBeatsPerMinute: 136 },
+      VIGOROUS: { minBeatsPerMinute: 137, maxBeatsPerMinute: 155 },
+      PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
+    },
+  }));
+  await store.healthMetrics.replaceTimeInZone(parseDailyTimeInZone({
+    userId: 'u1',
+    sourceFamily: 'google-wearables',
+    date: '2026-08-22',
+    minutes: { light: 400, moderate: 20, vigorous: 5, peak: 1 },
+  }));
+  await store.healthMetrics.upsertDailyCardio(parseDailyCardio({
+    userId: 'u1',
+    date: '2026-08-22',
+    status: 'complete',
+    strain: 8.4,
+    dose: 18.5,
+    zoneMinutes: { light: 10, moderate: 8, vigorous: 4, peak: 2 },
+    knownContextMinutes: 600,
+    rawCoverageMinutes: 610,
+    attributedMinutes: 24,
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  }));
+
+  const view = await buildTodayView({
+    provider: {
+      capabilities: { mode: 'oauth', canSync: true },
+      async listRecords(): Promise<UserHealthRecords> {
+        return emptyUserHealthRecords();
+      },
+    },
+    userId: 'u1',
+    now: '2026-08-22T08:00:00.000Z',
+    lastSuccessfulSyncAt: '2026-08-22T07:00:00.000Z',
+    timeZone: 'UTC',
+    healthMetrics: store.healthMetrics,
+  });
+
+  assert.equal(view.metrics.strain.heartRateZones?.LIGHT.minBeatsPerMinute, 97);
+  assert.equal(view.metrics.strain.heartRateZones?.PEAK.maxBeatsPerMinute, 200);
+  assert.equal(view.metrics.strain.timeInZone?.light, 400);
+  assert.equal(view.metrics.strain.activityZoneMinutes?.light, 10);
+  assert.equal(view.metrics.strain.dose, 18.5);
 });
 
 function recordsForOtherUser(sleepSession: SleepSession): HealthProvider {

@@ -11,7 +11,7 @@ test('renders the controlled today dashboard for the demo user', async () => {
 
   assert.match(html, /今日记录/);
   assert.match(html, /今天的建议/);
-  assert.match(html, /恢复信号/);
+  assert.match(html, /恢复状态/);
   assert.match(html, /数据新鲜/);
 });
 

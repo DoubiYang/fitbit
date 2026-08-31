@@ -1,10 +1,11 @@
-import type { MetricResult } from '../../domain/cardio-records';
+import type { DailyHeartRateZones, MetricResult } from '../../domain/cardio-records';
 import {
   type MetricCoverageState,
   type MetricEvidence,
   type MetricSourceState,
   type RecoveryQuality,
   type StrainStatus,
+  type ZoneMinutes,
 } from '../../domain/metric-types';
 import { computeRecovery, computeSleepPerformance } from '../../domain/whoop-style-metrics';
 import type { UserHealthRecords } from '../health/provider';
@@ -30,6 +31,10 @@ export type StrainMetricView = {
   coverage?: MetricCoverageState;
   source?: MetricSourceState;
   evidence?: MetricEvidence[];
+  heartRateZones?: DailyHeartRateZones['zones'];
+  timeInZone?: ZoneMinutes;
+  activityZoneMinutes?: ZoneMinutes;
+  dose?: number | null;
 };
 
 export type RecoveryMetricView = {
@@ -204,13 +209,21 @@ async function metricsFromStore(
   userId: string,
   localDate: string,
 ): Promise<TodayView['metrics']> {
-  const [strain, recovery, sleepPerformance] = await Promise.all([
+  const [strain, recovery, sleepPerformance, zones, timeInZone, dailyCardio] = await Promise.all([
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'strain' }),
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'recovery' }),
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'sleep_performance' }),
+    store.getHeartRateZones({ userId, civilDate: localDate }),
+    store.getTimeInZone({ userId, civilDate: localDate }),
+    store.getDailyCardio({ userId, civilDate: localDate }),
   ]);
   return {
-    strain: strainFromResult(strain),
+    strain: {
+      ...strainFromResult(strain),
+      ...(zones ? { heartRateZones: zones.zones } : {}),
+      ...(timeInZone ? { timeInZone: timeInZone.minutes } : {}),
+      ...(dailyCardio ? { activityZoneMinutes: dailyCardio.zoneMinutes, dose: dailyCardio.dose } : {}),
+    },
     recovery: recoveryFromResult(recovery),
     sleepPerformance: sleepFromResult(sleepPerformance),
   };

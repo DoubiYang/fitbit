@@ -142,6 +142,8 @@ export function AccountPanel({ view }: { view: AccountView }) {
         <AccountState view={view} />
 
         <p>
+          <a href="/rhythm/settings">睡眠目标</a>
+          {' · '}
           <a href="/rhythm">返回今日</a>
         </p>
       </main>
