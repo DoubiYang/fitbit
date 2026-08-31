@@ -89,6 +89,7 @@ export type ComputeStrainInput = {
   zones: DailyHeartRateZones | undefined;
   sleepSessions: SleepSession[];
   exerciseIntervals: ExerciseInterval[];
+  activityLevelIntervals?: ActivityLevelInterval[];
   timezoneUnambiguous: boolean;
   isCurrentDay: boolean;
   now?: string;
@@ -413,9 +414,10 @@ export function assignActivityLevel(minuteStartUtc: string, intervals: ActivityL
 }
 
 export function isStrainAttributedMinute(input: {
-  activityLevel: MinuteActivityLevel;
+  activityLevel?: MinuteActivityLevel;
   sleepOverlapSeconds: number;
   exerciseOverlapSeconds: number;
+  activeOverlapSeconds: number;
 }): boolean {
   if (input.exerciseOverlapSeconds >= EXERCISE_ATTRIBUTION_SECONDS) {
     return true;
@@ -423,7 +425,7 @@ export function isStrainAttributedMinute(input: {
   if (input.sleepOverlapSeconds > 0) {
     return false;
   }
-  return ACTIVE_LEVELS.has(input.activityLevel);
+  return input.activeOverlapSeconds >= ELIGIBLE_COVERAGE_SECONDS;
 }
 
 function intervalOverlapSeconds(minuteStartUtc: string, intervals: Array<{ startTime: string; endTime: string }>): number {
@@ -451,11 +453,11 @@ function strainFromDose(dose: number): number {
   return Math.round(Math.min(21, 21 * (1 - Math.exp(-dose / 140))) * 10) / 10;
 }
 
-function windowBounds(localDayLengthMinutes: number): Array<{ start: number; end: number }> {
+function windowBounds(): Array<{ start: number; end: number }> {
   return [
     { start: 6 * 60, end: 12 * 60 },
     { start: 12 * 60, end: 18 * 60 },
-    { start: 18 * 60, end: localDayLengthMinutes },
+    { start: 18 * 60, end: 24 * 60 },
   ];
 }
 
@@ -484,15 +486,26 @@ function isFresh(lastKnownContextAt: string | null, now: string | undefined, max
 
 export function computeStrain(input: ComputeStrainInput): StrainResult {
   const localDayLengthMinutes = input.localDayLengthMinutes ?? 1_440;
-  const dayMinutes = input.minutes.filter((minute) => minute.civilDate === input.date);
+  const nowMs = input.now ? Date.parse(input.now) : undefined;
+  const dayMinutes = input.minutes.filter((minute) => {
+    if (minute.civilDate !== input.date) {
+      return false;
+    }
+    if (input.isCurrentDay && nowMs !== undefined && Date.parse(minute.minuteStartUtc) > nowMs) {
+      return false;
+    }
+    return true;
+  });
   const eligible = dayMinutes.filter(isEligibleMinute);
   const zoneMinutes = emptyZoneMinutes();
   let attributedMinutes = 0;
   let usedExercise = false;
+  const activeIntervals = (input.activityLevelIntervals ?? []).filter((interval) => ACTIVE_LEVELS.has(interval.activityLevelType));
 
   for (const minute of eligible) {
     const sleepOverlapSeconds = intervalOverlapSeconds(minute.minuteStartUtc, input.sleepSessions);
     const exerciseOverlapSeconds = intervalOverlapSeconds(minute.minuteStartUtc, input.exerciseIntervals);
+    const activeOverlapSeconds = intervalOverlapSeconds(minute.minuteStartUtc, activeIntervals);
     if (exerciseOverlapSeconds >= EXERCISE_ATTRIBUTION_SECONDS) {
       usedExercise = true;
     }
@@ -501,6 +514,7 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
         activityLevel: minute.activityLevel,
         sleepOverlapSeconds,
         exerciseOverlapSeconds,
+        activeOverlapSeconds,
       })
     ) {
       continue;
@@ -518,7 +532,7 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
   const known = eligible.filter((minute) => minute.activityLevel !== 'unknown');
   const knownContextMinutes = known.length;
   const lastKnown = known.reduce<HeartRateMinuteAggregate | undefined>((latest, minute) => {
-    if (!latest || minute.localMinuteOfDay > latest.localMinuteOfDay) {
+    if (!latest || minute.minuteStartUtc > latest.minuteStartUtc) {
       return minute;
     }
     return latest;
@@ -578,7 +592,7 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
   }
 
   const coveredMinutes = new Set(known.map((minute) => minute.localMinuteOfDay));
-  const windows = windowBounds(localDayLengthMinutes);
+  const windows = windowBounds();
   const windowsComplete = windows.every((window) => {
     const knownInWindow = known.filter((minute) => minute.localMinuteOfDay >= window.start && minute.localMinuteOfDay < window.end).length;
     return knownInWindow >= WINDOW_MIN_KNOWN_MINUTES && maxKnownContextGap(coveredMinutes, window.start, window.end) <= WINDOW_MAX_GAP_MINUTES;
@@ -589,12 +603,13 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
     knownContextMinutes >= PAST_KNOWN_CONTEXT_MINUTES &&
     lastSampleCloseToDayEnd &&
     windowsComplete;
+  const missingActivityContext = knownContextMinutes === 0 ? 'activity_context_missing' : null;
 
   if (input.isCurrentDay) {
     const currentFresh = isFresh(coverage.lastKnownContextAt, input.now, CURRENT_LAST_SAMPLE_MAX_GAP_MINUTES);
     const provisional = (knownContextMinutes >= CURRENT_KNOWN_CONTEXT_MINUTES && currentFresh) || usedExercise;
     if (provisional) {
-      return result('provisional', 'score', null, score ?? 0);
+      return result('provisional', 'score', missingActivityContext, score ?? 0);
     }
     return result('incomplete', 'no_score', knownContextMinutes === 0 ? 'unknown_context' : 'insufficient_coverage', null);
   }
@@ -604,7 +619,7 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
   }
 
   if (attributedMinutes > 0) {
-    return result('provisional', 'score', null, score ?? 0);
+    return result('provisional', 'score', missingActivityContext, score ?? 0);
   }
 
   if (knownContextMinutes === 0) {
@@ -745,11 +760,19 @@ function baselineValues<T extends { date: string; userId: string }>(
   toValue: (record: T) => number,
   isValid: (value: number) => boolean,
 ): number[] {
-  return records
-    .filter((record) => record.userId === userId && record.date < targetDate && isValid(toValue(record)))
-    .sort((left, right) => right.date.localeCompare(left.date))
-    .slice(0, STABLE_BASELINE_DAYS)
-    .map(toValue);
+  const uniqueByDate: T[] = [];
+  const seenDates = new Set<string>();
+  for (const record of [...records]
+    .filter((candidate) => candidate.userId === userId && candidate.date < targetDate && isValid(toValue(candidate)))
+    .sort((left, right) => right.date.localeCompare(left.date))) {
+    if (seenDates.has(record.date)) {
+      continue;
+    }
+    seenDates.add(record.date);
+    uniqueByDate.push(record);
+  }
+
+  return uniqueByDate.slice(0, STABLE_BASELINE_DAYS).map(toValue);
 }
 
 function robustSubscore(value: number, window: number[], direction: 'higher_is_better' | 'lower_is_better', floor: number) {

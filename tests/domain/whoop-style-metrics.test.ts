@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  parseActivityLevelInterval,
   parseDailyHeartRateZones,
   parseExerciseInterval,
   parseHeartRateMinuteAggregate,
@@ -10,7 +11,7 @@ import {
   type HeartRateMinuteAggregate,
 } from '../../src/domain/cardio-records';
 import { parseDailyHrv, parseDailyRhr, parseSleepSession } from '../../src/domain/health-records';
-import { METRIC_VERSION, WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
+import { METRIC_VERSION, WHOOP_STYLE_METRIC_VERSION, type SleepPerformanceResult } from '../../src/domain/metric-types';
 import {
   computeRecovery,
   computeSleepPerformance,
@@ -120,6 +121,55 @@ function priorField<T>(
   return Array.from({ length: count }, (_, index) => build(addCivilDays(targetDate, -(index + 1)), index));
 }
 
+function rangeMinutes(startInclusive: number, endExclusive: number): HeartRateMinuteAggregate[] {
+  return Array.from({ length: endExclusive - startInclusive }, (_, index) => minute({ localMinuteOfDay: startInclusive + index }));
+}
+
+function activityIntervalsFor(minutes: HeartRateMinuteAggregate[]) {
+  return minutes.flatMap((item) => {
+    if (item.activityLevel === 'unknown' || item.activityLevel === 'SEDENTARY') {
+      return [];
+    }
+    return [
+      parseActivityLevelInterval({
+        userId,
+        sourceFamily,
+        startTime: item.minuteStartUtc,
+        endTime: new Date(Date.parse(item.minuteStartUtc) + 60_000).toISOString(),
+        activityLevelType: item.activityLevel,
+      }),
+    ];
+  });
+}
+
+function emptySleep(overrides: Partial<{ sleepHistoryIncomplete: boolean; kind: 'score' | 'no_score'; score: number | null }> = {}): SleepPerformanceResult {
+  return {
+    kind: overrides.kind ?? 'score',
+    score: overrides.score === undefined ? 100 : overrides.score,
+    reason: null,
+    minutesAsleep: 420,
+    goalMinutes: 420,
+    needMinutes: 420,
+    debtMinutes: 0,
+    debtCompensationMinutes: 0,
+    strainCompensationMinutes: 0,
+    sleepHistoryIncomplete: overrides.sleepHistoryIncomplete ?? false,
+    source: {
+      heartRateZones: false,
+      activityLevel: false,
+      exercise: false,
+      sleep: true,
+      hrv: false,
+      rhr: false,
+      sleepGoal: true,
+      timeZone: 'unambiguous' as const,
+    },
+    coverage: { knownContextMinutes: 0, rawHeartRateMinutes: 0, attributedMinutes: 0, lastKnownContextAt: null },
+    evidence: [],
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  };
+}
+
 test('strain uses the frozen whoop-style-v2 dose curve', () => {
   const light = 20;
   const moderate = 10;
@@ -139,6 +189,7 @@ test('strain uses the frozen whoop-style-v2 dose curve', () => {
     zones: orderedZones,
     sleepSessions: [],
     exerciseIntervals: [],
+    activityLevelIntervals: activityIntervalsFor(minutes),
     timezoneUnambiguous: true,
     isCurrentDay: false,
   });
@@ -193,21 +244,23 @@ test('a fully known sedentary day yields 0.0 strain', () => {
 });
 
 test('a past incomplete day with attributed activity yields labeled provisional strain, not 0.0', () => {
+  const minutes = Array.from({ length: 40 }, (_, index) =>
+    minute({
+      localMinuteOfDay: 600 + index,
+      avgBpm: 130,
+      minBpm: 130,
+      maxBpm: 130,
+      activityLevel: 'MODERATELY_ACTIVE',
+    }),
+  );
   const result = computeStrain({
     userId,
     date,
-    minutes: Array.from({ length: 40 }, (_, index) =>
-      minute({
-        localMinuteOfDay: 600 + index,
-        avgBpm: 130,
-        minBpm: 130,
-        maxBpm: 130,
-        activityLevel: 'MODERATELY_ACTIVE',
-      }),
-    ),
+    minutes,
     zones: orderedZones,
     sleepSessions: [],
     exerciseIntervals: [],
+    activityLevelIntervals: activityIntervalsFor(minutes),
     timezoneUnambiguous: true,
     isCurrentDay: false,
   });
@@ -268,6 +321,7 @@ test('current days stay in progress and exercise-only coverage can still be prov
   });
   assert.equal(exerciseOnly.status, 'provisional');
   assert.ok((exerciseOnly.score ?? 0) > 0);
+  assert.equal(exerciseOnly.reason, 'activity_context_missing');
   assert.equal(exerciseOnly.source.exercise, true);
   assert.equal(exerciseOnly.source.activityLevel, false);
 });
@@ -635,4 +689,295 @@ test('HRV plus RHR recovery can score without sleep, and a 36-hour stale sync st
   assert.equal(insufficient.kind, 'no_score');
   assert.equal(insufficient.quality, 'unavailable');
   assert.equal(insufficient.reason, 'insufficient_recovery_components');
+});
+
+test('missing zones and ambiguous timezone are explicit strain failures', () => {
+  const missingZones = computeStrain({
+    userId,
+    date,
+    minutes: fillDay(),
+    zones: undefined,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  assert.equal(missingZones.status, 'unavailable');
+  assert.equal(missingZones.kind, 'no_score');
+  assert.equal(missingZones.reason, 'heart_rate_zones_missing');
+  assert.equal(missingZones.score, null);
+
+  const ambiguous = computeStrain({
+    userId,
+    date,
+    minutes: fillDay(),
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: false,
+    isCurrentDay: false,
+  });
+  assert.equal(ambiguous.status, 'timezone_ambiguous');
+  assert.notEqual(ambiguous.status, 'complete');
+  assert.equal(ambiguous.reason, 'timezone_ambiguous');
+});
+
+test('past completeness uses 480 known-context minutes and last sample within 180 minutes of day end', () => {
+  const windowsAndLate = [
+    ...rangeMinutes(420, 510),
+    ...rangeMinutes(780, 870),
+    ...rangeMinutes(1140, 1230),
+    ...rangeMinutes(1260, 1440),
+  ];
+  const passing = computeStrain({
+    userId,
+    date,
+    minutes: [...rangeMinutes(0, 30), ...windowsAndLate],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const failingCoverage = computeStrain({
+    userId,
+    date,
+    minutes: [...rangeMinutes(0, 29), ...windowsAndLate],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const lastSampleOk = computeStrain({
+    userId,
+    date,
+    minutes: rangeMinutes(0, 1261),
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const lastSampleLate = computeStrain({
+    userId,
+    date,
+    minutes: rangeMinutes(0, 1260),
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+
+  assert.equal(passing.status, 'complete');
+  assert.equal(passing.coverage.knownContextMinutes, 480);
+  assert.equal(failingCoverage.status, 'incomplete');
+  assert.equal(failingCoverage.coverage.knownContextMinutes, 479);
+  assert.equal(lastSampleOk.status, 'complete');
+  assert.equal(lastSampleLate.status, 'incomplete');
+});
+
+test('window completeness requires 90 known minutes and no gap over 240 minutes', () => {
+  const otherWindows = [...rangeMinutes(0, 210), ...rangeMinutes(720, 1440)];
+  const morning90 = computeStrain({
+    userId,
+    date,
+    minutes: [...otherWindows, ...rangeMinutes(391, 481)],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const morning89 = computeStrain({
+    userId,
+    date,
+    minutes: [...otherWindows, ...rangeMinutes(391, 480)],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const gap240 = computeStrain({
+    userId,
+    date,
+    minutes: [...rangeMinutes(0, 210), ...rangeMinutes(360, 450), ...rangeMinutes(690, 1440)],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const gap241 = computeStrain({
+    userId,
+    date,
+    minutes: [...rangeMinutes(0, 210), ...rangeMinutes(360, 450), ...rangeMinutes(691, 1440)],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+
+  assert.equal(morning90.status, 'complete');
+  assert.equal(morning89.status, 'incomplete');
+  assert.equal(gap240.status, 'complete');
+  assert.equal(gap241.status, 'incomplete');
+});
+
+test('current-day provisional requires 120 known-context minutes and last sample within 90 minutes of now', () => {
+  const now = '2026-08-22T12:00:00.000Z';
+  const passing = computeStrain({
+    userId,
+    date,
+    minutes: rangeMinutes(600, 720),
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: true,
+    now,
+  });
+  const tooFew = computeStrain({
+    userId,
+    date,
+    minutes: rangeMinutes(601, 720),
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: true,
+    now,
+  });
+  const stale = computeStrain({
+    userId,
+    date,
+    minutes: rangeMinutes(510, 630),
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: true,
+    now,
+  });
+
+  assert.equal(passing.status, 'provisional');
+  assert.equal(passing.coverage.knownContextMinutes, 120);
+  assert.equal(tooFew.status, 'incomplete');
+  assert.equal(tooFew.coverage.knownContextMinutes, 119);
+  assert.equal(stale.status, 'incomplete');
+});
+
+test('a 25h extra 01:00 hour does not satisfy last-sample-within-180-of-end', () => {
+  const extraHour = minute({
+    localMinuteOfDay: 1500,
+    minuteStartUtc: '2026-08-22T01:00:00.000Z',
+  });
+  const result = computeStrain({
+    userId,
+    date,
+    minutes: [extraHour, ...rangeMinutes(360, 1260)],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+    localDayLengthMinutes: 1500,
+  });
+
+  assert.notEqual(result.status, 'complete');
+  assert.equal(result.status, 'incomplete');
+});
+
+test('current-day minutes after now are ignored', () => {
+  const now = '2026-08-22T12:00:00.000Z';
+  const futureActive = Array.from({ length: 200 }, (_, index) =>
+    minute({
+      localMinuteOfDay: 721 + index,
+      avgBpm: 110,
+      minBpm: 110,
+      maxBpm: 110,
+      activityLevel: 'LIGHTLY_ACTIVE',
+    }),
+  );
+  const result = computeStrain({
+    userId,
+    date,
+    minutes: [...rangeMinutes(600, 650), ...futureActive],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    activityLevelIntervals: activityIntervalsFor(futureActive),
+    timezoneUnambiguous: true,
+    isCurrentDay: true,
+    now,
+  });
+
+  assert.equal(result.coverage.knownContextMinutes, 50);
+  assert.equal(result.coverage.attributedMinutes, 0);
+  assert.equal(result.kind, 'no_score');
+  assert.notEqual(result.status, 'provisional');
+});
+
+test('recovery baselines unique by civil date before the 28-day window', () => {
+  const duplicatedHrv = priorField(date, 6, (fieldDate, index) => fieldDate).flatMap((fieldDate, index) => [
+    parseDailyHrv({ userId, source: 'google_health', sourceRecordId: `hrv-${index}-a`, date: fieldDate, valueMs: 50 }),
+    parseDailyHrv({ userId, source: 'google_health', sourceRecordId: `hrv-${index}-b`, date: fieldDate, valueMs: 60 }),
+  ]);
+  const uniqueRhr = priorField(date, 8, (fieldDate, index) =>
+    parseDailyRhr({ userId, source: 'google_health', sourceRecordId: `rhr-${index}`, date: fieldDate, valueBpm: 60 }),
+  );
+  const tooFewUniqueDays = computeRecovery({
+    targetDate: date,
+    hrv: parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-today', date, valueMs: 50 }),
+    rhr: parseDailyRhr({ userId, source: 'google_health', sourceRecordId: 'rhr-today', date, valueBpm: 60 }),
+    historicalHrv: duplicatedHrv,
+    historicalRhr: uniqueRhr,
+    sleep: undefined,
+    now: '2026-08-22T08:00:00.000Z',
+    lastSuccessfulSyncAt: '2026-08-22T07:00:00.000Z',
+  });
+  assert.equal(tooFewUniqueDays.kind, 'no_score');
+  assert.equal(tooFewUniqueDays.quality, 'unavailable');
+
+  const sevenUniqueDuplicated = priorField(date, 7, (fieldDate, index) => fieldDate).flatMap((fieldDate, index) => [
+    parseDailyHrv({ userId, source: 'google_health', sourceRecordId: `hrv7-${index}-a`, date: fieldDate, valueMs: 50 }),
+    parseDailyHrv({ userId, source: 'google_health', sourceRecordId: `hrv7-${index}-b`, date: fieldDate, valueMs: 60 }),
+  ]);
+  const enoughUniqueDays = computeRecovery({
+    targetDate: date,
+    hrv: parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-today', date, valueMs: 50 }),
+    rhr: parseDailyRhr({ userId, source: 'google_health', sourceRecordId: 'rhr-today', date, valueBpm: 60 }),
+    historicalHrv: sevenUniqueDuplicated,
+    historicalRhr: uniqueRhr,
+    sleep: undefined,
+    now: '2026-08-22T08:00:00.000Z',
+    lastSuccessfulSyncAt: '2026-08-22T07:00:00.000Z',
+  });
+  assert.equal(enoughUniqueDays.kind, 'score');
+  assert.equal(enoughUniqueDays.components.hrv?.baselineDays, 7);
+});
+
+test('sleep_history_incomplete caps Recovery at provisional even with 28-day baselines', () => {
+  const result = computeRecovery({
+    targetDate: date,
+    hrv: parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-today', date, valueMs: 50 }),
+    rhr: parseDailyRhr({ userId, source: 'google_health', sourceRecordId: 'rhr-today', date, valueBpm: 55 }),
+    historicalHrv: priorField(date, 28, (fieldDate, index) =>
+      parseDailyHrv({ userId, source: 'google_health', sourceRecordId: `hrv-${index}`, date: fieldDate, valueMs: 50 }),
+    ),
+    historicalRhr: priorField(date, 28, (fieldDate, index) =>
+      parseDailyRhr({ userId, source: 'google_health', sourceRecordId: `rhr-${index}`, date: fieldDate, valueBpm: 55 }),
+    ),
+    sleep: emptySleep({ sleepHistoryIncomplete: true }),
+    now: '2026-08-22T08:00:00.000Z',
+    lastSuccessfulSyncAt: '2026-08-22T07:00:00.000Z',
+  });
+
+  assert.equal(result.kind, 'score');
+  assert.equal(result.quality, 'provisional');
+  assert.notEqual(result.quality, 'high');
+  assert.equal(result.sleepHistoryIncomplete, true);
 });

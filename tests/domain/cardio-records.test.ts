@@ -359,6 +359,7 @@ test('sleep overlap excludes LIGHTLY_ACTIVE minutes from Strain unless exercise 
       activityLevel: 'LIGHTLY_ACTIVE',
       sleepOverlapSeconds: 60,
       exerciseOverlapSeconds: 0,
+      activeOverlapSeconds: 60,
     }),
     false,
   );
@@ -367,6 +368,7 @@ test('sleep overlap excludes LIGHTLY_ACTIVE minutes from Strain unless exercise 
       activityLevel: 'LIGHTLY_ACTIVE',
       sleepOverlapSeconds: 60,
       exerciseOverlapSeconds: 30,
+      activeOverlapSeconds: 60,
     }),
     true,
   );
@@ -430,12 +432,95 @@ test('missing activity-level coverage is unknown rather than sedentary rest', ()
       activityLevel: 'unknown',
       sleepOverlapSeconds: 0,
       exerciseOverlapSeconds: 0,
+      activeOverlapSeconds: 0,
     }),
     false,
   );
 
   const unknown = parseHeartRateMinuteAggregate(minuteInput({ activityLevel: 'unknown', avgBpm: 70, minBpm: 70, maxBpm: 70 }));
   assert.equal(unknown.activityLevel, 'unknown');
+});
+
+test('strain dose requires at least 30 seconds of active overlap, not just a dominant active label', () => {
+  assert.equal(
+    isStrainAttributedMinute({
+      activityLevel: 'LIGHTLY_ACTIVE',
+      sleepOverlapSeconds: 0,
+      exerciseOverlapSeconds: 0,
+      activeOverlapSeconds: 29,
+    }),
+    false,
+  );
+  assert.equal(
+    isStrainAttributedMinute({
+      activityLevel: 'SEDENTARY',
+      sleepOverlapSeconds: 0,
+      exerciseOverlapSeconds: 0,
+      activeOverlapSeconds: 30,
+    }),
+    true,
+  );
+
+  const zones = parseDailyHeartRateZones(zonesInput());
+  const labeledActive = parseHeartRateMinuteAggregate(minuteInput({ activityLevel: 'LIGHTLY_ACTIVE' }));
+  const shortActive = computeStrain({
+    userId,
+    date: '2026-08-22',
+    minutes: [labeledActive],
+    zones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    activityLevelIntervals: [
+      parseActivityLevelInterval({
+        userId,
+        sourceFamily,
+        startTime: '2026-08-22T12:00:00.000Z',
+        endTime: '2026-08-22T12:00:20.000Z',
+        activityLevelType: 'LIGHTLY_ACTIVE',
+      }),
+      parseActivityLevelInterval({
+        userId,
+        sourceFamily,
+        startTime: '2026-08-22T12:00:20.000Z',
+        endTime: '2026-08-22T12:01:00.000Z',
+        activityLevelType: 'SEDENTARY',
+      }),
+    ],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const longActive = computeStrain({
+    userId,
+    date: '2026-08-22',
+    minutes: [labeledActive],
+    zones,
+    sleepSessions: [],
+    exerciseIntervals: [],
+    activityLevelIntervals: [
+      parseActivityLevelInterval({
+        userId,
+        sourceFamily,
+        startTime: '2026-08-22T12:00:00.000Z',
+        endTime: '2026-08-22T12:00:30.000Z',
+        activityLevelType: 'LIGHTLY_ACTIVE',
+      }),
+      parseActivityLevelInterval({
+        userId,
+        sourceFamily,
+        startTime: '2026-08-22T12:00:30.000Z',
+        endTime: '2026-08-22T12:01:00.000Z',
+        activityLevelType: 'SEDENTARY',
+      }),
+    ],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+
+  assert.equal(shortActive.coverage.attributedMinutes, 0);
+  assert.equal(shortActive.coverage.knownContextMinutes, 1);
+  assert.equal(shortActive.dose, 0);
+  assert.equal(longActive.coverage.attributedMinutes, 1);
+  assert.ok((longActive.dose ?? 0) > 0);
 });
 
 test('a BPM in a 1 bpm zone gap produces no dose', () => {
