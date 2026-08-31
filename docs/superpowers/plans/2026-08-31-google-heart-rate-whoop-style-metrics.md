@@ -16,10 +16,10 @@
 
 - Google `daily-heart-rate-zones` are the only HR-zone thresholds. Never infer max HR from history or write hard-coded bpm thresholds.
 - `time-in-heart-rate-zone` is an interval type. Persist daily totals via `dailyRollUp` or summed intervals. It is display/validation data only. Daily Strain is calculated from raw, activity-attributable minute aggregates.
-- List/reconcile filters use the same snake_case identifiers as the existing daily HRV/RHR filters (`heart_rate.sample_time.physical_time`, `daily_heart_rate_zones.date`, `time_in_heart_rate_zone.interval.start_time`). JSON bodies stay camelCase; `motionContext` lives at `heartRate.metadata.motionContext`.
+- List/reconcile filters use snake_case (`heart_rate.sample_time.physical_time`, `daily_heart_rate_zones.date`, `time_in_heart_rate_zone.interval.start_time`, `activity_level.interval.start_time`). JSON bodies stay camelCase. Raw HR pages are newest-first and must be sorted ascending before hold-to-next-sample. Daily zones are inclusive `[min, max]` with a 1 bpm gap between adjacent zones; do not require `max = next.min`.
 - Raw heart-rate `reconcile` uses `pageSize=10000`. Sleep/exercise stay at 25.
 - Minute aggregation keeps a one-sample lookahead across page boundaries and merges coverage intervals for the same UTC minute. Do not add coverage seconds from two pages.
-- An absent/`MOTION_CONTEXT_UNSPECIFIED` `motionContext` is unknown, not sedentary. It cannot establish a complete day or produce a zero Strain. Until Task 0 proves ACTIVE/SEDENTARY exist on this Fitbit Air, Strain from unknown-context minutes is allowed only via exercise overlap and is `provisional`.
+- This Fitbit Air account does not send `heartRate.metadata.motionContext`. Use `activity-level` 60-second intervals for known-context and activity attribution. `SEDENTARY` is rest. `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE` are activity only when they do not overlap a sleep session. Exercise overlap can still attribute a minute. Missing `activity-level` is unknown, not rest, and cannot yield `0.0` Strain.
 - Past incomplete days with attributed activity minutes may show labeled `provisional` Strain. `0.0` is only for a complete rest day.
 - Recomputing Strain for date `D` must recompute Sleep Performance and Recovery for `D+1`.
 - Sleep debt walks 7 calendar days and uses the longest non-nap session that day even if under 180 minutes; a day with no non-nap session counts as 0 minutes. It does not zero the whole bonus. Sleep Performance still requires a primary sleep (non-nap, `minutesAsleep >= 180`, longest session).
@@ -74,7 +74,7 @@
 
 - [ ] **Step 3: Run it against the user's authorized local Fitbit Air account.**
 
-  If the Google refresh token is expired, reauthorize from the account page first. Record only capability booleans/counts in the spec: raw HR available, any `ACTIVE`/`SEDENTARY` contexts available (wake vs sleep vs exercise), all four zone types available and adjacent, and time-in-zone available via dailyRollUp or interval. If a required source is absent, retain the explicit `unavailable` product path and do not invent a fallback from historical maximum HR.
+  Reauthorization succeeded on 2026-08-31. Record the observed capability in the spec (already captured in section 9): raw HR without `motionContext`, `activity-level` present, four zones with 1 bpm gaps, time-in-zone as 60-second intervals. Do not invent `motionContext` or shared zone boundaries.
 
 - [ ] **Step 4: Run the probe regression test and commit.**
 
@@ -96,7 +96,7 @@
 
 - [ ] **Step 1: Write failing domain tests for threshold validation and minute aggregation.**
 
-  Cover exactly four ordered Google zones; allow shared adjacent boundaries; classify `LIGHT/MODERATE/VIGOROUS` as `[min,max)` and `PEAK` as `[min,max]`. Test a 75-second sample hold split over minute boundaries, a page-boundary lookahead that neither double-counts nor drops coverage, 30-second minute eligibility, context precedence, `MOTION_CONTEXT_UNSPECIFIED` becoming `unknown`, and BPM above `peak.max` producing no dose.
+  Cover exactly four ordered Google zones with a 1 bpm gap (`max + 1 = next.min`); classify every zone as inclusive `[min, max]`. Test newest-first HR pages sorted ascending, a 75-second sample hold split over minute boundaries, a page-boundary lookahead that neither double-counts nor drops coverage, 30-second minute eligibility, `activity-level` precedence, sleep overlap excluding LIGHTLY_ACTIVE from Strain, missing activity-level becoming `unknown`, and BPM in a 1 bpm gap producing no dose.
 
 - [ ] **Step 2: Run the new test file and verify it fails because the v2 modules do not exist.**
 
@@ -223,7 +223,7 @@
 
 - [ ] **Step 1: Write failing sync tests for initial and incremental windows.**
 
-  Assert initial raw HR uses `now − 37 × 24h` through `now`, and initial daily requests use the documented 36-days-before to 1-day-after UTC date window rather than `Asia/Shanghai`; after that, raw HR/exercise use cursor minus two hours, and sleep/HRV/RHR/daily-zone/time-in-zone use 48 hours. Include timezone/DST and 35-local-day boundary fixtures, page-by-page raw ingestion with lookahead, duplicate overlap idempotence, a **second raw page failure** that leaves its successful watermark unchanged, Strain(D) cascading to Sleep/Recovery(D+1), and retry output with no missing/duplicate minutes, dose, or metric result. For one data-type 429 plus another successful type, assert the former writes its own retry count/error/next attempt while the latter advances; the connection becomes due at the former's earliest retry. Assert no raw point is retained after the page callback returns.
+  Assert initial raw HR uses `now − 37 × 24h` through `now`, and initial daily requests use the documented 36-days-before to 1-day-after UTC date window rather than `Asia/Shanghai`; after that, raw HR/`activity-level`/exercise use cursor minus two hours, and sleep/HRV/RHR/daily-zone/time-in-zone use 48 hours. Include timezone/DST and 35-local-day boundary fixtures, page-by-page raw ingestion with lookahead, duplicate overlap idempotence, a **second raw page failure** that leaves its successful watermark unchanged, Strain(D) cascading to Sleep/Recovery(D+1), and retry output with no missing/duplicate minutes, dose, or metric result. For one data-type 429 plus another successful type, assert the former writes its own retry count/error/next attempt while the latter advances; the connection becomes due at the former's earliest retry. Assert no raw point is retained after the page callback returns.
 
 - [ ] **Step 2: Implement `cardio-sync.ts`.**
 
