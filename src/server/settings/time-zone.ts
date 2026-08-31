@@ -4,7 +4,7 @@ import { reindexStoredMinutesForTimeZone } from '../health/cardio-reindex';
 import { loadHealthSnapshot } from '../health/snapshot-store';
 import { getCurrentUser } from '../session/current-user';
 
-const EPOCH_UTC = '1970-01-01T00:00:00.000Z';
+export const TIME_ZONE_BACKFILL_EPOCH = '1970-01-01T00:00:00.000Z';
 
 export function isValidIanaTimeZone(value: string): boolean {
   if (!value || value.length > 128 || value !== value.trim()) {
@@ -89,27 +89,41 @@ export async function handlePutTimeZone(request: Request, deps: HttpDeps): Promi
 
   const store = deps.store!;
   const now = deps.now?.() ?? new Date();
-  const existing = await store.healthMetrics.listTimeZoneHistory(session.userId);
-  const isBackfillAnchor = existing.length === 0;
-  let effectiveAt = now.toISOString();
-  if (isBackfillAnchor) {
-    const stored = await store.healthMetrics.listMinutesInRange({
-      userId: session.userId,
-      fromUtc: EPOCH_UTC,
-    });
-    if (stored[0]) {
-      effectiveAt = stored[0].minuteStartUtc;
-    }
-  }
-
   const connection = await store.connections.findByUserId(session.userId);
   const databaseUrl = deps.config.kind === 'oauth' ? deps.config.databaseUrl : undefined;
   const loadSnapshot =
     deps.snapshotForUser ??
     (databaseUrl ? (userId: string) => loadHealthSnapshot(databaseUrl, userId) : undefined);
 
+  let written: { ianaTimeZone: string; effectiveAt: string; isBackfillAnchor: boolean } | undefined;
   try {
     await store.withTransaction(async (inner) => {
+      const existing = await inner.healthMetrics.listTimeZoneHistory(session.userId);
+      const current = existing.reduce<typeof existing[number] | undefined>((latest, row) => {
+        if (!latest || Date.parse(row.effectiveAt) > Date.parse(latest.effectiveAt)) {
+          return row;
+        }
+        return latest;
+      }, undefined);
+      if (current?.ianaTimeZone === ianaTimeZone) {
+        written = {
+          ianaTimeZone: current.ianaTimeZone,
+          effectiveAt: current.effectiveAt,
+          isBackfillAnchor: current.isBackfillAnchor,
+        };
+        return;
+      }
+
+      const isBackfillAnchor = existing.length === 0;
+      let effectiveAt = now.toISOString();
+      if (isBackfillAnchor) {
+        const stored = await inner.healthMetrics.listMinutesInRange({
+          userId: session.userId,
+          fromUtc: TIME_ZONE_BACKFILL_EPOCH,
+        });
+        effectiveAt = stored[0]?.minuteStartUtc ?? TIME_ZONE_BACKFILL_EPOCH;
+      }
+
       await inner.healthMetrics.insertTimeZoneHistory({
         userId: session.userId,
         ianaTimeZone,
@@ -121,12 +135,13 @@ export async function handlePutTimeZone(request: Request, deps: HttpDeps): Promi
       await reindexStoredMinutesForTimeZone(inner, {
         userId: session.userId,
         ianaTimeZone,
-        fromUtc: isBackfillAnchor ? EPOCH_UTC : effectiveAt,
+        fromUtc: isBackfillAnchor ? TIME_ZONE_BACKFILL_EPOCH : effectiveAt,
         toUtcExclusive: next?.effectiveAt,
         now,
         loadSnapshot,
         lastSuccessfulSyncAt: connection?.lastSuccessfulSyncAt ?? now,
       });
+      written = { ianaTimeZone, effectiveAt, isBackfillAnchor };
     });
   } catch (error) {
     if (error instanceof TimeZoneHistoryConflictError) {
@@ -135,5 +150,5 @@ export async function handlePutTimeZone(request: Request, deps: HttpDeps): Promi
     throw error;
   }
 
-  return json({ ianaTimeZone, effectiveAt, isBackfillAnchor });
+  return json(written);
 }

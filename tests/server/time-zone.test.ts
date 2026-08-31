@@ -8,7 +8,7 @@ import type { SessionRow } from '../../src/server/auth/types';
 import { loadConfig, type OAuthConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { emptyUserHealthRecords } from '../../src/server/health/provider';
-import { handleGetTimeZone, handlePutTimeZone } from '../../src/server/settings/time-zone';
+import { handleGetTimeZone, handlePutTimeZone, TIME_ZONE_BACKFILL_EPOCH } from '../../src/server/settings/time-zone';
 
 const NOW = new Date('2026-08-24T12:00:00.000Z');
 const userA = 'user-a';
@@ -175,13 +175,35 @@ test('first IANA write uses the earliest saved minute and is a backfill anchor',
   assert.ok(minutes.every((minute) => minute.utcOffsetMinutes === 0));
 });
 
-test('first IANA write without minutes uses the received instant as a backfill anchor', async () => {
+test('first IANA write without minutes uses the epoch backfill anchor', async () => {
   const { store, tokenA } = await seedUsers();
   const response = await handlePutTimeZone(putRequest({ ianaTimeZone: 'Asia/Shanghai' }, tokenA), deps(store));
-  const body = await response.json() as { effectiveAt: string; isBackfillAnchor: boolean };
+  const body = await response.json() as { effectiveAt: string; isBackfillAnchor: boolean; ianaTimeZone: string };
   assert.equal(response.status, 200);
-  assert.equal(body.effectiveAt, NOW.toISOString());
+  assert.equal(body.effectiveAt, TIME_ZONE_BACKFILL_EPOCH);
   assert.equal(body.isBackfillAnchor, true);
+  assert.equal(body.ianaTimeZone, 'Asia/Shanghai');
+
+  const historical = '2026-08-17T12:00:00.000Z';
+  assert.ok(Date.parse(historical) < NOW.getTime());
+  const zone = await store.healthMetrics.lookupTimeZoneHistory({ userId: userA, at: historical });
+  assert.equal(zone?.ianaTimeZone, 'Asia/Shanghai');
+  assert.equal(zone?.isBackfillAnchor, true);
+  assert.equal(zone?.effectiveAt, TIME_ZONE_BACKFILL_EPOCH);
+});
+
+test('later PUT of the same IANA does not insert a second history row', async () => {
+  const { store, tokenA } = await seedUsers();
+  const first = await handlePutTimeZone(putRequest({ ianaTimeZone: 'UTC' }, tokenA), deps(store));
+  const second = await handlePutTimeZone(putRequest({ ianaTimeZone: 'UTC' }, tokenA), deps(store, new Date('2026-08-24T13:00:00.000Z')));
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+
+  const body = await second.json() as { ianaTimeZone: string; effectiveAt: string; isBackfillAnchor: boolean };
+  assert.equal(body.ianaTimeZone, 'UTC');
+  assert.equal(body.effectiveAt, TIME_ZONE_BACKFILL_EPOCH);
+  assert.equal(body.isBackfillAnchor, true);
+  assert.equal((await store.healthMetrics.listTimeZoneHistory(userA)).length, 1);
 });
 
 test('later IANA writes use the received instant and are not a second backfill anchor', async () => {

@@ -8,8 +8,9 @@ import type { HttpDeps } from '../../src/server/auth/http';
 import type { SessionRow } from '../../src/server/auth/types';
 import { loadConfig, type OAuthConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
+import { recomputeAffectedDays } from '../../src/server/health/cardio-sync';
 import { emptyUserHealthRecords } from '../../src/server/health/provider';
-import { handlePutTimeZone } from '../../src/server/settings/time-zone';
+import { handlePutTimeZone, TIME_ZONE_BACKFILL_EPOCH } from '../../src/server/settings/time-zone';
 
 const userId = 'user-a';
 const NOW = new Date('2026-08-24T12:00:00.000Z');
@@ -230,4 +231,48 @@ test('later time-zone writes only reindex their own effective range', async () =
   assert.equal(late.length, 1);
   assert.equal(late[0]?.ianaTimeZone, 'Asia/Shanghai');
   assert.equal(late[0]?.utcOffsetMinutes, 480);
+});
+
+test('epoch backfill anchor covers minutes ingested after the first IANA write', async () => {
+  const { store, token } = await signedInStore();
+  const put = await handlePutTimeZone(
+    new Request('http://localhost:3000/rhythm/api/settings/time-zone', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'http://localhost:3000',
+        Cookie: `rhythm_session=${token}`,
+      },
+      body: JSON.stringify({ ianaTimeZone: 'UTC' }),
+    }),
+    deps(store, { count: 0 }),
+  );
+  assert.equal(put.status, 200);
+  assert.equal((await put.json() as { effectiveAt: string }).effectiveAt, TIME_ZONE_BACKFILL_EPOCH);
+
+  const historicalDate = '2026-08-17';
+  const minute = utcMinute(historicalDate, 12 * 60);
+  assert.ok(Date.parse(minute.minuteStartUtc) < NOW.getTime());
+  await store.healthMetrics.upsertMinutes([minute]);
+  await store.healthMetrics.replaceHeartRateZones(parseDailyHeartRateZones({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: historicalDate,
+    zones: ZONES,
+  }));
+
+  const zone = await store.healthMetrics.lookupTimeZoneHistory({ userId, at: minute.minuteStartUtc });
+  assert.equal(zone?.ianaTimeZone, 'UTC');
+  assert.equal(zone?.isBackfillAnchor, true);
+  assert.ok(Date.parse(zone?.effectiveAt ?? '') <= Date.parse(minute.minuteStartUtc));
+
+  await recomputeAffectedDays(store, {
+    userId,
+    dates: [historicalDate],
+    now: NOW,
+    loadRecords: async () => emptyUserHealthRecords(),
+  });
+  const cardio = await store.healthMetrics.getDailyCardio({ userId, civilDate: historicalDate });
+  assert.notEqual(cardio?.status, 'timezone_ambiguous');
+  assert.equal(cardio?.status, 'incomplete');
 });
