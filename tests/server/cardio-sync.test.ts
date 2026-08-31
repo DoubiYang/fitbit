@@ -753,6 +753,45 @@ test('recomputeAffectedDays uses loadSnapshot sleep HRV and RHR when loadRecords
   assert.equal(recovery?.source.rhr, true);
 });
 
+test('incremental time-in-zone does not replace a partially covered civil day', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.replaceTimeInZone({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-08-22',
+    minutes: { light: 400, moderate: 20, vigorous: 5, peak: 0 },
+  });
+  await store.healthMetrics.replaceTimeInZone({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-08-23',
+    minutes: { light: 10, moderate: 0, vigorous: 0, peak: 0 },
+  });
+  await store.healthMetrics.updateCursor({
+    connectionId,
+    dataType: 'time-in-heart-rate-zone',
+    successfulWatermark: NOW,
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: NOW,
+  });
+  const api = createFakeApi({
+    'time-in-heart-rate-zone': [
+      [
+        timeInZonePoint('2026-08-22T12:00:00.000Z'),
+        timeInZonePoint('2026-08-23T00:00:00.000Z'),
+        timeInZonePoint('2026-08-23T00:01:00.000Z'),
+      ],
+    ],
+  });
+  await runSync(store, api, { dataTypes: ['time-in-heart-rate-zone'] });
+
+  const partial = await store.healthMetrics.getTimeInZone({ userId, civilDate: '2026-08-22' });
+  const full = await store.healthMetrics.getTimeInZone({ userId, civilDate: '2026-08-23' });
+  assert.equal(partial?.minutes.light, 400);
+  assert.equal(full?.minutes.light, 2);
+});
+
 test('sleep HRV and RHR are not silently marked successful by cardio ingest', async () => {
   const store = await seedStore();
   const api = createFakeApi();

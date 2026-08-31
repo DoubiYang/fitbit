@@ -327,3 +327,199 @@ test('a snapshot 429 still ingests heart-rate and retries the snapshot sooner th
   assert.equal(scheduled?.nextSyncAt?.toISOString(), '2026-08-24T12:30:00.000Z');
 });
 
+test('a later snapshot sleep recomputes historical strain without another HR backfill', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  let snapshotFailed = true;
+  const api = createFakeApi({
+    'heart-rate': [
+      [
+        {
+          heartRate: {
+            sampleTime: { physicalTime: '2026-08-22T12:00:00.000Z', utcOffset: '0s' },
+            beatsPerMinute: '110',
+          },
+        },
+      ],
+    ],
+    'activity-level': [
+      [
+        {
+          activityLevel: {
+            interval: { startTime: '2026-08-22T12:00:00.000Z', endTime: '2026-08-22T12:01:00.000Z' },
+            activityLevelType: 'LIGHTLY_ACTIVE',
+          },
+        },
+      ],
+    ],
+    'daily-heart-rate-zones': [
+      [
+        {
+          dailyHeartRateZones: {
+            date: { year: 2026, month: 8, day: 22 },
+            heartRateZones: [
+              { heartRateZoneType: 'LIGHT', minBeatsPerMinute: '97', maxBeatsPerMinute: '116' },
+              { heartRateZoneType: 'MODERATE', minBeatsPerMinute: '117', maxBeatsPerMinute: '136' },
+              { heartRateZoneType: 'VIGOROUS', minBeatsPerMinute: '137', maxBeatsPerMinute: '155' },
+              { heartRateZoneType: 'PEAK', minBeatsPerMinute: '156', maxBeatsPerMinute: '200' },
+            ],
+          },
+        },
+      ],
+    ],
+  });
+  const originalList = api.listDataPoints.bind(api);
+  const originalIterate = api.iterateReconciledDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    if (
+      snapshotFailed &&
+      (input.dataType === 'sleep' ||
+        input.dataType === 'daily-heart-rate-variability' ||
+        input.dataType === 'daily-resting-heart-rate')
+    ) {
+      throw new Error('health api 429');
+    }
+    if (input.dataType === 'sleep') {
+      return [
+        {
+          name: 'sleep-overlap',
+          sleep: {
+            type: 'STAGES',
+            interval: {
+              startTime: '2026-08-22T11:30:00.000Z',
+              endTime: '2026-08-22T12:30:00.000Z',
+              endUtcOffset: '0s',
+              civilEndTime: { date: { year: 2026, month: 8, day: 22 } },
+            },
+            metadata: { nap: true, processed: true },
+            summary: { minutesAsleep: '60', minutesInSleepPeriod: '60', minutesAwake: '0' },
+          },
+        },
+      ];
+    }
+    return originalList(input);
+  };
+  api.iterateReconciledDataPoints = async function* (input) {
+    if (snapshotFailed) {
+      yield* originalIterate(input);
+      return;
+    }
+    yield [];
+  };
+
+  const syncOpts = {
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now,
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => undefined,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  };
+
+  await syncUserConnection(syncOpts);
+  const before = await store.healthMetrics.getDailyCardio({ userId: 'u1', civilDate: '2026-08-22' });
+  assert.ok((before?.dose ?? 0) > 0);
+  assert.ok((before?.attributedMinutes ?? 0) > 0);
+
+  snapshotFailed = false;
+  await syncUserConnection(syncOpts);
+  const after = await store.healthMetrics.getDailyCardio({ userId: 'u1', civilDate: '2026-08-22' });
+  assert.equal(after?.dose, 0);
+  assert.equal(after?.attributedMinutes, 0);
+  const heartRate = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'heart-rate' });
+  assert.equal(heartRate?.successfulWatermark?.toISOString(), now.toISOString());
+});
+
+test('a snapshot-only HRV revision recomputes Recovery when cardio pages are empty', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const api = createFakeApi({});
+  const originalList = api.listDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    if (input.dataType === 'daily-heart-rate-variability') {
+      return [
+        {
+          name: 'hrv-23',
+          dailyHeartRateVariability: {
+            date: { year: 2026, month: 8, day: 23 },
+            averageHeartRateVariabilityMilliseconds: 61,
+          },
+        },
+      ];
+    }
+    return originalList(input);
+  };
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => undefined,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId: 'u1',
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.ok(recovery);
+  assert.equal(recovery.source.hrv, true);
+});
+
+test('does not ingest cardio after the connection is no longer syncable', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const api = createFakeApi({
+    'heart-rate': [
+      [
+        {
+          heartRate: {
+            sampleTime: { physicalTime: '2026-08-22T12:00:00.000Z', utcOffset: '0s' },
+            beatsPerMinute: '110',
+          },
+        },
+      ],
+    ],
+  });
+  const originalList = api.listDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    const current = await store.connections.findByUserId('u1');
+    if (current) {
+      await store.connections.update({
+        ...current,
+        status: 'disconnected',
+        tokenEnvelopeCiphertext: undefined,
+        tokenEnvelopeIv: undefined,
+        tokenEnvelopeAuthTag: undefined,
+        nextSyncAt: undefined,
+      });
+    }
+    return originalList(input);
+  };
+
+  const result = await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => undefined,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  assert.equal(result, false);
+  const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId: 'u1', civilDate: '2026-08-22' });
+  assert.equal(minutes.length, 0);
+});
+

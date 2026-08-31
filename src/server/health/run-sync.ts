@@ -1,10 +1,11 @@
 import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow } from '../auth/types';
 import { civilDateRange } from '../time/civil-date';
-import { createGoogleTokenRefresher, resolveAccessToken, type TokenRefresher } from './access-token';
+import { createGoogleTokenRefresher, resolveAccessToken, TokenRefreshError, type TokenRefresher } from './access-token';
 import {
   scheduleTypeFailure,
   SNAPSHOT_SYNC_TYPES,
+  snapshotAffectedDates,
   successCursor,
   syncCardioConnection,
   type LoadHealthRecords,
@@ -74,6 +75,16 @@ export async function syncUserConnection(input: {
       });
     }
   } catch (error) {
+    const current = await input.store.connections.findByUserId(connection.userId);
+    if (!current || (current.status !== 'active' && current.status !== 'partial')) {
+      return false;
+    }
+    if (error instanceof TokenRefreshError && error.isAuthFailure) {
+      throw error;
+    }
+    if (error instanceof Error && /connection no longer syncable/i.test(error.message)) {
+      return false;
+    }
     for (const dataType of SNAPSHOT_SYNC_TYPES) {
       await scheduleTypeFailure({
         store: input.store,
@@ -85,6 +96,9 @@ export async function syncUserConnection(input: {
     }
   }
   const latest = (await input.store.connections.findByUserId(connection.userId)) ?? connection;
+  if (latest.status !== 'active' && latest.status !== 'partial') {
+    return false;
+  }
   const accessToken = await resolveAccessToken({
     config: input.config,
     store: input.store,
@@ -108,6 +122,7 @@ export async function syncUserConnection(input: {
     now,
     loadRecords,
     loadSnapshot,
+    extraDates: snapshotRecords ? snapshotAffectedDates(snapshotRecords) : [],
   });
   const after = await input.store.connections.findByUserId(connection.userId);
   if (after && (after.status === 'active' || after.status === 'partial')) {

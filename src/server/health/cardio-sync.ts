@@ -26,7 +26,6 @@ import {
   mapHeartRatePageToMinutes,
   mapHeartRateSamples,
   mapTimeInZoneIntervals,
-  sumDailyTimeInZone,
 } from './cardio-map';
 import type { HealthSyncCursor, HealthSyncDataType, HealthTimeZoneHistory } from './cardio-store';
 import { dataPointFilter, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from './filters';
@@ -387,6 +386,12 @@ async function ingestDailyZones(input: {
   return affected;
 }
 
+function localDayFullyInWindow(civilDate: string, utcOffsetMinutes: number, window: QueryWindow): boolean {
+  const dayStartMs = Date.parse(`${civilDate}T00:00:00.000Z`) - utcOffsetMinutes * 60_000;
+  const dayEndMs = dayStartMs + 24 * 60 * 60 * 1_000;
+  return dayStartMs >= Date.parse(window.from) && dayEndMs <= Date.parse(window.untilExclusive);
+}
+
 async function ingestTimeInZone(input: {
   store: AuthStore;
   api: HealthApiClient;
@@ -394,25 +399,41 @@ async function ingestTimeInZone(input: {
   userId: string;
   window: QueryWindow;
 }): Promise<string[]> {
-  const totals = new Map<string, { light: number; moderate: number; vigorous: number; peak: number }>();
+  const totals = new Map<string, { light: number; moderate: number; vigorous: number; peak: number; utcOffsetMinutes: number }>();
   for await (const page of input.api.iterateReconciledDataPoints({
     accessToken: input.accessToken,
     dataType: 'time-in-heart-rate-zone',
     filter: dataPointFilter('time-in-heart-rate-zone', input.window.from, input.window.untilExclusive),
   })) {
-    for (const row of sumDailyTimeInZone(input.userId, mapTimeInZoneIntervals(page.slice()))) {
-      const current = totals.get(row.date) ?? { light: 0, moderate: 0, vigorous: 0, peak: 0 };
-      current.light += row.minutes.light;
-      current.moderate += row.minutes.moderate;
-      current.vigorous += row.minutes.vigorous;
-      current.peak += row.minutes.peak;
-      totals.set(row.date, current);
+    const intervals = mapTimeInZoneIntervals(page.slice());
+    for (const interval of intervals) {
+      const current = totals.get(interval.civilDate) ?? {
+        light: 0,
+        moderate: 0,
+        vigorous: 0,
+        peak: 0,
+        utcOffsetMinutes: interval.utcOffsetMinutes,
+      };
+      const minutes = (Date.parse(interval.endTime) - Date.parse(interval.startTime)) / 60_000;
+      if (interval.heartRateZoneType === 'LIGHT') current.light += minutes;
+      else if (interval.heartRateZoneType === 'MODERATE') current.moderate += minutes;
+      else if (interval.heartRateZoneType === 'VIGOROUS') current.vigorous += minutes;
+      else current.peak += minutes;
+      totals.set(interval.civilDate, current);
     }
   }
   const affected: string[] = [];
   for (const [date, minutes] of totals) {
+    if (!localDayFullyInWindow(date, minutes.utcOffsetMinutes, input.window)) {
+      continue;
+    }
     await input.store.healthMetrics.replaceTimeInZone(
-      parseDailyTimeInZone({ userId: input.userId, sourceFamily: 'google-wearables', date, minutes }),
+      parseDailyTimeInZone({
+        userId: input.userId,
+        sourceFamily: 'google-wearables',
+        date,
+        minutes: { light: minutes.light, moderate: minutes.moderate, vigorous: minutes.vigorous, peak: minutes.peak },
+      }),
     );
     affected.push(date);
   }
@@ -639,6 +660,17 @@ export async function recomputeAffectedDays(
   }
 }
 
+export function snapshotAffectedDates(records: UserHealthRecords): string[] {
+  return [
+    ...new Set([
+      ...records.sleepSessions.map((row) => row.civilEndDate),
+      ...records.dailyHrv.map((row) => row.date),
+      ...records.dailyRhr.map((row) => row.date),
+      ...records.trainingDays.map((row) => row.date),
+    ]),
+  ];
+}
+
 export async function syncCardioConnection(input: {
   store: AuthStore;
   connection: ConnectionRow;
@@ -648,10 +680,11 @@ export async function syncCardioConnection(input: {
   dataTypes?: HealthSyncDataType[];
   loadRecords?: LoadHealthRecords;
   loadSnapshot?: LoadHealthSnapshot;
+  extraDates?: Iterable<string>;
 }): Promise<CardioSyncState> {
   const dataTypes = input.dataTypes ?? CARDIO_SYNC_TYPES;
   const succeeded: HealthSyncDataType[] = [];
-  const affected = new Set<string>();
+  const affected = new Set<string>(input.extraDates ?? []);
 
   for (const dataType of dataTypes) {
     const cursor = await input.store.healthMetrics.readCursor({
