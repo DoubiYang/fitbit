@@ -33,6 +33,7 @@ import { dataPointFilter, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from './filters'
 import type { HealthApiClient } from './health-api';
 import type { GoogleDataPoint } from './map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from './provider';
+import type { HealthSnapshot } from './snapshot-store';
 
 export const HOURLY_SYNC_MS = 60 * 60 * 1_000;
 const TWO_HOURS_MS = 2 * HOURLY_SYNC_MS;
@@ -55,6 +56,23 @@ export type CardioSyncState = {
 };
 
 export type LoadHealthRecords = (userId: string) => Promise<UserHealthRecords>;
+export type LoadHealthSnapshot = (userId: string) => Promise<HealthSnapshot | undefined>;
+
+export const SNAPSHOT_SYNC_TYPES: HealthSyncDataType[] = [
+  'sleep',
+  'daily-heart-rate-variability',
+  'daily-resting-heart-rate',
+];
+
+function recordsLoader(input: {
+  loadRecords?: LoadHealthRecords;
+  loadSnapshot?: LoadHealthSnapshot;
+}): LoadHealthRecords {
+  return (
+    input.loadRecords ??
+    (async (userId) => (await input.loadSnapshot?.(userId))?.records ?? emptyUserHealthRecords())
+  );
+}
 
 type QueryWindow = { from: string; untilExclusive: string };
 
@@ -100,7 +118,7 @@ function cursorErrorCode(error: unknown): string {
   return error instanceof Error && /health api 429/i.test(error.message) ? 'rate_limited' : 'sync_failed';
 }
 
-function successCursor(
+export function successCursor(
   now: Date,
 ): Pick<HealthSyncCursor, 'successfulWatermark' | 'lastErrorCode' | 'retryCount' | 'nextAttemptAt'> {
   return {
@@ -450,11 +468,11 @@ async function ingestDataType(input: {
     case 'exercise':
       return ingestExercise(input);
     default:
-      return [];
+      throw new Error(`unsupported cardio sync data type ${input.dataType}`);
   }
 }
 
-async function scheduleTypeFailure(input: {
+export async function scheduleTypeFailure(input: {
   store: AuthStore;
   connectionId: string;
   dataType: HealthSyncDataType;
@@ -482,10 +500,10 @@ export async function recomputeAffectedDays(
     dates: Iterable<string>;
     now: Date;
     loadRecords?: LoadHealthRecords;
+    loadSnapshot?: LoadHealthSnapshot;
   },
 ): Promise<void> {
-  const loadRecords = input.loadRecords ?? (async () => emptyUserHealthRecords());
-  const records = await loadRecords(input.userId);
+  const records = await recordsLoader(input)(input.userId);
   const history = await store.healthMetrics.listTimeZoneHistory(input.userId);
   const zone = historyAt(history, input.now.toISOString());
   const today = zone ? civilDate(input.now, zone.ianaTimeZone) : utcDate(input.now);
@@ -629,6 +647,7 @@ export async function syncCardioConnection(input: {
   now: Date;
   dataTypes?: HealthSyncDataType[];
   loadRecords?: LoadHealthRecords;
+  loadSnapshot?: LoadHealthSnapshot;
 }): Promise<CardioSyncState> {
   const dataTypes = input.dataTypes ?? CARDIO_SYNC_TYPES;
   const succeeded: HealthSyncDataType[] = [];
@@ -671,6 +690,7 @@ export async function syncCardioConnection(input: {
       dates: affected,
       now: input.now,
       loadRecords: input.loadRecords,
+      loadSnapshot: input.loadSnapshot,
     });
     for (const dataType of succeeded) {
       await inner.healthMetrics.updateCursor({

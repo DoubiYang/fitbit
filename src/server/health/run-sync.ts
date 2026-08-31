@@ -2,10 +2,16 @@ import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow } from '../auth/types';
 import { civilDateRange } from '../time/civil-date';
 import { createGoogleTokenRefresher, resolveAccessToken, type TokenRefresher } from './access-token';
-import { syncCardioConnection, type LoadHealthRecords } from './cardio-sync';
+import {
+  scheduleTypeFailure,
+  SNAPSHOT_SYNC_TYPES,
+  successCursor,
+  syncCardioConnection,
+  type LoadHealthRecords,
+} from './cardio-sync';
 import { createHealthApiClient, type HealthApiClient } from './health-api';
 import { GoogleHealthProvider } from './google-health-provider';
-import type { HealthDateRange, UserHealthRecords } from './provider';
+import { emptyUserHealthRecords, type HealthDateRange, type UserHealthRecords } from './provider';
 import { loadHealthSnapshot, saveHealthSnapshot, type HealthSnapshot } from './snapshot-store';
 
 export async function syncUserConnection(input: {
@@ -44,6 +50,9 @@ export async function syncUserConnection(input: {
 
   const api = input.api ?? createHealthApiClient();
   const refresher = input.refresher ?? createGoogleTokenRefresher(input.config);
+  const loadSnapshot =
+    input.loadSnapshot ??
+    (input.persistSnapshot ? undefined : (userId: string) => loadHealthSnapshot(input.config.databaseUrl, userId));
   const provider = new GoogleHealthProvider({
     config: input.config,
     store: input.store,
@@ -52,13 +61,29 @@ export async function syncUserConnection(input: {
     api,
     refresher,
     persistSnapshot: (records, syncedAt) => persistSnapshot(connection.userId, records, syncedAt),
-    loadSnapshot:
-      input.loadSnapshot ??
-      (input.persistSnapshot
-        ? undefined
-        : (userId) => loadHealthSnapshot(input.config.databaseUrl, userId)),
+    loadSnapshot,
   });
-  const snapshotRecords = await provider.listRecords(connection.userId, { from, to });
+  let snapshotRecords: UserHealthRecords | undefined;
+  try {
+    snapshotRecords = await provider.listRecords(connection.userId, { from, to });
+    for (const dataType of SNAPSHOT_SYNC_TYPES) {
+      await input.store.healthMetrics.updateCursor({
+        connectionId: connection.id,
+        dataType,
+        ...successCursor(now),
+      });
+    }
+  } catch (error) {
+    for (const dataType of SNAPSHOT_SYNC_TYPES) {
+      await scheduleTypeFailure({
+        store: input.store,
+        connectionId: connection.id,
+        dataType,
+        now,
+        error,
+      });
+    }
+  }
   const latest = (await input.store.connections.findByUserId(connection.userId)) ?? connection;
   const accessToken = await resolveAccessToken({
     config: input.config,
@@ -67,7 +92,14 @@ export async function syncUserConnection(input: {
     refresher,
     now,
   });
-  const loadRecords: LoadHealthRecords = input.loadRecords ?? (async () => snapshotRecords);
+  const loadRecords: LoadHealthRecords =
+    input.loadRecords ??
+    (async (userId) => {
+      if (snapshotRecords) {
+        return snapshotRecords;
+      }
+      return (await loadSnapshot?.(userId))?.records ?? emptyUserHealthRecords();
+    });
   const cardio = await syncCardioConnection({
     store: input.store,
     connection: latest,
@@ -75,6 +107,7 @@ export async function syncUserConnection(input: {
     accessToken,
     now,
     loadRecords,
+    loadSnapshot,
   });
   const after = await input.store.connections.findByUserId(connection.userId);
   if (after && (after.status === 'active' || after.status === 'partial')) {

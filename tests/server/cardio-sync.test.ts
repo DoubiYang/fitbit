@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseSleepGoal } from '../../src/domain/cardio-records';
-import { parseDailyHrv, parseSleepSession } from '../../src/domain/health-records';
+import { parseHeartRateMinuteAggregate, parseSleepGoal } from '../../src/domain/cardio-records';
+import { parseDailyHrv, parseDailyRhr, parseSleepSession } from '../../src/domain/health-records';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import type { ConnectionRow } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
@@ -406,33 +406,50 @@ test('pages flush with lookahead and a second-page 429 leaves the watermark unch
   assert.equal(cardio?.dose, 0.5);
   assert.equal(cardio?.attributedMinutes, 1);
   assert.ok(retried.cursors.find((cursor) => cursor.dataType === 'heart-rate')?.successfulWatermark);
+  const strain = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-24',
+    metricName: 'strain',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  });
+  assert.equal(strain?.score, cardio?.strain);
+  assert.equal(strain?.evidence.find((item) => item.label === '剂量')?.value, cardio?.dose);
 
   api.resetRequests();
   await runSync(store, api);
   const again = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-24' });
   const cardioAgain = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' });
+  const strainAgain = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-24',
+    metricName: 'strain',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  });
   assert.equal(again.length, 1);
   assert.equal(again[0]?.coverageSeconds, 60);
   assert.equal(again[0]?.sampleCount, 3);
   assert.equal(cardioAgain?.dose, cardio?.dose);
   assert.equal(cardioAgain?.attributedMinutes, 1);
+  assert.equal(strainAgain?.score, strain?.score);
+  assert.equal(strainAgain?.evidence.find((item) => item.label === '剂量')?.value, strain?.evidence.find((item) => item.label === '剂量')?.value);
 });
 
-test('Strain(D) recompute writes Sleep Performance and Recovery for D+1', async () => {
+test('Strain(D) recompute writes Sleep Performance and Recovery for D+1 using complete previous strain', async () => {
   const store = await seedStore({ goal: true, timeZone: 'UTC' });
-  const api = createFakeApi({
-    'heart-rate': [[hrPoint('2026-08-22T12:00:00.000Z', 110)]],
-    'activity-level': [[activityPoint('2026-08-22T12:00:00.000Z', 'LIGHTLY_ACTIVE')]],
-    'daily-heart-rate-zones': [[zonesPoint('2026-08-22')]],
+  await seedCompleteActiveDay(store, '2026-08-22');
+  await recomputeAffectedDays(store, {
+    userId,
+    dates: ['2026-08-22'],
+    now: NOW,
+    loadSnapshot: async () => ({
+      records: {
+        ...emptyUserHealthRecords(),
+        sleepSessions: [sleepSession('2026-08-23')],
+        dailyHrv: [parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 50 })],
+      },
+      syncedAt: NOW,
+    }),
   });
-  const records: UserHealthRecords = {
-    ...emptyUserHealthRecords(),
-    sleepSessions: [sleepSession('2026-08-23')],
-    dailyHrv: [
-      parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 50 }),
-    ],
-  };
-  await runSync(store, api, { records });
 
   const strain = await store.healthMetrics.getMetricResult({
     userId,
@@ -452,10 +469,14 @@ test('Strain(D) recompute writes Sleep Performance and Recovery for D+1', async 
     metricName: 'recovery',
     metricVersion: WHOOP_STYLE_METRIC_VERSION,
   });
-  assert.ok(strain);
+  const cardio = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-22' });
+  assert.equal(cardio?.status, 'complete');
+  assert.ok((strain?.score ?? 0) > 10);
   assert.ok(sleep);
   assert.ok(recovery);
   assert.equal(sleep.score !== null, true);
+  assert.equal(sleep.evidence.find((item) => item.label === 'Strain补偿')?.value, 30);
+  assert.equal(sleep.evidence.find((item) => item.label === '动态需求')?.value, 570);
 });
 
 test('a 429 on one type schedules only that cursor while another type advances', async () => {
@@ -629,3 +650,118 @@ test('recomputeAffectedDays reads only persisted inputs', async () => {
 function healthMetricsHasRawSamples(store: ReturnType<typeof createMemoryStore>): boolean {
   return Object.keys(store.healthMetrics).some((name) => /sample/i.test(name));
 }
+
+async function seedCompleteActiveDay(store: ReturnType<typeof createMemoryStore>, civilDate: string): Promise<void> {
+  const minutes = Array.from({ length: 1440 }, (_, localMinuteOfDay) =>
+    parseHeartRateMinuteAggregate({
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: new Date(Date.parse(`${civilDate}T00:00:00.000Z`) + localMinuteOfDay * 60_000).toISOString(),
+      civilDate,
+      utcOffsetMinutes: 0,
+      ianaTimeZone: 'UTC',
+      localMinuteOfDay,
+      avgBpm: 110,
+      minBpm: 110,
+      maxBpm: 110,
+      sampleCount: 4,
+      coverageSeconds: 60,
+      activityLevel: 'LIGHTLY_ACTIVE',
+    }),
+  );
+  await store.healthMetrics.upsertMinutes(minutes);
+  await store.healthMetrics.upsertActivityLevelIntervals([
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      startTime: `${civilDate}T00:00:00.000Z`,
+      endTime: `${addCivilDays(civilDate, 1)}T00:00:00.000Z`,
+      activityLevelType: 'LIGHTLY_ACTIVE',
+    },
+  ]);
+  await store.healthMetrics.replaceHeartRateZones({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: civilDate,
+    zones: {
+      LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
+      MODERATE: { minBeatsPerMinute: 117, maxBeatsPerMinute: 136 },
+      VIGOROUS: { minBeatsPerMinute: 137, maxBeatsPerMinute: 155 },
+      PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
+    },
+  });
+}
+
+test('recomputeAffectedDays uses loadSnapshot sleep HRV and RHR when loadRecords is omitted', async () => {
+  const store = await seedStore({ timeZone: 'UTC', goal: true });
+  await store.healthMetrics.upsertMinutes([
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-22T12:00:00.000Z',
+      civilDate: '2026-08-22',
+      utcOffsetMinutes: 0,
+      ianaTimeZone: 'UTC',
+      localMinuteOfDay: 720,
+      avgBpm: 70,
+      minBpm: 70,
+      maxBpm: 70,
+      sampleCount: 4,
+      coverageSeconds: 60,
+      activityLevel: 'SEDENTARY',
+    },
+  ]);
+  await store.healthMetrics.replaceHeartRateZones({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-08-22',
+    zones: {
+      LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
+      MODERATE: { minBeatsPerMinute: 117, maxBeatsPerMinute: 136 },
+      VIGOROUS: { minBeatsPerMinute: 137, maxBeatsPerMinute: 155 },
+      PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
+    },
+  });
+  await recomputeAffectedDays(store, {
+    userId,
+    dates: ['2026-08-22'],
+    now: NOW,
+    loadSnapshot: async () => ({
+      records: {
+        ...emptyUserHealthRecords(),
+        sleepSessions: [sleepSession('2026-08-23', { minutesAsleep: 390 })],
+        dailyHrv: [parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 61 })],
+        dailyRhr: [parseDailyRhr({ userId, source: 'google_health', sourceRecordId: 'rhr-23', date: '2026-08-23', valueBpm: 52 })],
+      },
+      syncedAt: NOW,
+    }),
+  });
+
+  const sleep = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-23',
+    metricName: 'sleep_performance',
+  });
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.equal(sleep?.evidence.find((item) => item.label === '实际睡眠')?.value, 390);
+  assert.notEqual(sleep?.score, null);
+  assert.equal(recovery?.source.hrv, true);
+  assert.equal(recovery?.source.rhr, true);
+});
+
+test('sleep HRV and RHR are not silently marked successful by cardio ingest', async () => {
+  const store = await seedStore();
+  const api = createFakeApi();
+  await runSync(store, api, {
+    dataTypes: ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate'],
+  });
+  for (const dataType of ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate'] as const) {
+    const cursor = await store.healthMetrics.readCursor({ connectionId, dataType });
+    assert.equal(cursor?.successfulWatermark, undefined);
+    assert.equal(cursor?.lastErrorCode, 'sync_failed');
+  }
+});

@@ -544,3 +544,153 @@ test('a 48-hour refresh does not drop a 20-day-old HRV snapshot', async () => {
     false,
   );
 });
+
+test('mergeHealthRecords keeps a sleep session by sourceRecordId and lets the same id replace minutesAsleep', () => {
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const sessionA = {
+    userId: 'u1',
+    source: 'google_health' as const,
+    sourceRecordId: 'sleep-a',
+    id: 'sleep-a',
+    startTime: '2026-08-22T22:00:00.000Z',
+    endTime: '2026-08-23T06:00:00.000Z',
+    civilEndDate: '2026-08-23',
+    utcOffsetMinutes: 0,
+    minutesAsleep: 300,
+    timeInBedMinutes: 360,
+    awakeMinutes: 60,
+    isNap: false,
+    processed: true,
+  };
+  const sessionB = {
+    ...sessionA,
+    sourceRecordId: 'sleep-b',
+    id: 'sleep-b',
+    minutesAsleep: 410,
+  };
+  const kept = mergeHealthRecords(
+    { ...emptyUserHealthRecords(), sleepSessions: [sessionA] },
+    { ...emptyUserHealthRecords(), sleepSessions: [sessionB] },
+    { retainCivilDays: 35, now },
+  );
+  assert.deepEqual(
+    kept.sleepSessions.map((row) => [row.sourceRecordId, row.minutesAsleep]),
+    [
+      ['sleep-a', 300],
+      ['sleep-b', 410],
+    ],
+  );
+  const replaced = mergeHealthRecords(
+    { ...emptyUserHealthRecords(), sleepSessions: [sessionA] },
+    { ...emptyUserHealthRecords(), sleepSessions: [{ ...sessionA, minutesAsleep: 400 }] },
+    { retainCivilDays: 35, now },
+  );
+  assert.deepEqual(
+    replaced.sleepSessions.map((row) => [row.sourceRecordId, row.minutesAsleep]),
+    [['sleep-a', 400]],
+  );
+});
+
+test('a 48-hour sleep refresh keeps an older session and replaces the same sourceRecordId', async () => {
+  const config = loadConfig({
+    DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+    GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+    TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
+    APP_ORIGIN: 'http://localhost:3000',
+  });
+  assert.equal(config.kind, 'oauth');
+  if (config.kind !== 'oauth') {
+    return;
+  }
+  const store = createMemoryStore();
+  const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, key, 'c8', 'u8');
+  const connection = {
+    id: 'c8',
+    userId: 'u8',
+    healthUserId: 'h8',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2099-01-08T00:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active' as const,
+    lastErrorCode: undefined,
+    connectedAt: new Date('2026-08-24T00:00:00.000Z'),
+    updatedAt: new Date('2026-08-24T00:00:00.000Z'),
+    lastSuccessfulSyncAt: new Date('2026-08-23T12:00:00.000Z'),
+  };
+  await store.users.insert('u8');
+  await store.connections.insert(connection);
+  const existing: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    sleepSessions: [
+      {
+        userId: 'u8',
+        source: 'google_health',
+        sourceRecordId: 'sleep-a',
+        id: 'sleep-a',
+        startTime: '2026-08-21T22:00:00.000Z',
+        endTime: '2026-08-22T06:00:00.000Z',
+        civilEndDate: '2026-08-22',
+        utcOffsetMinutes: 0,
+        minutesAsleep: 300,
+        timeInBedMinutes: 360,
+        awakeMinutes: 60,
+        isNap: false,
+        processed: true,
+      },
+    ],
+  };
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const provider = new GoogleHealthProvider({
+    config,
+    store,
+    connection,
+    now,
+    loadSnapshot: async () => ({ records: existing, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    persistSnapshot: async () => {},
+    api: {
+      async *iterateReconciledDataPoints() {},
+      async listDataPoints(input) {
+        if (input.dataType !== 'sleep') {
+          return [];
+        }
+        return [
+          {
+            name: 'sleep-b',
+            sleep: {
+              type: 'STAGES',
+              interval: {
+                startTime: '2026-08-22T22:00:00.000Z',
+                endTime: '2026-08-23T06:00:00.000Z',
+                endUtcOffset: '0s',
+                civilEndTime: { date: { year: 2026, month: 8, day: 23 } },
+              },
+              metadata: { nap: false, processed: true },
+              summary: { minutesAsleep: '410', minutesInSleepPeriod: '480', minutesAwake: '70' },
+            },
+          },
+        ];
+      },
+    },
+    refresher: {
+      async refresh() {
+        throw new Error('should not refresh');
+      },
+    },
+  });
+
+  const records = await provider.listRecords('u8', range);
+  assert.deepEqual(
+    records.sleepSessions.map((row) => [row.sourceRecordId, row.minutesAsleep]),
+    [
+      ['sleep-a', 300],
+      ['sleep-b', 410],
+    ],
+  );
+});
