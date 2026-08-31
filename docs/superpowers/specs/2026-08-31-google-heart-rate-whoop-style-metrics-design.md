@@ -45,7 +45,7 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 ### 2.2 降级规则
 
 1. 有 Google 当日区间和 `time-in-heart-rate-zone` 的按日合计：展示完整日的全天区间时长；它不是 Strain 输入。交叉校验只记录差异，不因此改写剂量。
-2. Strain 只接受“可归因活动”的心率分钟：该分钟与 `activity-level` 的 `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE` 重叠至少 30 秒，且 **不与任何睡眠会话重叠**；或与已知 `exercise` 会话重叠至少 30 秒（锻炼可覆盖睡眠/静止）。`SEDENTARY` 以及睡眠中的 `LIGHTLY_ACTIVE` 不进剂量。缺少活动分钟时，即使有全天区间合计，也不出全天 Strain。
+2. Strain 只接受“可归因活动”的心率分钟：该分钟与 `activity-level` 的 `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE` 重叠至少 30 秒，且 **不与任何睡眠会话（含午睡）重叠**；或与已知 `exercise` 会话重叠至少 30 秒（锻炼可覆盖睡眠/静止）。`SEDENTARY` 以及睡眠中的任何 `activity-level` 都不进剂量。缺少活动分钟时，即使有全天区间合计，也不出全天 Strain。
 3. 当日区间缺失：不伪造个人化区间、不用历史最高心率替代；全天 Strain 显示“心率区间未提供”，只展示原始心率或已知锻炼。
 4. 当前未结束日，以及**已过去但不完整、却有可归因活动分钟**的日期，可以显示带 `provisional` 标签的 Strain，必须标明不可与完整日直接比较。过去日不得把覆盖不足算成 0.0。
 5. 本账户 raw `heart-rate` 没有 `motionContext`。不得把缺失 metadata 当作静止来出 0.0。已知-context 覆盖改由 `activity-level` 分钟提供；没有 `activity-level` 覆盖的心率分钟是 unknown。`activity-level` 也缺失时，Strain 只从 `exercise` 重叠分钟给出 `provisional`，并显示“活动上下文未提供”。
@@ -65,18 +65,20 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 
 为支持全天指标，原始心率点仅在一次同步计算期间保留在内存。数据库只保存：
 
-- 每分钟的聚合心率（分钟、平均/最小/最大 bpm、样本数、motion context、覆盖秒数）；
+- 每分钟的聚合心率（分钟、平均/最小/最大 bpm、样本数、主导 `activity-level`、覆盖秒数）；
+- `activity-level` 60 秒 interval；
 - 每日 Google 区间阈值及各区间时长；
 - 每日指标结果、计算版本、质量、输入来源及解释证据；
 - 同步水位、完整性与失败状态。
 
-新增持久化模型如下；所有 Google 数据只接受已配置的 `google-wearables` source family，绝不将不同 source family 的样本混合成同一分钟或同一天。
+新增持久化模型如下；所有 Google 数据只接受已配置的 `google-wearables` source family，绝不将不同 source family 的样本混合成同一分钟或同一天。raw `heart-rate` 与 `activity-level` 的 reconcile 点实测常常没有 `name`，不得依赖 data point ID 做幂等键。
 
 | 表 | 唯一键 | 责任 |
 | --- | --- | --- |
-| `heart_rate_minute_aggregates` | `(user_id, source_family, minute_start_utc)` | 单分钟的平均/最小/最大 bpm、覆盖秒数、样本数、主导 motion context、历史 civil date 与 UTC offset；不保存原始点。 |
+| `heart_rate_minute_aggregates` | `(user_id, source_family, minute_start_utc)` | 单分钟的平均/最小/最大 bpm、覆盖秒数、样本数、主导 `activity-level`、历史 civil date 与 UTC offset；不保存原始点。 |
+| `activity_level_intervals` | `(user_id, source_family, interval_start_utc)` | 60 秒 `SEDENTARY` / `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE` interval；用于已知-context 与 Strain 归因。 |
 | `daily_heart_rate_zones` | `(user_id, source_family, civil_date)` | 当天 Google 阈值及从 API 接收时刻；后续修订覆盖该日最新阈值。 |
-| `daily_time_in_zone` | `(user_id, source_family, civil_date)` | Google 全天区间时长，专用于展示和交叉校验。 |
+| `daily_time_in_zone` | `(user_id, source_family, civil_date)` | 由 60 秒 `time-in-heart-rate-zone` interval 加总的全天区间时长，专用于展示和交叉校验。 |
 | `exercise_intervals` | `(user_id, source_family, source_record_id)` | 已确认锻炼的起止 UTC 时间、当时 offset 和 civil date；用于将未知-context 的心率分钟可靠归因活动。 |
 | `daily_cardio` | `(user_id, civil_date)` | 活动归因后的分区分钟数、覆盖率、完成状态、全天/进行中 Strain 及来源。 |
 | `health_sync_cursors` | `(connection_id, data_type)` | 每种数据类型的成功水位、最后错误和重试状态。 |
@@ -84,15 +86,17 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 | `user_sleep_goal_history` | `(user_id, effective_civil_date)` | 用户手动确认的基础睡眠目标（分钟）及其生效日；不以之后的设置重写历史指标。 |
 | `user_health_time_zone_history` | `(user_id, effective_at)` | 来自用户已登录设备的 IANA 时区及其生效时间；首条可标记为历史回填锚点，用于 DST 的墙上时间分段和设置生效日。 |
 
-首次回填尚未知道用户的健康时区时，原始心率按 `now − 37 × 24h` 至 `now` 的 UTC 物理时间读取；每日记录请求 UTC 当前日期前 36 日至当前日期后 1 日的宽窗口，再以 API 返回的 `date` / sample offset 确定实际当地日。这比固定 `Asia/Shanghai` 更宽，能够覆盖任何合法 UTC offset 下最近 35 个当地日。之后只用各数据类型的 UTC cursor 拉取，再以记录自身 offset 归日。
+首次回填尚未知道用户的健康时区时，原始心率和 `activity-level` 按 `now − 37 × 24h` 至 `now` 的 UTC 物理时间读取；每日记录请求 UTC 当前日期前 36 日至当前日期后 1 日的宽窗口，再以 API 返回的 `date` / sample offset 确定实际当地日。这比固定 `Asia/Shanghai` 更宽，能够覆盖任何合法 UTC offset 下最近 35 个当地日。之后只用各数据类型的 UTC cursor 拉取，再以记录自身 offset 归日。
 
 原始样本的 offset/civil time 足以归属当地日期，但不足以可靠判定 DST 的 23/25 小时长度。已登录客户端必须把 `Intl.DateTimeFormat().resolvedOptions().timeZone` 作为 IANA 时区历史写入 `user_health_time_zone_history`；每个样本日使用当时最新、且 offset 匹配的时区记录进行墙上时间分段和 DST 判断。没有匹配 IANA 时区、或时区与样本 offset 冲突时，仍保存聚合/展示数据，但该日必须标记 `timezone_ambiguous`、不满足 Strain 完整日条件。旅行时客户端写入新时区历史；未知旅行不能被假定为原时区。
 
 首次成功写入 IANA 时区后，服务端必须在**同一数据库事务**中对本地已保存的历史分钟聚合执行一次本地重索引，不等待下一轮 API 拉取：若该用户此前没有时区历史，首条记录以最早已保存分钟的 UTC instant（没有分钟则以写入时刻）作为 `effective_at`，并标记为“历史回填锚点”。它可覆盖已有历史窗口；逐分钟用该 IANA 时区在该 UTC instant 的实际 offset 与存储的 `utc_offset` 比较，只有一致的分钟才写入 IANA 时区、按该区间重建当地日期/墙上时间覆盖，并重算受影响的 `daily_cardio` 和 `whoop-style-v2` 结果。后续时区记录以客户端上报时刻为 `effective_at`，只重索引其 `effective_at` 至下一条时区记录的范围，且不得跨越已有时区边界。offset 不一致的分钟仍保持 `timezone_ambiguous`，不猜测、不重新下载原始点。这样 OAuth 回调先完成 35 日同步、浏览器随后才上报时区时，匹配的历史日也能立即取得完整日资格；旅行中的不匹配日期仍安全地不可出完整 Strain。
 
-首次 35 日回填的 `heart-rate` 必须按当地日分段并分页处理。`reconcile` 的 `pageSize` 用 10000（API 上限），禁止沿用睡眠/训练的 25。每一页转为分钟聚合前，必须保留上一页最后一个样本作为 lookahead，才能计算“延伸到下一样本、最长 75 秒”；页末样本在看到下一页首点（或窗口结束）之前不得 flush 该分钟。同一 UTC 分钟的覆盖按时间并段合并，禁止把两页的覆盖秒数直接相加。flush 后才能释放该页原始点；不得把 35 天高频样本或完整 API JSON 一次性装入内存。`exercise` 同步也必须 upsert `exercise_intervals`，然后重算其覆盖的每个当地日期；原始心率和 exercise 无论谁先到达，都必须得到同一日归因结果。任一当地日的 Strain 重算成功后，必须级联重算下一当地日的 Sleep Performance 和 Recovery（它们依赖 `Strain(D−1)`）。
+首次 35 日回填的 `heart-rate` 必须按当地日分段并分页处理。`reconcile` 的 `pageSize` 用 10000（API 上限），禁止沿用睡眠/训练的 25。实测采样约 1–3 秒一点，35 日量级可达百万点，必须分页且按页释放。每一页先按 `physicalTime` 升序，并保留上一页最后一个样本作为 lookahead，才能计算“延伸到下一个更晚样本、最长 75 秒”；页末样本在看到下一页首点（或窗口结束）之前不得 flush 该分钟。同一 UTC 分钟的覆盖按时间并段合并，禁止把两页的覆盖秒数直接相加。flush 后才能释放该页原始点；不得把 35 天高频样本或完整 API JSON 一次性装入内存。`heart-rate` 的 `list` 对本账户返回 400，只走 `reconcile`。
 
-用户在账户设置中断开 Google Health 连接时，即使 `users` 和断开状态的 connection 行仍保留，也必须在同一事务中显式删除该用户的 `heart_rate_minute_aggregates`、每日区间/时长、`exercise_intervals`、`daily_cardio`、`metric_results`、sync cursors、睡眠目标/时区历史和既有 `health_snapshots`，并清除连接凭证。账户删除则同时通过外键级联完成同样清理。
+`activity-level` 用同样的 UTC 宽窗口和 2 小时重叠 cursor，`pageSize` 可用 10000（约每分钟一条）。`exercise` 同步 upsert `exercise_intervals`。心率、`activity-level` 和 exercise 无论谁先到达，都必须得到同一日归因结果。任一当地日的 Strain 重算成功后，必须级联重算下一当地日的 Sleep Performance 和 Recovery（它们依赖 `Strain(D−1)`）。
+
+用户在账户设置中断开 Google Health 连接时，即使 `users` 和断开状态的 connection 行仍保留，也必须在同一事务中显式删除该用户的 `heart_rate_minute_aggregates`、`activity_level_intervals`、每日区间/时长、`exercise_intervals`、`daily_cardio`、`metric_results`、sync cursors、睡眠目标/时区历史和既有 `health_snapshots`，并清除连接凭证。账户删除则同时通过外键级联完成同样清理。
 
 不保存单个未聚合原始心率样本，不将 token、完整 API 原始 JSON 或分钟数据传给 AI Coach。用户删除连接或账户时，连接令牌和对应健康聚合数据必须按账户删除流程一并清除。
 
@@ -124,7 +128,7 @@ Strain 代表全天可观测的**心肺**负荷，包含命名锻炼和日常活
 4. **剂量层：** 对活动分钟按由低到峰的固定系数 `0.5 / 1 / 2 / 3` 累积：`dose = 0.5 × light + 1 × moderate + 2 × vigorous + 3 × peak`。该做法借鉴 Edwards TRIMP 的区间递增原则；轻区间系数特意更低，以适配全天而非单次训练的统计范围。
 5. **展示层：** `strain = roundHalfAwayFromZeroToOneDecimal(min(21, 21 × (1 − exp(−dose / 140))))`。`roundHalfAwayFromZeroToOneDecimal` 即 `Math.round(x * 10) / 10`。低于当天 `light.min` 或高于 `peak.max` 的活动分钟不产生剂量。这个固定的递减收益映射使额外负荷在高端需要更大的剂量；它不是 Google/WHOOP 的私有公式，也不使用用户历史最高心率。
 
-`whoop-style-v2` 的上述系数、分母、四舍五入和数据质量规则全部冻结。后续若要调整，新增版本并保留旧结果，绝不静默改写趋势。离线回放必须验证分数随剂量单调、静止低心率不会增加剂量，并与已知锻炼区间时长方向一致。ACTIVE 全天低强度步行会把分数顶到高端，必须以真实 Fitbit Air 的 ACTIVE 密度标定后再冻结展示文案，不得在标定前把 18+ 说成“极高训练日”。
+`whoop-style-v2` 的上述系数、分母、四舍五入和数据质量规则全部冻结。后续若要调整，新增版本并保留旧结果，绝不静默改写趋势。离线回放必须验证分数随剂量单调、`SEDENTARY` 与睡眠重叠分钟不会增加剂量，并与已知锻炼区间时长方向一致。清醒时段大量 `LIGHTLY_ACTIVE` 会把分数顶到高端，必须以真实 Fitbit Air 的活动密度标定后再冻结展示文案，不得在标定前把 18+ 说成“极高训练日”。空隙上的整数 bpm（`zone.max < bpm < next.min`）不产生剂量。
 
 ### 4.3 显示与数据量
 
@@ -208,12 +212,12 @@ AI 只读取服务端构建的短生命周期 `coach_context`：当前三个指�
 
 上线前必须完成以下验证：
 
-1. **API 映射：** 用真实授权账户验证原始心率、每日区间与区间时长是否可用，特别验证 Fitbit Air 样本是否足以提供 `motionContext`；记录实际返回形态，不把 API 文档假设写成数据事实。
+1. **API 映射：** 以第 9 节已记录的 Fitbit Air 形态为准：raw HR 无 `metadata`、必须 `reconcile`、倒序；`activity-level` 替代活动上下文；四段区间闭区间且相邻空 1 bpm；`time-in-heart-rate-zone` 按 60 秒 interval 加总。测试夹具必须复现这些形态，不得再写 `motionContext=ACTIVE` 或共享边界。
 2. **数据一致性：** 同日图表、区间时长、Strain 和 Coach 引用使用同一份当天 Google 区间阈值和 `google-wearables` source family；旅行/DST 后不会用今天的时区重写旧日。缺可信 IANA 时区时，该日只能展示、不能成为完整日；首个匹配 IANA 时区写入后，已保存的匹配历史分钟必须本地重索引并使符合其他规则的历史日可出完整 Strain，offset 不匹配的日期仍保持 `timezone_ambiguous`。
 3. **去重与迟到数据：** 重叠窗口重复同步不会重复增加分钟或时长；睡眠/日指标修订会更新相应日期。原始心率第二页失败时成功水位不变、重试后不缺失/不重复；单类型失败保留其错误和退避，其他类型可成功推进。
-4. **全天低区间保护：** 静止的低区间时长只展示、不进入 Strain 剂量；无可归因活动分钟时完整日 Strain 为 0，覆盖不足时为未知而非 0；过去不完整日若有活动分钟可出 `provisional`，不可出 0.0。
+4. **全天低区间保护：** `SEDENTARY`、睡眠重叠的 `LIGHTLY_ACTIVE` 以及 `time-in-heart-rate-zone` 全天 LIGHT 时长只展示、不进入 Strain 剂量；无可归因活动分钟时完整日 Strain 为 0，覆盖不足时为未知而非 0；过去不完整日若有活动分钟可出 `provisional`，不可出 0.0。
 5. **基线门槛：** 每个生理字段在 7 个历史有效日后可参与 provisional Recovery；HRV + Sleep 可在 RHR 基线不足时出分；HRV + RHR 可在没有睡眠目标时出分；28 日后升为稳定；Strain 不受该门槛阻塞。
-6. **覆盖不足：** 对 30/75 秒分钟规则、跨页 lookahead、缺失 `motionContext`、480/120 分钟已知-context 覆盖阈值、三段各 90 分钟及 240 分钟最大缺口、180/90 分钟最新样本阈值、DST 23/25 小时日写单元测试；缺区间、缺心率或同步失败时不输出“偏低”、不把未知算作零。
+6. **覆盖不足：** 对 30/75 秒分钟规则、倒序分页升序、跨页 lookahead、缺失 `activity-level`、睡眠重叠排除、480/120 分钟已知-context 覆盖阈值、三段各 90 分钟及 240 分钟最大缺口、180/90 分钟最新样本阈值、DST 23/25 小时日写单元测试；缺区间、缺心率或同步失败时不输出“偏低”、不把未知算作零。
 7. **睡眠目标与睡眠债：** 无目标不出 Sleep Performance，但仍可出 HRV+RHR Recovery；300、900 边界值可保存；设置在当地日 `T` 后只从 `T+1` 的主睡眠生效。睡眠债覆盖 7 个日历日，取最长非午睡分钟（可低于 180）；没有非午睡日按 0 计债并标记 `sleep_history_incomplete`，不得整段清零。Strain(D) 变化必须重算 Sleep/Recovery(D+1)。
 8. **可重放：** 对固定输入断言精确的 dose、0.1 Strain、取整后的动态睡眠需求和整数 Recovery；偶数窗口的 median 取中位平均；同一份聚合输入、相同 `metricVersion: whoop-style-v2` 得到完全相同的结果，算法调整只产生新版本。
 9. **安全：** Coach 和首页都不把 Recovery 当成高强度训练许可；低质量数据不生成个性化高强度建议，不诊断或承诺训练安全。
@@ -227,8 +231,9 @@ AI 只读取服务端构建的短生命周期 `coach_context`：当前三个指�
 - 睡眠/HRV/RHR 的 `utcOffsetMinutes` 全部为 `+480`。
 - raw `heart-rate` 可用：有 `sampleTime.physicalTime` / `utcOffset` / `civilTime` / `beatsPerMinute`；点上 **没有** `metadata`，因此没有 `motionContext`。`list` 对该类型返回 400，必须用 `reconcile`。结果倒序，相邻点间隔约 1–3 秒。
 - `daily-heart-rate-zones` 四段齐全（LIGHT / MODERATE / VIGOROUS / PEAK），`min ≤ max`，相邻为 **1 bpm 空隙**，不是共享边界。snake_case filter 可用，camelCase 返回 400。
-- `time-in-heart-rate-zone` 是 60 秒 interval，近期窗口第一页几乎全是 LIGHT；当前 `dailyRollUp` 请求返回 0 条，一期按 interval 加总。
-- `activity-level` 可用，60 秒一段。清醒窗口见到 `SEDENTARY` 与 `LIGHTLY_ACTIVE`；睡眠窗口也会出现 `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE`，所以睡眠重叠必须从 Strain 剂量里排除。
+- `time-in-heart-rate-zone` 是 60 秒 interval，没有独立 `duration` 字段，用 `interval.startTime/endTime` 计长；近期窗口第一页几乎全是 LIGHT；当前 `dailyRollUp` 请求返回 0 条，一期按 interval 加总。
+- `activity-level` 可用，60 秒一段，点上常见字段只有 `activityLevel.interval` 与 `activityLevelType`。清醒窗口见到 `SEDENTARY` 与 `LIGHTLY_ACTIVE`；睡眠窗口也会出现 `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE`，所以睡眠重叠必须从 Strain 剂量里排除。
+- raw `heart-rate` 点常见顶层只有 `heartRate`，没有 `name`；幂等键用 UTC 分钟，不用 data point 名。
 - 日 RMSSD 日间 MAD 远小于旧 5 ms floor，HRV floor 为 2 ms。
 - 无锻炼日被旧快照标成 `complete` + `load=0`，不能搬到 Strain。
 - 测试模式 refresh token 约 7 天过期；过期后账户页「重新授权」，不要断开连接。

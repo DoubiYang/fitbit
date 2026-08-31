@@ -4,7 +4,7 @@
 
 **Goal:** Build Google-heart-rate-backed, transparent daily Strain, Recovery, and Sleep Performance metrics with hourly per-user sync and safe dashboard/coach output.
 
-**Architecture:** Keep the existing `health_snapshots` as the low-frequency record cache for sleep, daily HRV, daily RHR, and exercise, but merge incremental results instead of replacing history. Add normalized persistence only for minute heart-rate aggregates, Google daily zones/time-in-zone, metric results, sleep-goal history, and per-type cursors. The hourly worker streams raw heart-rate data into minute aggregates, then a pure domain layer computes the three versioned metrics for the dashboard read model.
+**Architecture:** Keep the existing `health_snapshots` as the low-frequency record cache for sleep, daily HRV, daily RHR, and exercise, but merge incremental results instead of replacing history. Add normalized persistence for minute heart-rate aggregates, `activity-level` intervals, Google daily zones/time-in-zone totals, metric results, sleep-goal history, and per-type cursors. The hourly worker streams raw heart-rate into minute aggregates, joins persisted `activity-level` and sleep/exercise intervals, then a pure domain layer computes the three versioned metrics.
 
 **Tech Stack:** Next.js/TypeScript, PostgreSQL (`pg`), existing Google Health REST OAuth client, Node test runner via `tsx --test`.
 
@@ -15,9 +15,9 @@
 ## Locked implementation rules
 
 - Google `daily-heart-rate-zones` are the only HR-zone thresholds. Never infer max HR from history or write hard-coded bpm thresholds.
-- `time-in-heart-rate-zone` is an interval type. Persist daily totals via `dailyRollUp` or summed intervals. It is display/validation data only. Daily Strain is calculated from raw, activity-attributable minute aggregates.
+- `time-in-heart-rate-zone` is a 60-second interval type with start/end times and no `duration` field. Persist daily totals by summing intervals. Do not use `dailyRollUp` (it returned empty for this account). It is display/validation data only. Daily Strain is calculated from raw, activity-attributable minute aggregates.
 - List/reconcile filters use snake_case (`heart_rate.sample_time.physical_time`, `daily_heart_rate_zones.date`, `time_in_heart_rate_zone.interval.start_time`, `activity_level.interval.start_time`). JSON bodies stay camelCase. Raw HR pages are newest-first and must be sorted ascending before hold-to-next-sample. Daily zones are inclusive `[min, max]` with a 1 bpm gap between adjacent zones; do not require `max = next.min`.
-- Raw heart-rate `reconcile` uses `pageSize=10000`. Sleep/exercise stay at 25.
+- Raw heart-rate and `activity-level` `reconcile` use `pageSize=10000`. Heart-rate `list` returns 400 on this account; do not call it. Sleep/exercise stay at 25. Heart-rate samples are about 1–3 seconds apart and newest-first.
 - Minute aggregation keeps a one-sample lookahead across page boundaries and merges coverage intervals for the same UTC minute. Do not add coverage seconds from two pages.
 - This Fitbit Air account does not send `heartRate.metadata.motionContext`. Use `activity-level` 60-second intervals for known-context and activity attribution. `SEDENTARY` is rest. `LIGHTLY_ACTIVE` / `MODERATELY_ACTIVE` / `VERY_ACTIVE` are activity only when they do not overlap a sleep session. Exercise overlap can still attribute a minute. Missing `activity-level` is unknown, not rest, and cannot yield `0.0` Strain.
 - Past incomplete days with attributed activity minutes may show labeled `provisional` Strain. `0.0` is only for a complete rest day.
@@ -43,7 +43,7 @@
 | `src/domain/metric-types.ts` | v2 quality/status vocabulary and dashboard-facing metric types. |
 | `src/server/health/health-api.ts` | Page-by-page reconciled data-point iterator; it must not collect raw HR pages. |
 | `src/server/health/filters.ts` | Typed Google Health filters for raw HR, daily zones, time in zone, and legacy low-frequency records. |
-| `src/server/health/cardio-map.ts` | Google API point parsing into minute spans, zones, time-in-zone, and exercise intervals. |
+| `src/server/health/cardio-map.ts` | Google API point parsing into minute spans, activity-level intervals, zones, time-in-zone, and exercise intervals. |
 | `src/server/health/cardio-store.ts` | Store contract and query/read-model helpers for v2 health data. |
 | `src/server/health/cardio-sync.ts` | Cursor windows, day-bounded streaming ingest, atomic writes, and metric recomputation. |
 | `src/server/health/cardio-reindex.ts` | Local, offset-validated time-zone reindex and metric recomputation without a Google API request. |
@@ -66,11 +66,11 @@
 
 - [ ] **Step 1: Write a mocked redaction test for the capability probe.**
 
-  The probe may report only counts, dates, data-type availability, zone labels, and whether `motionContext` is present. Assert it cannot print an access token, BPM value, raw data-point name, full response object, or raw sample timestamp.
+  The probe may report only counts, dates, data-type availability, zone labels, activity-level types, and whether `metadata.motionContext` is present. Assert it cannot print an access token, BPM value, raw data-point name, full response object, or raw sample timestamp.
 
 - [ ] **Step 2: Implement the one-shot local probe.**
 
-  Resolve the authorized connection through the existing encrypted-token path and query `heart-rate`, `daily-heart-rate-zones`, and `time-in-heart-rate-zone` over a small recent window. It is a developer-only script, not an API route; it must reuse `google-wearables` source restriction and exit nonzero on an API error.
+  Resolve the authorized connection through the existing encrypted-token path and query `heart-rate`, `activity-level`, `daily-heart-rate-zones`, and `time-in-heart-rate-zone` over a small recent window. It is a developer-only script, not an API route; it must reuse `google-wearables` source restriction and exit nonzero on an API error.
 
 - [ ] **Step 3: Run it against the user's authorized local Fitbit Air account.**
 
@@ -147,19 +147,19 @@
 
 - [ ] **Step 1: Write failing store-contract tests.**
 
-  Cover user isolation, minute upsert by `(user, source family, UTC minute)`, zone replacement by local date, cursor update in the same transaction as a metric write, historical goal/time-zone lookup, and cascade deletion. Assert that stores accept minute aggregates but have no operation for raw sample persistence.
+  Cover user isolation, minute upsert by `(user, source family, UTC minute)`, `activity_level_intervals` upsert by `(user, source family, interval start UTC)`, zone replacement by local date, cursor update in the same transaction as a metric write, historical goal/time-zone lookup, and cascade deletion. Assert that stores accept minute aggregates but have no operation for raw sample persistence.
 
 - [ ] **Step 2: Add migration 010.**
 
-  Create the nine tables named in the spec, including `exercise_intervals`, `user_sleep_goal_history`, and `user_health_time_zone_history`. `heart_rate_minute_aggregates` must retain its API-derived `civil_date`, `utc_offset`, and nullable `iana_time_zone`, so reindexing can update only verified minutes. Use `users(id) ON DELETE CASCADE`, a connection foreign key with cascade for cursors, JSONB only for threshold/result/evidence payloads, and indexes on `(user_id, civil_date DESC)` and due cursor lookup. `health_sync_cursors` must include `successful_watermark`, `last_error_code`, `retry_count`, and `next_attempt_at`. Add `CHECK (goal_minutes BETWEEN 300 AND 900)`, a unique `(user_id, effective_civil_date)` key, and a time-zone-history unique `(user_id, effective_at)` key plus an `is_backfill_anchor` flag for the first IANA record.
+  Create the ten tables named in the spec, including `activity_level_intervals`, `exercise_intervals`, `user_sleep_goal_history`, and `user_health_time_zone_history`. `heart_rate_minute_aggregates` must retain its API-derived `civil_date`, `utc_offset`, and nullable `iana_time_zone`, so reindexing can update only verified minutes. Use `users(id) ON DELETE CASCADE`, a connection foreign key with cascade for cursors, JSONB only for threshold/result/evidence payloads, and indexes on `(user_id, civil_date DESC)` and due cursor lookup. `health_sync_cursors` must include `successful_watermark`, `last_error_code`, `retry_count`, and `next_attempt_at`. Add `CHECK (goal_minutes BETWEEN 300 AND 900)`, a unique `(user_id, effective_civil_date)` key, and a time-zone-history unique `(user_id, effective_at)` key plus an `is_backfill_anchor` flag for the first IANA record.
 
 - [ ] **Step 3: Extend the typed store contract and in-memory implementation.**
 
-  Add a separate `healthMetrics` namespace to `AuthStore` with methods for transactional ingestion, cursor reads/update/schedule, exercise-interval upsert/query, read-model queries, metric-result upserts, sleep-goal lookup/insert, time-zone-history lookup/insert, a range query/update for local time-zone reindexing, and `deleteForUser`. Mirror exactly in `createMemoryStore` so domain/server tests need no database.
+  Add a separate `healthMetrics` namespace to `AuthStore` with methods for transactional ingestion, cursor reads/update/schedule, activity-level and exercise-interval upsert/query, read-model queries, metric-result upserts, sleep-goal lookup/insert, time-zone-history lookup/insert, a range query/update for local time-zone reindexing, and `deleteForUser`. Mirror exactly in `createMemoryStore` so domain/server tests need no database.
 
 - [ ] **Step 4: Implement PostgreSQL mappings and transaction behavior.**
 
-  Use `store.withTransaction` to write a window's aggregates, replace affected daily summaries, recompute/upsert metric results, and advance only that data-type cursor. Update the disconnect path in `oauth-service.ts` to call `healthMetrics.deleteForUser` in the same transaction as `healthSnapshots.deleteForUser` and credential clearing; do not rely on an account-delete cascade. Add a regression proving disconnect deletes minute aggregates, all daily rows, exercise intervals, cursors, results, sleep goals, and time-zone history.
+  Use `store.withTransaction` to write a window's aggregates, replace affected daily summaries, recompute/upsert metric results, and advance only that data-type cursor. Update the disconnect path in `oauth-service.ts` to call `healthMetrics.deleteForUser` in the same transaction as `healthSnapshots.deleteForUser` and credential clearing; do not rely on an account-delete cascade. Add a regression proving disconnect deletes minute aggregates, activity-level intervals, all daily rows, exercise intervals, cursors, results, sleep goals, and time-zone history.
 
 - [ ] **Step 5: Verify tests and migration.**
 
@@ -189,15 +189,15 @@
 
 - [ ] **Step 2: Add typed filters and API point shapes.**
 
-  Add Google filter cases for `heart-rate`, `daily-heart-rate-zones`, and `time-in-heart-rate-zone`, using snake_case identifiers consistent with `daily_heart_rate_variability.date`. Extend `GoogleDataPoint` to parse `heartRate.sampleTime.physicalTime`, required `utcOffset`, output civil time, optional `heartRate.metadata.motionContext`, daily zone entries, and time-in-zone intervals. Heart-rate reconcile `pageSize` is 10000.
+  Add Google filter cases for `heart-rate`, `activity-level`, `daily-heart-rate-zones`, and `time-in-heart-rate-zone`, using snake_case identifiers consistent with `daily_heart_rate_variability.date`. Extend `GoogleDataPoint` to parse `heartRate.sampleTime.physicalTime`, required `utcOffset`, output civil time, `activityLevel.activityLevelType` plus 60-second interval, daily zone entries as inclusive `[min, max]` with a 1 bpm gap, and time-in-zone intervals from start/end (no duration field). Heart-rate and activity-level reconcile `pageSize` is 10000. Do not parse `motionContext`; this account does not send it.
 
 - [ ] **Step 3: Write failing mapping tests from realistic Google fixtures.**
 
-  Cover offset/civil-date preservation, timezone change, unknown context, an exercise interval overlapping unknown-context HR, zone-boundary classification, and interval splitting. Include the exact Google JSON string-number forms for bpm and zone limits.
+  Cover newest-first HR pages sorted ascending, offset/civil-date preservation, timezone change, missing `activity-level` becoming unknown, sleep overlap excluding LIGHTLY_ACTIVE from dose, an exercise interval overlapping sedentary/unknown HR, inclusive zone classification with a 1 bpm gap, and 60-second time-in-zone interval summing. Include the exact Google JSON string-number forms for bpm and zone limits, and points that have no `name`.
 
 - [ ] **Step 4: Implement mappers.**
 
-  Convert raw-HR pages to minute-span candidates without persisting the original point. Map `exercise` pages separately to `ExerciseInterval` rows. Return daily zones and display-only time-in-zone summaries separately; reject malformed timestamps/offsets rather than guessing a timezone.
+  Convert raw-HR pages to minute-span candidates without persisting the original point. Map `activity-level` pages to `activity_level_intervals` keyed by interval start. Map `exercise` pages separately to `ExerciseInterval` rows. Return daily zones and display-only time-in-zone summaries separately; reject malformed timestamps/offsets rather than guessing a timezone.
 
 - [ ] **Step 5: Run targeted tests and commit.**
 
@@ -227,7 +227,7 @@
 
 - [ ] **Step 2: Implement `cardio-sync.ts`.**
 
-  Process raw HR by local-date segments and pages. Extract a reusable `recomputeAffectedDays()` operation that reads only persisted inputs, so the later local time-zone reindex can invoke the exact same `daily_cardio`/`whoop-style-v2` calculation. A page may idempotently flush aggregates, but its type's `successful_watermark` is advanced only after **all** pages in the requested window succeed and all affected dates have been recomputed; a late-page failure preserves the old watermark and relies on the overlap retry. For each affected day, persist aggregates/zones/time-in-zone, read persisted `exercise_intervals` plus current sleep/HRV/RHR inputs, recompute `whoop-style-v2` results, then commit the final watermark in one transaction. Exercise ingestion must upsert intervals and enqueue/recompute every date it overlaps; test both HR-before-exercise and exercise-before-HR order and require identical results. On a per-type failure, write only that cursor's retry/error state; compute connection `nextSyncAt` as the earliest cursor `next_attempt_at`.
+  Process raw HR by local-date segments and pages. Extract a reusable `recomputeAffectedDays()` operation that reads only persisted inputs, so the later local time-zone reindex can invoke the exact same `daily_cardio`/`whoop-style-v2` calculation. A page may idempotently flush aggregates, but its type's `successful_watermark` is advanced only after **all** pages in the requested window succeed and all affected dates have been recomputed; a late-page failure preserves the old watermark and relies on the overlap retry. For each affected day, persist aggregates, `activity_level_intervals`, zones, and time-in-zone, read persisted exercise intervals plus current sleep/HRV/RHR inputs, recompute `whoop-style-v2` results, then commit the final watermark in one transaction. `activity-level` and exercise ingestion must upsert intervals and enqueue/recompute every date they overlap; test HR / activity-level / exercise arrival orders and require identical results. On a per-type failure, write only that cursor's retry/error state; compute connection `nextSyncAt` as the earliest cursor `next_attempt_at`.
 
 - [ ] **Step 3: Make low-frequency snapshots incremental and merge-preserving.**
 
@@ -329,7 +329,7 @@
 
 - [ ] **Step 1: Add a redacted live-API smoke path.**
 
-  The smoke test/command must use the authorized local connection, log only counts/dates/available field names (never access tokens, heart-rate samples, or Health API bodies), and separately report availability of raw HR, `motionContext`, all four daily zones, and time-in-zone.
+  The smoke test/command must use the authorized local connection, log only counts/dates/available field names (never access tokens, heart-rate samples, or Health API bodies), and separately report availability of raw HR without metadata, `activity-level` types, all four daily zones with 1 bpm gaps, and 60-second time-in-zone intervals.
 
 - [ ] **Step 2: Run migration and one forced local sync against the real account.**
 
