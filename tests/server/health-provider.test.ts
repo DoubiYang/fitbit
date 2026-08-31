@@ -51,6 +51,7 @@ test('live provider maps Health API points and does not leak another user', asyn
     store,
     connection,
     api: {
+      async *iterateReconciledDataPoints() {},
       async listDataPoints(input) {
         if (input.dataType === 'sleep') {
           return [
@@ -127,6 +128,7 @@ test('live provider fails closed when one core Health API filter fails', async (
     store,
     connection,
     api: {
+      async *iterateReconciledDataPoints() {},
       async listDataPoints(input) {
         if (input.dataType === 'daily-heart-rate-variability') {
           throw new Error('health api 400');
@@ -201,6 +203,7 @@ test('does not replace a successful snapshot when any core Health API query fail
     store,
     connection,
     api: {
+      async *iterateReconciledDataPoints() {},
       async listDataPoints(input) {
         if (input.dataType === 'daily-heart-rate-variability') {
           throw new Error('health api 429');
@@ -259,7 +262,7 @@ test('does not mark a sync successful when snapshot persistence fails', async ()
     config,
     store,
     connection,
-    api: { async listDataPoints() { return []; } },
+    api: { async listDataPoints() { return []; }, async *iterateReconciledDataPoints() {} },
     refresher: { async refresh() { throw new Error('should not refresh'); } },
     persistSnapshot: async () => { throw new Error('snapshot unavailable'); },
   });
@@ -310,6 +313,7 @@ test('does not persist a snapshot after the connection is disconnected during sy
     store,
     connection,
     api: {
+      async *iterateReconciledDataPoints() {},
       async listDataPoints() {
         if (!disconnected) {
           disconnected = true;
@@ -393,7 +397,7 @@ test('does not restore tokens when disconnect races the success stamp', async ()
     config,
     store,
     connection,
-    api: { async listDataPoints() { return []; } },
+    api: { async listDataPoints() { return []; }, async *iterateReconciledDataPoints() {} },
     refresher: { async refresh() { throw new Error('should not refresh'); } },
     persistSnapshot: async () => {
       afterPersist = true;

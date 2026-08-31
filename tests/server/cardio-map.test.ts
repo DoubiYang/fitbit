@@ -413,6 +413,27 @@ test('maps activity-level pages by interval start without requiring a data-point
   assert.equal(intervals[0]?.sourceFamily, 'google-wearables');
 });
 
+test('maps unnamed exercise points with a stable sourceRecordId fallback', () => {
+  const startTime = '2026-08-22T12:00:00.000Z';
+  const exercise = mapExerciseInterval(
+    parsePoint(`{
+      "exercise": {
+        "interval": {
+          "startTime": "${startTime}",
+          "endTime": "2026-08-22T12:01:00.000Z",
+          "startUtcOffset": "0s",
+          "civilStartTime": { "date": { "year": 2026, "month": 8, "day": 22 } }
+        }
+      }
+    }`),
+    userId,
+  );
+
+  assert.ok(exercise);
+  assert.equal(exercise?.sourceRecordId, `${userId}:${startTime}`);
+  assert.equal(exercise?.startTime, startTime);
+});
+
 test('forwards an optional lookahead sample so a later page can close the last hold', () => {
   const points = parsePoints(`[
     {"heartRate":{"sampleTime":{"physicalTime":"2026-08-22T12:00:00.000Z","utcOffset":"0s"},"beatsPerMinute":"90"}}

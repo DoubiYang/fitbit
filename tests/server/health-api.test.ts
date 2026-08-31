@@ -71,6 +71,35 @@ test('listDataPoints keeps the low-volume default page size of 25', async () => 
   assert.equal(new URL(urls[0] ?? '').searchParams.get('pageSize'), '25');
 });
 
+test('listDataPoints rejects high-volume heart-rate and activity-level instead of collecting pages', async () => {
+  const { urls } = await withMockedFetch(
+    async () => Response.json({ dataPoints: [{ name: 'should-not-fetch' }] }),
+    async () => {
+      const client = createHealthApiClient();
+      await assert.rejects(
+        () =>
+          client.listDataPoints({
+            accessToken: 'access',
+            dataType: 'heart-rate',
+            filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
+          }),
+        /heart-rate must use iterateReconciledDataPoints/,
+      );
+      await assert.rejects(
+        () =>
+          client.listDataPoints({
+            accessToken: 'access',
+            dataType: 'activity-level',
+            filter: 'activity_level.interval.start_time >= "2026-08-30T00:00:00.000Z"',
+          }),
+        /activity-level must use iterateReconciledDataPoints/,
+      );
+    },
+  );
+
+  assert.equal(urls.length, 0);
+});
+
 test('listDataPoints still concatenates every reconcile page for low-volume types', async () => {
   const { value } = await withMockedFetch(
     async (url) => {
@@ -165,6 +194,50 @@ test('iterateReconciledDataPoints does not prefetch later pages when the consume
   }
 
   assert.equal(urls.length, 1);
+});
+
+test('iterateReconciledDataPoints defaults heart-rate and activity-level pageSize to 10000', async () => {
+  const { urls } = await withMockedFetch(
+    async () => Response.json({ dataPoints: [] }),
+    async () => {
+      const client = createHealthApiClient();
+      await client
+        .iterateReconciledDataPoints({
+          accessToken: 'access',
+          dataType: 'heart-rate',
+          filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
+        })
+        .next();
+      await client
+        .iterateReconciledDataPoints({
+          accessToken: 'access',
+          dataType: 'activity-level',
+          filter: 'activity_level.interval.start_time >= "2026-08-30T00:00:00.000Z"',
+        })
+        .next();
+    },
+  );
+
+  assert.equal(new URL(urls[0] ?? '').searchParams.get('pageSize'), '10000');
+  assert.equal(new URL(urls[1] ?? '').searchParams.get('pageSize'), '10000');
+  assert.equal(HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE, 10_000);
+});
+
+test('explicit iterate pageSize still wins over the high-volume default', async () => {
+  const { urls } = await withMockedFetch(
+    async () => Response.json({ dataPoints: [] }),
+    () =>
+      createHealthApiClient()
+        .iterateReconciledDataPoints({
+          accessToken: 'access',
+          dataType: 'heart-rate',
+          filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
+          pageSize: 50,
+        })
+        .next(),
+  );
+
+  assert.equal(new URL(urls[0] ?? '').searchParams.get('pageSize'), '50');
 });
 
 test('iterateReconciledDataPoints does not fall back to list after a 429', async () => {

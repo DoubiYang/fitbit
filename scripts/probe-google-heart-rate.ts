@@ -54,14 +54,29 @@ export type HeartRateProbePoint = {
   };
 };
 
-export type HeartRateProbeApi = {
-  listDataPoints(input: {
-    accessToken: string;
-    dataType: string;
-    filter: string;
-    pageSize?: number;
-  }): Promise<HeartRateProbePoint[]>;
+type HeartRateProbeRequest = {
+  accessToken: string;
+  dataType: string;
+  filter: string;
+  pageSize?: number;
 };
+
+export type HeartRateProbeApi = {
+  listDataPoints(input: HeartRateProbeRequest): Promise<HeartRateProbePoint[]>;
+  iterateReconciledDataPoints?(input: HeartRateProbeRequest): AsyncIterable<HeartRateProbePoint[]>;
+};
+
+async function collectProbePoints(api: HeartRateProbeApi, input: HeartRateProbeRequest): Promise<HeartRateProbePoint[]> {
+  const highVolume = input.dataType === 'heart-rate' || input.dataType === 'activity-level';
+  if (highVolume && api.iterateReconciledDataPoints) {
+    const collected: HeartRateProbePoint[] = [];
+    for await (const page of api.iterateReconciledDataPoints(input)) {
+      collected.push(...page);
+    }
+    return collected;
+  }
+  return api.listDataPoints(input);
+}
 
 export type HeartRateCapabilityReport = {
   sourceFamily: typeof GOOGLE_WEARABLES_SOURCE_FAMILY;
@@ -235,7 +250,7 @@ export async function probeGoogleHeartRateCapabilities(input: {
   api?: HeartRateProbeApi;
 }): Promise<HeartRateCapabilityReport> {
   const now = input.now ?? new Date();
-  const api = input.api ?? (createHealthApiClient() as HeartRateProbeApi);
+  const api = input.api ?? createHealthApiClient();
   const sampleUntil = now.toISOString();
   const sampleFrom = new Date(now.getTime() - SAMPLE_LOOKBACK_MS).toISOString();
   const today = utcCivilDate(now);
@@ -244,25 +259,25 @@ export async function probeGoogleHeartRateCapabilities(input: {
   const dailyUntilExclusive = addUtcDays(today, DAILY_WINDOW_UNTIL_EXCLUSIVE_DAYS);
 
   const [heartRate, activityLevel, dailyHeartRateZones, timeInHeartRateZone] = await Promise.all([
-    api.listDataPoints({
+    collectProbePoints(api, {
       accessToken: input.accessToken,
       dataType: 'heart-rate',
       filter: heartRateCapabilityFilter('heart-rate', sampleFrom, sampleUntil),
       pageSize: SAMPLE_PAGE_SIZE,
     }),
-    api.listDataPoints({
+    collectProbePoints(api, {
       accessToken: input.accessToken,
       dataType: 'activity-level',
       filter: heartRateCapabilityFilter('activity-level', sampleFrom, sampleUntil),
       pageSize: SAMPLE_PAGE_SIZE,
     }),
-    api.listDataPoints({
+    collectProbePoints(api, {
       accessToken: input.accessToken,
       dataType: 'daily-heart-rate-zones',
       filter: heartRateCapabilityFilter('daily-heart-rate-zones', dailyFrom, dailyUntilExclusive),
       pageSize: DAILY_PAGE_SIZE,
     }),
-    api.listDataPoints({
+    collectProbePoints(api, {
       accessToken: input.accessToken,
       dataType: 'time-in-heart-rate-zone',
       filter: heartRateCapabilityFilter('time-in-heart-rate-zone', sampleFrom, sampleUntil),

@@ -1,3 +1,4 @@
+import { HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from './filters';
 import type { GoogleDataPoint } from './map-records';
 
 const API_ROOT = 'https://health.googleapis.com/v4';
@@ -12,8 +13,19 @@ export type ReconcileDataPointsInput = {
 
 export type HealthApiClient = {
   listDataPoints(input: ReconcileDataPointsInput): Promise<GoogleDataPoint[]>;
-  iterateReconciledDataPoints?(input: ReconcileDataPointsInput): AsyncGenerator<GoogleDataPoint[], void, undefined>;
+  iterateReconciledDataPoints(input: ReconcileDataPointsInput): AsyncGenerator<GoogleDataPoint[], void, undefined>;
 };
+
+function isHighVolumeDataType(dataType: string): boolean {
+  return dataType === 'heart-rate' || dataType === 'activity-level';
+}
+
+function reconcilePageSize(input: ReconcileDataPointsInput): number {
+  if (input.pageSize !== undefined) {
+    return input.pageSize;
+  }
+  return isHighVolumeDataType(input.dataType) ? HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE : DEFAULT_PAGE_SIZE;
+}
 
 async function fetchPage(url: string, accessToken: string): Promise<{ dataPoints?: GoogleDataPoint[]; nextPageToken?: string }> {
   const response = await fetch(url, {
@@ -33,7 +45,7 @@ async function* iterateReconciledPages(input: ReconcileDataPointsInput): AsyncGe
   do {
     const params = new URLSearchParams({
       filter: input.filter,
-      pageSize: String(input.pageSize ?? DEFAULT_PAGE_SIZE),
+      pageSize: String(reconcilePageSize(input)),
       dataSourceFamily: 'users/me/dataSourceFamilies/google-wearables',
     });
     if (pageToken) {
@@ -46,12 +58,15 @@ async function* iterateReconciledPages(input: ReconcileDataPointsInput): AsyncGe
   } while (pageToken);
 }
 
-export function createHealthApiClient(): Required<HealthApiClient> {
+export function createHealthApiClient(): HealthApiClient {
   return {
     iterateReconciledDataPoints(input): AsyncGenerator<GoogleDataPoint[], void, undefined> {
       return iterateReconciledPages(input);
     },
     async listDataPoints(input) {
+      if (isHighVolumeDataType(input.dataType)) {
+        throw new Error(`${input.dataType} must use iterateReconciledDataPoints`);
+      }
       const collected: GoogleDataPoint[] = [];
       for await (const page of iterateReconciledPages(input)) {
         collected.push(...page);
