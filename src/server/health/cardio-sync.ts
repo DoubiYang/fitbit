@@ -115,6 +115,10 @@ function cursorErrorCode(error: unknown): string {
   return error instanceof Error && /health api 429/i.test(error.message) ? 'rate_limited' : 'sync_failed';
 }
 
+export function isUnsyncableError(error: unknown): boolean {
+  return error instanceof Error && /connection no longer syncable/i.test(error.message);
+}
+
 export function successCursor(
   now: Date,
 ): Pick<HealthSyncCursor, 'successfulWatermark' | 'lastErrorCode' | 'retryCount' | 'nextAttemptAt'> {
@@ -726,6 +730,9 @@ export async function syncCardioConnection(input: {
       }
       succeeded.push(dataType);
     } catch (error) {
+      if (isUnsyncableError(error)) {
+        throw error;
+      }
       await scheduleTypeFailure({
         store: input.store,
         connectionId: input.connection.id,

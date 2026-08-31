@@ -943,9 +943,16 @@ test('does not persist a heart-rate page after the connection is disconnected', 
     }
     yield* original(input);
   };
-  await runSync(store, api, { dataTypes: ['heart-rate'] });
+  await assert.rejects(
+    () => runSync(store, api, { extraDates: ['2026-08-22'] }),
+    /connection no longer syncable/,
+  );
   const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-22' });
   assert.equal(minutes.length, 0);
+  assert.deepEqual(await store.healthMetrics.listMetricResults({ userId, civilDate: '2026-08-22' }), []);
+  const cursor = await store.healthMetrics.readCursor({ connectionId, dataType: 'heart-rate' });
+  assert.equal(cursor?.successfulWatermark, undefined);
+  assert.equal(cursor?.lastErrorCode, undefined);
 });
 
 test('sleep HRV and RHR are not silently marked successful by cardio ingest', async () => {

@@ -523,6 +523,85 @@ test('does not ingest cardio after the connection is no longer syncable', async 
   assert.equal(minutes.length, 0);
 });
 
+test('aborts cardio ingest when disconnect happens after snapshot extraDates', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const api = createFakeApi({
+    'heart-rate': [
+      [
+        {
+          heartRate: {
+            sampleTime: { physicalTime: '2026-08-22T12:00:00.000Z', utcOffset: '0s' },
+            beatsPerMinute: '110',
+          },
+        },
+      ],
+    ],
+  });
+  const originalList = api.listDataPoints.bind(api);
+  const originalIterate = api.iterateReconciledDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    if (input.dataType === 'sleep') {
+      return [
+        {
+          name: 'sleep-22',
+          sleep: {
+            type: 'STAGES',
+            interval: {
+              startTime: '2026-08-21T22:00:00.000Z',
+              endTime: '2026-08-22T06:00:00.000Z',
+              endUtcOffset: '0s',
+              civilEndTime: { date: { year: 2026, month: 8, day: 22 } },
+            },
+            metadata: { nap: false, processed: true },
+            summary: { minutesAsleep: '400', minutesInSleepPeriod: '480', minutesAwake: '80' },
+          },
+        },
+      ];
+    }
+    return originalList(input);
+  };
+  api.iterateReconciledDataPoints = async function* (input) {
+    if (input.dataType === 'heart-rate') {
+      const current = await store.connections.findByUserId('u1');
+      if (current) {
+        await store.connections.update({
+          ...current,
+          status: 'disconnected',
+          tokenEnvelopeCiphertext: undefined,
+          tokenEnvelopeIv: undefined,
+          tokenEnvelopeAuthTag: undefined,
+          nextSyncAt: undefined,
+        });
+      }
+    }
+    yield* originalIterate(input);
+  };
+
+  const result = await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => undefined,
+    refresher: {
+      async refresh() {
+        throw new Error('should not refresh');
+      },
+    },
+  });
+
+  assert.equal(result, false);
+  assert.equal((await store.healthMetrics.listMinutesByCivilDate({ userId: 'u1', civilDate: '2026-08-22' })).length, 0);
+  assert.deepEqual(await store.healthMetrics.listMetricResults({ userId: 'u1', civilDate: '2026-08-22' }), []);
+  assert.deepEqual(await store.healthMetrics.listMetricResults({ userId: 'u1', civilDate: '2026-08-23' }), []);
+  const heartRate = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'heart-rate' });
+  assert.equal(heartRate?.successfulWatermark, undefined);
+});
+
 function priorDates(endExclusive: string, count: number): string[] {
   const dates: string[] = [];
   const cursor = new Date(`${endExclusive}T00:00:00.000Z`);

@@ -3,6 +3,7 @@ import type { AuthStore, ConnectionRow } from '../auth/types';
 import { civilDateRange } from '../time/civil-date';
 import { createGoogleTokenRefresher, resolveAccessToken, TokenRefreshError, type TokenRefresher } from './access-token';
 import {
+  isUnsyncableError,
   scheduleTypeFailure,
   SNAPSHOT_SYNC_TYPES,
   snapshotAffectedDates,
@@ -118,17 +119,25 @@ export async function syncUserConnection(input: {
   const lastSuccessfulSyncAt = snapshotRecords
     ? latest.lastSuccessfulSyncAt ?? now
     : previousSnapshot?.syncedAt ?? latest.lastSuccessfulSyncAt;
-  const cardio = await syncCardioConnection({
-    store: input.store,
-    connection: latest,
-    api,
-    accessToken,
-    now,
-    loadRecords,
-    loadSnapshot,
-    extraDates: snapshotRecords ? snapshotAffectedDates(snapshotRecords) : [],
-    lastSuccessfulSyncAt,
-  });
+  let cardio;
+  try {
+    cardio = await syncCardioConnection({
+      store: input.store,
+      connection: latest,
+      api,
+      accessToken,
+      now,
+      loadRecords,
+      loadSnapshot,
+      extraDates: snapshotRecords ? snapshotAffectedDates(snapshotRecords) : [],
+      lastSuccessfulSyncAt,
+    });
+  } catch (error) {
+    if (isUnsyncableError(error)) {
+      return false;
+    }
+    throw error;
+  }
   const after = await input.store.connections.findByUserId(connection.userId);
   if (after && (after.status === 'active' || after.status === 'partial')) {
     await input.store.connections.update({
