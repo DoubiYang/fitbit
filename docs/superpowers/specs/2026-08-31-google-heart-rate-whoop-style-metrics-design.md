@@ -55,7 +55,8 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 - 用户首次授权后，回填最近 **35 个当地日**。35 天只是拉取缓冲和稳定基线目标，不是指标显示门槛。
 - 每个已连接用户每 **1 小时**同步一次。
 - 原始心率、区间时长和锻炼使用各自上次成功水位减 2 小时的重叠窗口，幂等 upsert；睡眠、HRV、RHR 与每日阈值使用各自最近 48 小时重叠窗口，吸收设备迟到修订。
-- 每一种数据类型有独立水位。一个窗口内的数据 upsert、相应日的指标重算、该数据类型水位推进必须在同一数据库事务中完成。429、网络故障、令牌错误均不得把失败窗口标为已同步；采用带抖动的退避重试，并在用户可见状态中标记同步失败。
+- 每一种数据类型有独立的成功水位、最后错误、retry count 与 `next_attempt_at`。原始心率的各页可先幂等 upsert，但**只有该窗口所有页成功处理、所有受影响日重算完成后**才推进成功水位；任何晚页失败时成功水位保持不变，下一次从原窗口重叠区重新读取。429、网络故障、令牌错误均不得把失败窗口标为已同步。
+- 单一数据类型失败时，只写它自己的错误和带抖动退避（30/60/120 分钟，之后一小时）；其他数据类型仍可成功写入并推进各自水位。connection 的 `next_sync_at` 必须取所有数据类型 `next_attempt_at` 的最早值，确保 A 类型 429 不会被 B 类型的“一小时后再同步”掩盖。用户可见同步状态显示每类失败，但不得泄露 API 响应或 token。
 - Webhook 可作为未来加速路径；一期以每小时轮询为正确性基线，不依赖 webhook 才能获得数据。
 
 ### 3.2 本地留存与隐私
@@ -74,12 +75,22 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 | `heart_rate_minute_aggregates` | `(user_id, source_family, minute_start_utc)` | 单分钟的平均/最小/最大 bpm、覆盖秒数、样本数、主导 motion context、历史 civil date 与 UTC offset；不保存原始点。 |
 | `daily_heart_rate_zones` | `(user_id, source_family, civil_date)` | 当天 Google 阈值及从 API 接收时刻；后续修订覆盖该日最新阈值。 |
 | `daily_time_in_zone` | `(user_id, source_family, civil_date)` | Google 全天区间时长，专用于展示和交叉校验。 |
+| `exercise_intervals` | `(user_id, source_family, source_record_id)` | 已确认锻炼的起止 UTC 时间、当时 offset 和 civil date；用于将未知-context 的心率分钟可靠归因活动。 |
 | `daily_cardio` | `(user_id, civil_date)` | 活动归因后的分区分钟数、覆盖率、完成状态、全天/进行中 Strain 及来源。 |
 | `health_sync_cursors` | `(connection_id, data_type)` | 每种数据类型的成功水位、最后错误和重试状态。 |
 | `metric_results` | `(user_id, civil_date, metric_name, metric_version)` | 指标输入摘要、分数、质量和计算时间；同版本同日以最新成功重算为准，新版本新增行。 |
 | `user_sleep_goal_history` | `(user_id, effective_civil_date)` | 用户手动确认的基础睡眠目标（分钟）及其生效日；不以之后的设置重写历史指标。 |
+| `user_health_time_zone_history` | `(user_id, effective_at)` | 来自用户已登录设备的 IANA 时区及其生效时间；首条可标记为历史回填锚点，用于 DST 的墙上时间分段和设置生效日。 |
 
-首次 35 日回填的 `heart-rate` 必须按当地日分段并分页处理：每一页先转为分钟聚合批量 upsert，再释放该页原始点；不得把 35 天高频样本或完整 API JSON 一次性装入内存。删除连接/账户时，上述以用户或连接为外键的数据在同一删除事务中级联清除。
+首次回填尚未知道用户的健康时区时，原始心率按 `now − 37 × 24h` 至 `now` 的 UTC 物理时间读取；每日记录请求 UTC 当前日期前 36 日至当前日期后 1 日的宽窗口，再以 API 返回的 `date` / sample offset 确定实际当地日。这比固定 `Asia/Shanghai` 更宽，能够覆盖任何合法 UTC offset 下最近 35 个当地日。之后只用各数据类型的 UTC cursor 拉取，再以记录自身 offset 归日。
+
+原始样本的 offset/civil time 足以归属当地日期，但不足以可靠判定 DST 的 23/25 小时长度。已登录客户端必须把 `Intl.DateTimeFormat().resolvedOptions().timeZone` 作为 IANA 时区历史写入 `user_health_time_zone_history`；每个样本日使用当时最新、且 offset 匹配的时区记录进行墙上时间分段和 DST 判断。没有匹配 IANA 时区、或时区与样本 offset 冲突时，仍保存聚合/展示数据，但该日必须标记 `timezone_ambiguous`、不满足 Strain 完整日条件。旅行时客户端写入新时区历史；未知旅行不能被假定为原时区。
+
+首次成功写入 IANA 时区后，服务端必须在**同一数据库事务**中对本地已保存的历史分钟聚合执行一次本地重索引，不等待下一轮 API 拉取：若该用户此前没有时区历史，首条记录以最早已保存分钟的 UTC instant（没有分钟则以写入时刻）作为 `effective_at`，并标记为“历史回填锚点”。它可覆盖已有历史窗口；逐分钟用该 IANA 时区在该 UTC instant 的实际 offset 与存储的 `utc_offset` 比较，只有一致的分钟才写入 IANA 时区、按该区间重建当地日期/墙上时间覆盖，并重算受影响的 `daily_cardio` 和 `whoop-style-v2` 结果。后续时区记录以客户端上报时刻为 `effective_at`，只重索引其 `effective_at` 至下一条时区记录的范围，且不得跨越已有时区边界。offset 不一致的分钟仍保持 `timezone_ambiguous`，不猜测、不重新下载原始点。这样 OAuth 回调先完成 35 日同步、浏览器随后才上报时区时，匹配的历史日也能立即取得完整日资格；旅行中的不匹配日期仍安全地不可出完整 Strain。
+
+首次 35 日回填的 `heart-rate` 必须按当地日分段并分页处理：每一页先转为分钟聚合批量 upsert，再释放该页原始点；不得把 35 天高频样本或完整 API JSON 一次性装入内存。`exercise` 同步也必须 upsert `exercise_intervals`，然后重算其覆盖的每个当地日期；原始心率和 exercise 无论谁先到达，都必须得到同一日归因结果。
+
+用户在账户设置中断开 Google Health 连接时，即使 `users` 和断开状态的 connection 行仍保留，也必须在同一事务中显式删除该用户的 `heart_rate_minute_aggregates`、每日区间/时长、`exercise_intervals`、`daily_cardio`、`metric_results`、sync cursors、睡眠目标/时区历史和既有 `health_snapshots`，并清除连接凭证。账户删除则同时通过外键级联完成同样清理。
 
 不保存单个未聚合原始心率样本，不将 token、完整 API 原始 JSON 或分钟数据传给 AI Coach。用户删除连接或账户时，连接令牌和对应健康聚合数据必须按账户删除流程一并清除。
 
@@ -91,7 +102,7 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 
 只有主导 context 为 `ACTIVE` 或与已确认 `exercise` 会话重叠至少 30 秒的分钟可计入 Strain；未分区或低于最低 Google 区间的活动分钟不产生剂量。完整日与进行中日的“心率覆盖”只累计主导 context 已知为 `ACTIVE` 或 `SEDENTARY` 的分钟；`unknown` 覆盖不会证明用户未活动，也不能补足完整性门槛。
 
-- 已过去的日期：当天 Google 阈值存在、已知 context 的原始心率覆盖至少 480 分钟、当天最后一个已知-context 样本距当地日结束不超过 180 分钟，且当地 `06:00–12:00`、`12:00–18:00`、`18:00–24:00` 三个时段各至少有 90 分钟已知-context 覆盖、任一时段内无超过 240 分钟的连续已知-context 覆盖缺口，才可标记为完整；否则是 `incomplete`，不输出完整日 Strain。DST 日按真实当地时间计算各时段。
+- 已过去的日期：当天 Google 阈值存在、该日 IANA 时区明确、已知 context 的原始心率覆盖至少 480 分钟、当天最后一个已知-context 样本距当地日结束不超过 180 分钟，且当地 `06:00–12:00`、`12:00–18:00`、`18:00–24:00` 三个时段各至少有 90 分钟已知-context 覆盖、任一时段内无超过 240 分钟的连续已知-context 覆盖缺口，才可标记为完整；否则是 `incomplete`，不输出完整日 Strain。DST 日按真实当地时间计算各时段。
 - 当天：永远是进行中；Google 阈值存在、已累计至少 120 分钟已知-context 覆盖且最新已知-context 样本距当前时刻不超过 90 分钟时，才显示截至当前的 `provisional` Strain。
 - 只有满足完整日资格、且不存在活动归因分钟（含 exercise 覆盖的未知-context 分钟）时，才输出 0.0 Strain；不具备完整日资格时未知不是零。
 - 数据缺口、Google 未给区间阈值、或时间段无法可信归因时：不把它当作零负荷，也不输出“偏低”结论。
@@ -123,7 +134,7 @@ Strain 代表全天可观测的**心肺**负荷，包含命名锻炼和日常活
 
 ### 5.1 睡眠需求
 
-用户必须在首次计算前确认自己的基础睡眠目标。它保存为 `user_sleep_goal_history` 的正整数分钟值（300–900 分钟）；没有目标时不出 Sleep Performance 或 Recovery。设置在用户当地日 `T` 发生时，以 `effective_civil_date = T + 1` 写入，作用于下一次主睡眠结束日期及之后的日期；编辑目标不会改写 `effective_civil_date` 之前已保存的结果。`GET/PUT /api/settings/sleep-goal` 只读取/新增该用户自己的设置，服务端验证范围与生效日期，前端显示为用户偏好而非医学处方。
+用户必须在首次计算前确认自己的基础睡眠目标。它保存为 `user_sleep_goal_history` 的正整数分钟值（300–900 分钟）；没有目标时不出 Sleep Performance 或 Recovery。设置在用户当地日 `T` 发生时，以 `effective_civil_date = T + 1` 写入，作用于下一次主睡眠结束日期及之后的日期；编辑目标不会改写 `effective_civil_date` 之前已保存的结果。`GET/PUT /api/settings/sleep-goal` 只读取/新增该用户自己的设置，服务端验证范围与生效日期，前端显示为用户偏好而非医学处方。`T` 必须通过已保存的 IANA 时区历史计算；不存在时客户端先写入时区设置，不能回退到服务器或固定中国时区。
 
 对睡眠日期 `D`，系统选取 `effective_civil_date ≤ D` 的最新目标，计算动态睡眠需求：
 
@@ -190,8 +201,8 @@ AI 只读取服务端构建的短生命周期 `coach_context`：当前三个指�
 上线前必须完成以下验证：
 
 1. **API 映射：** 用真实授权账户验证原始心率、每日区间与区间时长是否可用，特别验证 Fitbit Air 样本是否足以提供 `motionContext`；记录实际返回形态，不把 API 文档假设写成数据事实。
-2. **数据一致性：** 同日图表、区间时长、Strain 和 Coach 引用使用同一份当天 Google 区间阈值和 `google-wearables` source family；旅行/DST 后不会用今天的时区重写旧日。
-3. **去重与迟到数据：** 重叠窗口重复同步不会重复增加分钟或时长；睡眠/日指标修订会更新相应日期，水位和写入在同一事务中推进。
+2. **数据一致性：** 同日图表、区间时长、Strain 和 Coach 引用使用同一份当天 Google 区间阈值和 `google-wearables` source family；旅行/DST 后不会用今天的时区重写旧日。缺可信 IANA 时区时，该日只能展示、不能成为完整日；首个匹配 IANA 时区写入后，已保存的匹配历史分钟必须本地重索引并使符合其他规则的历史日可出完整 Strain，offset 不匹配的日期仍保持 `timezone_ambiguous`。
+3. **去重与迟到数据：** 重叠窗口重复同步不会重复增加分钟或时长；睡眠/日指标修订会更新相应日期。原始心率第二页失败时成功水位不变、重试后不缺失/不重复；单类型失败保留其错误和退避，其他类型可成功推进。
 4. **全天低区间保护：** 静止的低区间时长只展示、不进入 Strain 剂量；无可归因活动分钟时完整日 Strain 为 0，覆盖不足时为未知而非 0。
 5. **基线门槛：** 每个生理字段在 7 个历史有效日后可参与 provisional Recovery；HRV + Sleep 可在 RHR 基线不足时出分；28 日后升为稳定；Strain 不受该门槛阻塞。
 6. **覆盖不足：** 对 30/75 秒分钟规则、缺失 `motionContext`、480/120 分钟已知-context 覆盖阈值、三段各 90 分钟及 240 分钟最大缺口、180/90 分钟最新样本阈值、DST 23/25 小时日写单元测试；缺区间、缺心率或同步失败时不输出“偏低”、不把未知算作零。
