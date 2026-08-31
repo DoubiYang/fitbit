@@ -399,8 +399,8 @@ test('rejects time-in-zone and exercise points that are missing a parseable utcO
 test('maps activity-level pages by interval start without requiring a data-point name', () => {
   const intervals = mapActivityLevelIntervals(
     parsePoints(`[
-      {"activityLevel":{"interval":{"startTime":"2026-08-22T12:00:00.000Z","endTime":"2026-08-22T12:01:00.000Z"},"activityLevelType":"SEDENTARY"}},
       {"activityLevel":{"interval":{"startTime":"2026-08-22T12:00:00.000Z","endTime":"2026-08-22T12:01:00.000Z"},"activityLevelType":"LIGHTLY_ACTIVE"}},
+      {"activityLevel":{"interval":{"startTime":"2026-08-22T12:00:00.000Z","endTime":"2026-08-22T12:01:00.000Z"},"activityLevelType":"SEDENTARY"}},
       {"activityLevel":{"interval":{"startTime":"2026-08-22T12:01:00.000Z","endTime":"2026-08-22T12:02:00.000Z"},"activityLevelType":"VERY_ACTIVE"}}
     ]`),
     userId,
@@ -411,6 +411,27 @@ test('maps activity-level pages by interval start without requiring a data-point
   assert.equal(intervals[0]?.activityLevelType, 'LIGHTLY_ACTIVE');
   assert.equal(intervals[1]?.activityLevelType, 'VERY_ACTIVE');
   assert.equal(intervals[0]?.sourceFamily, 'google-wearables');
+});
+
+test('skips heart-rate samples whose BPM is outside 1-250 instead of clamping', () => {
+  const points = parsePoints(`[
+    {"heartRate":{"sampleTime":{"physicalTime":"2026-08-22T12:00:06.000Z","utcOffset":"0s"},"beatsPerMinute":"0"}},
+    {"heartRate":{"sampleTime":{"physicalTime":"2026-08-22T12:00:04.000Z","utcOffset":"0s"},"beatsPerMinute":"999"}},
+    {"heartRate":{"sampleTime":{"physicalTime":"2026-08-22T12:00:02.000Z","utcOffset":"0s"},"beatsPerMinute":"-5"}},
+    {"heartRate":{"sampleTime":{"physicalTime":"2026-08-22T12:00:00.000Z","utcOffset":"0s"},"beatsPerMinute":"80"}}
+  ]`);
+
+  const samples = mapHeartRateSamples(points);
+  const minutes = mapHeartRatePageToMinutes({ userId, points, closeAt: '2026-08-22T12:00:30.000Z' });
+
+  assert.deepEqual(
+    samples.map((sample) => ({ physicalTime: sample.physicalTime, beatsPerMinute: sample.beatsPerMinute })),
+    [{ physicalTime: '2026-08-22T12:00:00.000Z', beatsPerMinute: 80 }],
+  );
+  assert.equal(minutes.length, 1);
+  assert.equal(minutes[0]?.avgBpm, 80);
+  assert.equal(minutes[0]?.minBpm, 80);
+  assert.equal(minutes[0]?.maxBpm, 80);
 });
 
 test('maps unnamed exercise points with a stable sourceRecordId fallback', () => {

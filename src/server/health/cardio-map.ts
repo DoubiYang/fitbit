@@ -61,7 +61,13 @@ export function mapHeartRateSamples(points: GoogleDataPoint[]): HeartRateSample[
     const physicalTime = point.heartRate?.sampleTime?.physicalTime;
     const utcOffsetMinutes = requiredOffsetMinutes(point.heartRate?.sampleTime?.utcOffset);
     const beatsPerMinute = parseNumeric(point.heartRate?.beatsPerMinute);
-    if (!isValidInstant(physicalTime) || utcOffsetMinutes === undefined || beatsPerMinute === undefined) {
+    if (
+      !isValidInstant(physicalTime) ||
+      utcOffsetMinutes === undefined ||
+      beatsPerMinute === undefined ||
+      beatsPerMinute < 1 ||
+      beatsPerMinute > 250
+    ) {
       continue;
     }
     samples.push({ physicalTime, beatsPerMinute, utcOffsetMinutes });
@@ -94,6 +100,9 @@ export function mapActivityLevelIntervals(points: GoogleDataPoint[], userId: str
       continue;
     }
     try {
+      if (byStart.has(startTime)) {
+        continue;
+      }
       const mapped = parseActivityLevelInterval({
         userId,
         sourceFamily: SOURCE_FAMILY,
