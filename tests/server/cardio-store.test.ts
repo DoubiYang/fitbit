@@ -16,9 +16,11 @@ import type { ConnectionRow } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import {
   healthMetricsExposesRawSamplePersistence,
+  HealthMetricsConnectionMismatchError,
   SleepGoalConflictError,
   TimeZoneHistoryConflictError,
   type HealthMetricsWindowWrite,
+  type HealthSyncDataType,
 } from '../../src/server/health/cardio-store';
 
 const userA = 'user-a';
@@ -57,15 +59,23 @@ function connection(id: string, userId: string): ConnectionRow {
   };
 }
 
-function minute(input: { userId: string; minuteStartUtc?: string; civilDate?: string; avgBpm?: number; ianaTimeZone?: string | null }) {
+function minute(input: {
+  userId: string;
+  minuteStartUtc?: string;
+  civilDate?: string;
+  avgBpm?: number;
+  ianaTimeZone?: string | null;
+  utcOffsetMinutes?: number;
+  localMinuteOfDay?: number;
+}) {
   return parseHeartRateMinuteAggregate({
     userId: input.userId,
     sourceFamily,
     minuteStartUtc: input.minuteStartUtc ?? '2026-08-22T12:00:00.000Z',
     civilDate: input.civilDate ?? civilDate,
-    utcOffsetMinutes: 480,
+    utcOffsetMinutes: input.utcOffsetMinutes ?? 480,
     ianaTimeZone: input.ianaTimeZone === undefined ? null : input.ianaTimeZone,
-    localMinuteOfDay: 1200,
+    localMinuteOfDay: input.localMinuteOfDay ?? 1200,
     avgBpm: input.avgBpm ?? 110,
     minBpm: input.avgBpm ?? 110,
     maxBpm: input.avgBpm ?? 110,
@@ -272,6 +282,67 @@ test('upserts minutes by user, source family, and UTC minute', async () => {
   assert.equal(stored.find((row) => row.minuteStartUtc === '2026-08-22T12:01:00.000Z')?.avgBpm, 120);
 });
 
+test('upsertMinutes preserves reindexed IANA fields when incoming IANA is null and offset is unchanged', async () => {
+  const store = createMemoryStore();
+  await seedUsers(store);
+  await store.healthMetrics.upsertMinutes([minute({ userId: userA, avgBpm: 100 })]);
+  await store.healthMetrics.updateMinuteLocalAssociation({
+    userId: userA,
+    sourceFamily,
+    minuteStartUtc: '2026-08-22T12:00:00.000Z',
+    civilDate,
+    ianaTimeZone: 'Asia/Shanghai',
+    localMinuteOfDay: 0,
+  });
+
+  await store.healthMetrics.upsertMinutes([minute({ userId: userA, avgBpm: 118, ianaTimeZone: null })]);
+
+  const stored = await store.healthMetrics.listMinutesByCivilDate({ userId: userA, civilDate });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.avgBpm, 118);
+  assert.equal(stored[0]?.ianaTimeZone, 'Asia/Shanghai');
+  assert.equal(stored[0]?.civilDate, civilDate);
+  assert.equal(stored[0]?.localMinuteOfDay, 0);
+  assert.equal(stored[0]?.utcOffsetMinutes, 480);
+});
+
+test('upsertMinutes clears stored IANA when utcOffset changes', async () => {
+  const store = createMemoryStore();
+  await seedUsers(store);
+  await store.healthMetrics.upsertMinutes([minute({ userId: userA, avgBpm: 100 })]);
+  await store.healthMetrics.updateMinuteLocalAssociation({
+    userId: userA,
+    sourceFamily,
+    minuteStartUtc: '2026-08-22T12:00:00.000Z',
+    civilDate,
+    ianaTimeZone: 'Asia/Shanghai',
+    localMinuteOfDay: 0,
+  });
+
+  await store.healthMetrics.upsertMinutes([
+    minute({
+      userId: userA,
+      avgBpm: 118,
+      ianaTimeZone: null,
+      utcOffsetMinutes: 0,
+      civilDate: '2026-08-22',
+      localMinuteOfDay: 720,
+    }),
+  ]);
+
+  const stored = await store.healthMetrics.listMinutesInRange({
+    userId: userA,
+    fromUtc: '2026-08-22T12:00:00.000Z',
+    toUtcExclusive: '2026-08-22T12:01:00.000Z',
+  });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.avgBpm, 118);
+  assert.equal(stored[0]?.ianaTimeZone, null);
+  assert.equal(stored[0]?.civilDate, '2026-08-22');
+  assert.equal(stored[0]?.localMinuteOfDay, 720);
+  assert.equal(stored[0]?.utcOffsetMinutes, 0);
+});
+
 test('upserts activity-level intervals by user, source family, and interval start UTC', async () => {
   const store = createMemoryStore();
   await seedUsers(store);
@@ -343,6 +414,30 @@ test('updates a cursor in the same transaction as a metric write and rolls both 
   assert.equal((await store.healthMetrics.getMetricResult({ userId: userA, civilDate, metricName: 'strain' }))?.score, 8.4);
 });
 
+test('ingestWindow requires the connection to belong to the window user', async () => {
+  const store = createMemoryStore();
+  await seedUsers(store);
+  await store.healthMetrics.updateCursor({
+    connectionId: connectionB,
+    dataType: 'heart-rate',
+    successfulWatermark: now,
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: undefined,
+  });
+
+  await assert.rejects(
+    store.healthMetrics.ingestWindow(windowWrite({ userId: userA, connectionId: connectionB })),
+    HealthMetricsConnectionMismatchError,
+  );
+
+  assert.equal((await store.healthMetrics.listMinutesByCivilDate({ userId: userA, civilDate })).length, 0);
+  assert.equal((await store.healthMetrics.listMinutesByCivilDate({ userId: userB, civilDate })).length, 0);
+  const cursor = await store.healthMetrics.readCursor({ connectionId: connectionB, dataType: 'heart-rate' });
+  assert.equal(cursor?.successfulWatermark?.toISOString(), now.toISOString());
+  assert.equal(cursor?.retryCount, 0);
+});
+
 test('looks up historical sleep goals and time zones without rewriting earlier rows', async () => {
   const store = createMemoryStore();
   await seedUsers(store);
@@ -390,6 +485,32 @@ test('looks up historical sleep goals and time zones without rewriting earlier r
   );
 });
 
+test('insertTimeZoneHistory allows only one backfill anchor per user', async () => {
+  const store = createMemoryStore();
+  await seedUsers(store);
+
+  await store.healthMetrics.insertTimeZoneHistory({
+    userId: userA,
+    ianaTimeZone: 'Asia/Shanghai',
+    effectiveAt: '2026-08-01T00:00:00.000Z',
+    isBackfillAnchor: true,
+  });
+  await assert.rejects(
+    store.healthMetrics.insertTimeZoneHistory({
+      userId: userA,
+      ianaTimeZone: 'Asia/Tokyo',
+      effectiveAt: '2026-08-02T00:00:00.000Z',
+      isBackfillAnchor: true,
+    }),
+    TimeZoneHistoryConflictError,
+  );
+
+  const history = await store.healthMetrics.listTimeZoneHistory(userA);
+  assert.equal(history.length, 1);
+  assert.equal(history[0]?.effectiveAt, '2026-08-01T00:00:00.000Z');
+  assert.equal(history[0]?.isBackfillAnchor, true);
+});
+
 test('reindexes stored minutes in a UTC range without changing API offsets', async () => {
   const store = createMemoryStore();
   await seedUsers(store);
@@ -430,6 +551,28 @@ test('reindexes stored minutes in a UTC range without changing API offsets', asy
   );
 });
 
+test('updateMinuteLocalAssociation rejects invalid civil dates without changing the stored minute', async () => {
+  const store = createMemoryStore();
+  await seedUsers(store);
+  await store.healthMetrics.upsertMinutes([minute({ userId: userA })]);
+
+  await assert.rejects(store.healthMetrics.updateMinuteLocalAssociation({
+    userId: userA,
+    sourceFamily,
+    minuteStartUtc: '2026-08-22T12:00:00.000Z',
+    civilDate: 'nope',
+    ianaTimeZone: 'Asia/Shanghai',
+    localMinuteOfDay: 0,
+  }));
+
+  const stored = await store.healthMetrics.listMinutesByCivilDate({ userId: userA, civilDate });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.civilDate, civilDate);
+  assert.equal(stored[0]?.ianaTimeZone, null);
+  assert.equal(stored[0]?.localMinuteOfDay, 1200);
+  assert.equal(stored[0]?.utcOffsetMinutes, 480);
+});
+
 test('schedules a cursor retry without moving the successful watermark', async () => {
   const store = createMemoryStore();
   await seedUsers(store);
@@ -459,6 +602,39 @@ test('schedules a cursor retry without moving the successful watermark', async (
     (await store.healthMetrics.listDueCursors({ now: retryAt })).map((row) => row.connectionId),
     [connectionA],
   );
+});
+
+test('scheduleCursor rejects invalid retryCount and dataType without moving the watermark', async () => {
+  const store = createMemoryStore();
+  await seedUsers(store);
+  await store.healthMetrics.updateCursor({
+    connectionId: connectionA,
+    dataType: 'heart-rate',
+    successfulWatermark: now,
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: undefined,
+  });
+
+  await assert.rejects(store.healthMetrics.scheduleCursor({
+    connectionId: connectionA,
+    dataType: 'heart-rate',
+    lastErrorCode: 'rate_limited',
+    retryCount: -1,
+    nextAttemptAt: new Date('2026-08-22T16:30:00.000Z'),
+  }));
+  await assert.rejects(store.healthMetrics.scheduleCursor({
+    connectionId: connectionA,
+    dataType: 'not-a-type' as HealthSyncDataType,
+    lastErrorCode: 'rate_limited',
+    retryCount: 1,
+    nextAttemptAt: new Date('2026-08-22T16:30:00.000Z'),
+  }));
+
+  const cursor = await store.healthMetrics.readCursor({ connectionId: connectionA, dataType: 'heart-rate' });
+  assert.equal(cursor?.successfulWatermark?.toISOString(), now.toISOString());
+  assert.equal(cursor?.retryCount, 0);
+  assert.equal(cursor?.lastErrorCode, undefined);
 });
 
 test('deleteForUser removes that user\'s minutes, intervals, daily rows, cursors, results, goals, and time zones', async () => {

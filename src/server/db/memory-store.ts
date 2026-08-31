@@ -5,6 +5,8 @@ import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDra
 import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
 import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, SessionRow } from '../auth/types';
 import {
+  HealthMetricsConnectionMismatchError,
+  mergeHeartRateMinuteUpsert,
   parseActivityLevelInterval,
   parseDailyCardio,
   parseDailyHeartRateZones,
@@ -672,6 +674,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
   }
 
   async function applyHealthWindow(input: HealthMetricsWindowWrite): Promise<void> {
+    if (connections.get(input.connectionId)?.userId !== input.userId) {
+      throw new HealthMetricsConnectionMismatchError();
+    }
     await healthMetrics.upsertMinutes(assertWindowUser(input.userId, input.minutes));
     await healthMetrics.upsertActivityLevelIntervals(assertWindowUser(input.userId, input.activityLevelIntervals));
     for (const row of assertWindowUser(input.userId, input.heartRateZones)) {
@@ -703,8 +708,11 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
     },
     async upsertMinutes(minutes) {
       for (const row of minutes) {
-        const parsed = parseHeartRateMinuteAggregate(row);
-        heartRateMinutes.set(compositeKey(parsed.userId, parsed.sourceFamily, parsed.minuteStartUtc), structuredClone(parsed));
+        const incoming = parseHeartRateMinuteAggregate(row);
+        const key = compositeKey(incoming.userId, incoming.sourceFamily, incoming.minuteStartUtc);
+        const existing = heartRateMinutes.get(key);
+        const merged = existing ? mergeHeartRateMinuteUpsert(existing, incoming) : incoming;
+        heartRateMinutes.set(key, structuredClone(merged));
       }
     },
     async listMinutesByCivilDate(input) {
@@ -723,12 +731,12 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       const key = compositeKey(input.userId, input.sourceFamily, input.minuteStartUtc);
       const current = heartRateMinutes.get(key);
       if (!current) return false;
-      heartRateMinutes.set(key, {
+      heartRateMinutes.set(key, parseHeartRateMinuteAggregate({
         ...current,
         civilDate: input.civilDate,
         ianaTimeZone: input.ianaTimeZone,
         localMinuteOfDay: input.localMinuteOfDay,
-      });
+      }));
       return true;
     },
     async upsertActivityLevelIntervals(intervals) {
@@ -819,15 +827,18 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       healthCursors.set(compositeKey(parsed.connectionId, parsed.dataType), cloneCursor(parsed));
     },
     async scheduleCursor(input) {
-      const key = compositeKey(input.connectionId, input.dataType);
-      const current = healthCursors.get(key);
-      healthCursors.set(key, cloneCursor({
+      const parsed = parseHealthSyncCursor({
         connectionId: input.connectionId,
         dataType: input.dataType,
-        successfulWatermark: current?.successfulWatermark,
         lastErrorCode: input.lastErrorCode,
         retryCount: input.retryCount,
-        nextAttemptAt: new Date(input.nextAttemptAt),
+        nextAttemptAt: input.nextAttemptAt,
+      });
+      const key = compositeKey(parsed.connectionId, parsed.dataType);
+      const current = healthCursors.get(key);
+      healthCursors.set(key, cloneCursor({
+        ...parsed,
+        successfulWatermark: current?.successfulWatermark,
       }));
     },
     async listDueCursors(input) {
@@ -859,6 +870,13 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       const parsed = parseHealthTimeZoneHistory(row);
       const key = compositeKey(parsed.userId, parsed.effectiveAt);
       if (timeZoneHistory.has(key)) throw new TimeZoneHistoryConflictError();
+      if (parsed.isBackfillAnchor) {
+        for (const existing of timeZoneHistory.values()) {
+          if (existing.userId === parsed.userId && existing.isBackfillAnchor) {
+            throw new TimeZoneHistoryConflictError();
+          }
+        }
+      }
       timeZoneHistory.set(key, structuredClone(parsed));
     },
     async lookupTimeZoneHistory(input) {

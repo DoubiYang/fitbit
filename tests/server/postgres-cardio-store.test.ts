@@ -13,6 +13,7 @@ import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { createPostgresStoreForTesting } from '../../src/server/db/postgres-store';
 import {
   healthMetricsExposesRawSamplePersistence,
+  HealthMetricsConnectionMismatchError,
   SleepGoalConflictError,
 } from '../../src/server/health/cardio-store';
 
@@ -73,6 +74,29 @@ function minute() {
     coverageSeconds: 60,
     activityLevel: 'LIGHTLY_ACTIVE',
   });
+}
+
+function minuteRow(overrides: Record<string, unknown> = {}) {
+  return {
+    user_id: userId,
+    source_family: 'google-wearables',
+    minute_start_utc: '2026-08-22T12:00:00.000Z',
+    civil_date: civilDate,
+    utc_offset: 480,
+    iana_time_zone: 'Asia/Shanghai',
+    local_minute_of_day: 0,
+    avg_bpm: 100,
+    min_bpm: 100,
+    max_bpm: 100,
+    sample_count: 8,
+    coverage_seconds: 60,
+    activity_level: 'LIGHTLY_ACTIVE',
+    ...overrides,
+  };
+}
+
+function connectionOwnerResponse(ownerUserId = userId): QueryResponse {
+  return { rows: [{ user_id: ownerUserId }] };
 }
 
 function metric() {
@@ -147,6 +171,10 @@ test('migration 010 creates the ten whoop-style metric tables with cascade, chec
   assert.match(migration, /health_sync_cursors_due_idx[\s\S]*next_attempt_at/u);
   assert.match(migration, /zones JSONB NOT NULL/u);
   assert.match(migration, /evidence JSONB NOT NULL/u);
+  assert.match(
+    migration,
+    /CREATE UNIQUE INDEX user_health_time_zone_history_backfill_anchor_uidx[\s\S]*?\(user_id\)[\s\S]*?WHERE is_backfill_anchor/u,
+  );
   assert.doesNotMatch(migration, /CREATE TABLE heart_rate_samples/u);
   assert.doesNotMatch(migration, /raw_heart_rate/u);
 });
@@ -165,6 +193,25 @@ test('upserts minutes on (user, source family, UTC minute) and never persists ra
   assert.equal((insert?.values?.[2] as Date).toISOString(), '2026-08-22T12:00:00.000Z');
   assert.equal(healthMetricsExposesRawSamplePersistence(store.healthMetrics), false);
   assert.equal(pool.queries.some((query) => /heart_rate_samples|raw_heart_rate/u.test(query.text)), false);
+});
+
+test('upsertMinutes preserves stored IANA when incoming IANA is null and utc offset is unchanged', async () => {
+  const pool = new RecordingPool([{ rows: [minuteRow()] }]);
+  const store = createPostgresStoreForTesting(pool);
+
+  await store.healthMetrics.upsertMinutes([minute()]);
+
+  const select = pool.queries.find((query) => /SELECT \* FROM heart_rate_minute_aggregates/u.test(query.text));
+  const insert = pool.queries.find((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text));
+  assert.ok(select);
+  assert.equal(select?.values?.[0], userId);
+  assert.ok(insert);
+  assert.match(insert?.text ?? '', /ON CONFLICT \(user_id, source_family, minute_start_utc\)/u);
+  assert.equal(insert?.values?.[3], civilDate);
+  assert.equal(insert?.values?.[4], 480);
+  assert.equal(insert?.values?.[5], 'Asia/Shanghai');
+  assert.equal(insert?.values?.[6], 0);
+  assert.equal(insert?.values?.[7], 110);
 });
 
 test('upserts activity-level intervals on interval start and replaces zones by local date using JSONB thresholds', async () => {
@@ -194,7 +241,10 @@ test('upserts activity-level intervals on interval start and replaces zones by l
 });
 
 test('ingestWindow writes aggregates, daily rows, results, and the data-type cursor in one transaction', async () => {
-  const pool = new RecordingPool();
+  const pool = new RecordingPool([
+    { rows: [] },
+    connectionOwnerResponse(),
+  ]);
   const store = createPostgresStoreForTesting(pool);
 
   await store.healthMetrics.ingestWindow({
@@ -225,6 +275,10 @@ test('ingestWindow writes aggregates, daily rows, results, and the data-type cur
 
   assert.equal(pool.queries[0]?.text, 'BEGIN');
   assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
+  const owner = pool.queries.find((query) => /FROM google_health_connections/u.test(query.text));
+  assert.ok(owner);
+  assert.match(owner?.text ?? '', /SELECT user_id FROM google_health_connections WHERE id = \$1/u);
+  assert.equal(owner?.values?.[0], connectionId);
   assert.equal(pool.queries.some((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text)), true);
   assert.equal(pool.queries.some((query) => /INSERT INTO daily_cardio/u.test(query.text)), true);
   const resultInsert = pool.queries.find((query) => /INSERT INTO metric_results/u.test(query.text));
@@ -239,6 +293,8 @@ test('ingestWindow writes aggregates, daily rows, results, and the data-type cur
 
 test('rolls the ingest window back when a later metric write fails', async () => {
   const pool = new RecordingPool([
+    { rows: [] },
+    connectionOwnerResponse(),
     { rows: [] },
     { rows: [] },
     new Error('metric_results write failed'),
@@ -257,6 +313,44 @@ test('rolls the ingest window back when a later metric write fails', async () =>
 
   assert.equal(pool.queries[0]?.text, 'BEGIN');
   assert.equal(pool.queries.at(-1)?.text, 'ROLLBACK');
+});
+
+test('ingestWindow rolls back when the connection does not belong to the window user', async () => {
+  const pool = new RecordingPool([
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+  ]);
+  const store = createPostgresStoreForTesting(pool);
+
+  await assert.rejects(store.healthMetrics.ingestWindow({
+    userId,
+    connectionId,
+    dataType: 'heart-rate',
+    minutes: [minute()],
+    cursor: { successfulWatermark: now, lastErrorCode: undefined, retryCount: 0, nextAttemptAt: undefined },
+  }), HealthMetricsConnectionMismatchError);
+
+  assert.equal(pool.queries[0]?.text, 'BEGIN');
+  assert.equal(pool.queries.at(-1)?.text, 'ROLLBACK');
+  assert.equal(pool.queries.some((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text)), false);
+  assert.equal(pool.queries.some((query) => /INSERT INTO health_sync_cursors/u.test(query.text)), false);
+
+  const wrongOwner = new RecordingPool([
+    { rows: [] },
+    connectionOwnerResponse('33333333-3333-3333-3333-333333333333'),
+    { rows: [] },
+  ]);
+  const wrongOwnerStore = createPostgresStoreForTesting(wrongOwner);
+  await assert.rejects(wrongOwnerStore.healthMetrics.ingestWindow({
+    userId,
+    connectionId,
+    dataType: 'heart-rate',
+    minutes: [minute()],
+    cursor: { successfulWatermark: now, lastErrorCode: undefined, retryCount: 0, nextAttemptAt: undefined },
+  }), HealthMetricsConnectionMismatchError);
+  assert.equal(wrongOwner.queries.at(-1)?.text, 'ROLLBACK');
+  assert.equal(wrongOwner.queries.some((query) => /INSERT INTO health_sync_cursors/u.test(query.text)), false);
 });
 
 test('looks up historical sleep goals and due cursors with user/date predicates', async () => {
@@ -288,6 +382,7 @@ test('looks up historical sleep goals and due cursors with user/date predicates'
 test('range-updates minute local associations and maps JSONB metric results', async () => {
   const pool = new RecordingPool([
     { rows: [] },
+    { rows: [minuteRow({ iana_time_zone: null, local_minute_of_day: 1200 })] },
     { rows: [{ user_id: userId }], rowCount: 1 },
     { rows: [{
       user_id: userId,
@@ -326,11 +421,47 @@ test('range-updates minute local associations and maps JSONB metric results', as
 
   assert.match(pool.queries[0]?.text ?? '', /FROM heart_rate_minute_aggregates/u);
   assert.match(pool.queries[0]?.text ?? '', /minute_start_utc >= \$2/u);
-  assert.match(pool.queries[1]?.text ?? '', /UPDATE heart_rate_minute_aggregates/u);
-  assert.match(pool.queries[1]?.text ?? '', /iana_time_zone = \$5/u);
+  const selectExisting = pool.queries.find((query) => (
+    /SELECT \* FROM heart_rate_minute_aggregates/u.test(query.text)
+    && /minute_start_utc = \$3/u.test(query.text)
+  ));
+  const update = pool.queries.find((query) => /UPDATE heart_rate_minute_aggregates/u.test(query.text));
+  assert.ok(selectExisting);
+  assert.ok(update);
+  assert.match(update?.text ?? '', /iana_time_zone = \$5/u);
+  assert.doesNotMatch(update?.text ?? '', /utc_offset/u);
   assert.equal(updated, true);
   assert.equal(result?.score, 8.4);
   assert.equal(result?.evidence[0]?.label, 'dose');
+});
+
+test('scheduleCursor leaves successful_watermark untouched and rejects invalid retryCount before querying', async () => {
+  const pool = new RecordingPool();
+  const store = createPostgresStoreForTesting(pool);
+  const retryAt = new Date('2026-08-22T16:30:00.000Z');
+
+  await store.healthMetrics.scheduleCursor({
+    connectionId,
+    dataType: 'heart-rate',
+    lastErrorCode: 'rate_limited',
+    retryCount: 1,
+    nextAttemptAt: retryAt,
+  });
+
+  const insert = pool.queries.find((query) => /INSERT INTO health_sync_cursors/u.test(query.text));
+  assert.ok(insert);
+  assert.doesNotMatch(insert?.text ?? '', /successful_watermark/u);
+  assert.match(insert?.text ?? '', /ON CONFLICT \(connection_id, data_type\)/u);
+
+  const beforeInvalid = pool.queries.length;
+  await assert.rejects(store.healthMetrics.scheduleCursor({
+    connectionId,
+    dataType: 'heart-rate',
+    lastErrorCode: 'rate_limited',
+    retryCount: -1,
+    nextAttemptAt: retryAt,
+  }));
+  assert.equal(pool.queries.length, beforeInvalid);
 });
 
 test('deleteForUser removes every whoop-style metric table for that user inside a transaction', async () => {

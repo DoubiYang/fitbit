@@ -7,6 +7,7 @@ import { parseVisionMeal } from '../../domain/meal-vision';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, MealSyncStore, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
 import {
+  HealthMetricsConnectionMismatchError,
   isUniqueViolation,
   mapActivityLevelIntervalRow,
   mapDailyCardioRow,
@@ -18,6 +19,7 @@ import {
   mapHeartRateMinuteAggregateRow,
   mapMetricResultRow,
   mapSleepGoalRow,
+  mergeHeartRateMinuteUpsert,
   parseActivityLevelInterval,
   parseDailyCardio,
   parseDailyHeartRateZones,
@@ -1338,11 +1340,26 @@ function storeFor(queryable: Queryable): AuthStore {
       if (canStartTransaction(queryable)) {
         return store.withTransaction((inner) => inner.healthMetrics.ingestWindow(input));
       }
+      const owner = await queryable.query(
+        'SELECT user_id FROM google_health_connections WHERE id = $1',
+        [input.connectionId],
+      );
+      if (owner.rows[0]?.user_id !== input.userId) {
+        throw new HealthMetricsConnectionMismatchError();
+      }
       await applyHealthWindow(healthMetrics, input);
     },
     async upsertMinutes(minutes) {
       for (const row of minutes) {
-        const parsed = parseHeartRateMinuteAggregate(row);
+        const incoming = parseHeartRateMinuteAggregate(row);
+        const existingResult = await queryable.query(
+          `SELECT * FROM heart_rate_minute_aggregates
+           WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3`,
+          [incoming.userId, incoming.sourceFamily, new Date(incoming.minuteStartUtc)],
+        );
+        const merged = existingResult.rows[0]
+          ? mergeHeartRateMinuteUpsert(mapHeartRateMinuteAggregateRow(existingResult.rows[0]), incoming)
+          : incoming;
         await queryable.query(
           `INSERT INTO heart_rate_minute_aggregates (
             user_id, source_family, minute_start_utc, civil_date, utc_offset, iana_time_zone,
@@ -1360,19 +1377,19 @@ function storeFor(queryable: Queryable): AuthStore {
             coverage_seconds = EXCLUDED.coverage_seconds,
             activity_level = EXCLUDED.activity_level`,
           [
-            parsed.userId,
-            parsed.sourceFamily,
-            new Date(parsed.minuteStartUtc),
-            parsed.civilDate,
-            parsed.utcOffsetMinutes,
-            parsed.ianaTimeZone,
-            parsed.localMinuteOfDay,
-            parsed.avgBpm,
-            parsed.minBpm,
-            parsed.maxBpm,
-            parsed.sampleCount,
-            parsed.coverageSeconds,
-            parsed.activityLevel,
+            merged.userId,
+            merged.sourceFamily,
+            new Date(merged.minuteStartUtc),
+            merged.civilDate,
+            merged.utcOffsetMinutes,
+            merged.ianaTimeZone,
+            merged.localMinuteOfDay,
+            merged.avgBpm,
+            merged.minBpm,
+            merged.maxBpm,
+            merged.sampleCount,
+            merged.coverageSeconds,
+            merged.activityLevel,
           ],
         );
       }
@@ -1398,12 +1415,25 @@ function storeFor(queryable: Queryable): AuthStore {
       return result.rows.map(mapHeartRateMinuteAggregateRow);
     },
     async updateMinuteLocalAssociation(input) {
+      const existingResult = await queryable.query(
+        `SELECT * FROM heart_rate_minute_aggregates
+         WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3`,
+        [input.userId, input.sourceFamily, new Date(input.minuteStartUtc)],
+      );
+      const existingRow = existingResult.rows[0];
+      if (!existingRow) return false;
+      const merged = parseHeartRateMinuteAggregate({
+        ...mapHeartRateMinuteAggregateRow(existingRow),
+        civilDate: input.civilDate,
+        ianaTimeZone: input.ianaTimeZone,
+        localMinuteOfDay: input.localMinuteOfDay,
+      });
       const result = await queryable.query(
         `UPDATE heart_rate_minute_aggregates
          SET civil_date = $4, iana_time_zone = $5, local_minute_of_day = $6
          WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3
          RETURNING user_id`,
-        [input.userId, input.sourceFamily, new Date(input.minuteStartUtc), input.civilDate, input.ianaTimeZone, input.localMinuteOfDay],
+        [merged.userId, merged.sourceFamily, new Date(merged.minuteStartUtc), merged.civilDate, merged.ianaTimeZone, merged.localMinuteOfDay],
       );
       return (result.rowCount ?? 0) === 1;
     },
@@ -1660,6 +1690,13 @@ function storeFor(queryable: Queryable): AuthStore {
       );
     },
     async scheduleCursor(input) {
+      const parsed = parseHealthSyncCursor({
+        connectionId: input.connectionId,
+        dataType: input.dataType,
+        lastErrorCode: input.lastErrorCode,
+        retryCount: input.retryCount,
+        nextAttemptAt: input.nextAttemptAt,
+      });
       await queryable.query(
         `INSERT INTO health_sync_cursors (
           connection_id, data_type, last_error_code, retry_count, next_attempt_at, updated_at
@@ -1669,7 +1706,7 @@ function storeFor(queryable: Queryable): AuthStore {
            retry_count = EXCLUDED.retry_count,
            next_attempt_at = EXCLUDED.next_attempt_at,
            updated_at = EXCLUDED.updated_at`,
-        [input.connectionId, input.dataType, input.lastErrorCode, input.retryCount, input.nextAttemptAt],
+        [parsed.connectionId, parsed.dataType, parsed.lastErrorCode ?? null, parsed.retryCount, parsed.nextAttemptAt ?? null],
       );
     },
     async listDueCursors(input) {

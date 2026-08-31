@@ -147,6 +147,13 @@ export class TimeZoneHistoryConflictError extends Error {
   }
 }
 
+export class HealthMetricsConnectionMismatchError extends Error {
+  constructor() {
+    super('health metrics connection does not belong to user');
+    this.name = 'HealthMetricsConnectionMismatchError';
+  }
+}
+
 export function healthMetricsExposesRawSamplePersistence(store: object): boolean {
   return Object.keys(store).some((name) => /sample/i.test(name));
 }
@@ -197,9 +204,37 @@ export function parseHealthSyncCursor(input: unknown): HealthSyncCursor {
     dataType: parseHealthSyncDataType(value.dataType),
     successfulWatermark: optionalDate(value.successfulWatermark),
     lastErrorCode: value.lastErrorCode == null || value.lastErrorCode === '' ? undefined : String(value.lastErrorCode),
-    retryCount: Number(value.retryCount ?? 0),
+    retryCount: parseNonNegativeInteger(value.retryCount ?? 0, 'retryCount'),
     nextAttemptAt: optionalDate(value.nextAttemptAt),
   };
+}
+
+export function mergeHeartRateMinuteUpsert(
+  existing: HeartRateMinuteAggregate,
+  incoming: HeartRateMinuteAggregate,
+): HeartRateMinuteAggregate {
+  const preserveLocalAssociation =
+    incoming.ianaTimeZone == null && incoming.utcOffsetMinutes === existing.utcOffsetMinutes;
+  return parseHeartRateMinuteAggregate({
+    ...incoming,
+    utcOffsetMinutes: incoming.utcOffsetMinutes,
+    avgBpm: incoming.avgBpm,
+    minBpm: incoming.minBpm,
+    maxBpm: incoming.maxBpm,
+    sampleCount: incoming.sampleCount,
+    coverageSeconds: incoming.coverageSeconds,
+    activityLevel: incoming.activityLevel,
+    ianaTimeZone: preserveLocalAssociation ? existing.ianaTimeZone : incoming.ianaTimeZone,
+    civilDate: preserveLocalAssociation ? existing.civilDate : incoming.civilDate,
+    localMinuteOfDay: preserveLocalAssociation ? existing.localMinuteOfDay : incoming.localMinuteOfDay,
+  });
+}
+
+function parseNonNegativeInteger(value: unknown, column: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`invalid ${column}`);
+  }
+  return value;
 }
 
 function optionalDate(value: unknown): Date | undefined {
