@@ -15,13 +15,23 @@
 ## Locked implementation rules
 
 - Google `daily-heart-rate-zones` are the only HR-zone thresholds. Never infer max HR from history or write hard-coded bpm thresholds.
-- `time-in-heart-rate-zone` is display/validation data only. Daily Strain is calculated from raw, activity-attributable minute aggregates.
-- An absent/unknown `motionContext` is unknown, not sedentary. It cannot establish a complete day or produce a zero Strain.
+- `time-in-heart-rate-zone` is an interval type. Persist daily totals via `dailyRollUp` or summed intervals. It is display/validation data only. Daily Strain is calculated from raw, activity-attributable minute aggregates.
+- List/reconcile filters use the same snake_case identifiers as the existing daily HRV/RHR filters (`heart_rate.sample_time.physical_time`, `daily_heart_rate_zones.date`, `time_in_heart_rate_zone.interval.start_time`). JSON bodies stay camelCase; `motionContext` lives at `heartRate.metadata.motionContext`.
+- Raw heart-rate `reconcile` uses `pageSize=10000`. Sleep/exercise stay at 25.
+- Minute aggregation keeps a one-sample lookahead across page boundaries and merges coverage intervals for the same UTC minute. Do not add coverage seconds from two pages.
+- An absent/`MOTION_CONTEXT_UNSPECIFIED` `motionContext` is unknown, not sedentary. It cannot establish a complete day or produce a zero Strain. Until Task 0 proves ACTIVE/SEDENTARY exist on this Fitbit Air, Strain from unknown-context minutes is allowed only via exercise overlap and is `provisional`.
+- Past incomplete days with attributed activity minutes may show labeled `provisional` Strain. `0.0` is only for a complete rest day.
+- Recomputing Strain for date `D` must recompute Sleep Performance and Recovery for `D+1`.
+- Sleep debt walks 7 calendar days and uses the longest non-nap session that day even if under 180 minutes; a day with no non-nap session counts as 0 minutes. It does not zero the whole bonus. Sleep Performance still requires a primary sleep (non-nap, `minutesAsleep >= 180`, longest session).
+- A missing sleep goal blocks Sleep Performance only. HRV+RHR Recovery may still score. Never use hardcoded `sleepGoalMinutes: 480`.
+- Recovery staleness uses 36 hours and at most drops quality to `provisional`; missing/out-of-range inputs make it `unavailable`. HRV MAD floor is 2 ms; RHR floor stays 3 bpm. Median of an even window is the mean of the two central values. Round only the final integer/one-decimal score, half away from zero.
 - Raw heart-rate points must never be inserted into PostgreSQL or sent to the AI context; only minute aggregates may be retained.
 - Missing or offset-mismatched IANA time-zone history makes a DST-sensitive day incomplete; use its raw data for display only.
 - The first authenticated IANA time-zone write must locally reindex already stored matching historical minutes and recompute their days/results; it must not wait for a raw-API refetch. Later time-zone writes only affect their own history range.
-- Metric version for this implementation is `whoop-style-v2`; previously stored `p1-v1` values remain legacy and are not relabeled.
+- Metric version for this implementation is `whoop-style-v2`; previously stored `p1-v1` values remain legacy and are not relabeled. Do not name it `strain-v2`.
+- Strain completion state (`complete` / `provisional` / `incomplete` / `timezone_ambiguous` / `unavailable`) is not the Recovery quality union (`unavailable` / `provisional` / `medium` / `high`).
 - Google Health requests stay restricted to `users/me/dataSourceFamilies/google-wearables` and fail closed on auth/rate-limit errors.
+- Replace `src/server/time/civil-date.ts` default `Asia/Shanghai` usage in dashboard date selection with the user's stored IANA history.
 
 ## File map
 
@@ -42,6 +52,7 @@
 | `src/server/health/scheduled-sync.ts` | One-hour cadence and retry policy. |
 | `src/server/db/{memory-store,postgres-store}.ts` and `src/server/auth/types.ts` | Implement/ expose the v2 health-metric and sleep-goal store operations. |
 | `src/server/settings/{sleep-goal,time-zone}.ts` and `app/api/settings/{sleep-goal,time-zone}/route.ts` | Authenticated sleep-goal and IANA time-zone history endpoints; time-zone writes reindex matching saved historical days. |
+| `src/server/time/civil-date.ts` | Stop using a hardcoded `Asia/Shanghai` default for dashboard “today”; resolve the local date from stored IANA history. |
 | `src/server/dashboard/{build-today,today-response}.ts` | Compose the v2 read model and remove training-safety language. |
 | `src/ui/dashboard/{today-dashboard,metric-card}.tsx` | Present Strain, Recovery, Sleep Performance, quality, coverage, and sources. |
 | `tests/domain/*.test.ts`, `tests/server/*.test.ts`, `tests/ui/*.test.ts` | Unit, persistence, worker, endpoint, and view regressions. |
@@ -63,7 +74,7 @@
 
 - [ ] **Step 3: Run it against the user's authorized local Fitbit Air account.**
 
-  Record only capability booleans/counts in the spec: raw HR available, any `ACTIVE`/`SEDENTARY` contexts available, all four zone types available, and time-in-zone available. If a required source is absent, retain the explicit `unavailable` product path and do not invent a fallback from historical maximum HR.
+  If the Google refresh token is expired, reauthorize from the account page first. Record only capability booleans/counts in the spec: raw HR available, any `ACTIVE`/`SEDENTARY` contexts available (wake vs sleep vs exercise), all four zone types available and adjacent, and time-in-zone available via dailyRollUp or interval. If a required source is absent, retain the explicit `unavailable` product path and do not invent a fallback from historical maximum HR.
 
 - [ ] **Step 4: Run the probe regression test and commit.**
 
@@ -85,7 +96,7 @@
 
 - [ ] **Step 1: Write failing domain tests for threshold validation and minute aggregation.**
 
-  Cover exactly four ordered Google zones; allow shared adjacent boundaries; classify `LIGHT/MODERATE/VIGOROUS` as `[min,max)` and `PEAK` as `[min,max]`. Test a 75-second sample hold split over minute boundaries, 30-second minute eligibility, context precedence, and missing context becoming `unknown`.
+  Cover exactly four ordered Google zones; allow shared adjacent boundaries; classify `LIGHT/MODERATE/VIGOROUS` as `[min,max)` and `PEAK` as `[min,max]`. Test a 75-second sample hold split over minute boundaries, a page-boundary lookahead that neither double-counts nor drops coverage, 30-second minute eligibility, context precedence, `MOTION_CONTEXT_UNSPECIFIED` becoming `unknown`, and BPM above `peak.max` producing no dose.
 
 - [ ] **Step 2: Run the new test file and verify it fails because the v2 modules do not exist.**
 
@@ -93,7 +104,7 @@
 
 - [ ] **Step 3: Implement immutable v2 input/output types and validation.**
 
-  Define `HeartRateMinuteAggregate`, `DailyHeartRateZones`, `DailyTimeInZone`, `ExerciseInterval`, `DailyCardio`, `SleepGoal`, `MetricResult`, and a distinct v2 quality union `unavailable | provisional | medium | high`. Preserve legacy `MetricQuality` (`low` / `calibrating` included) until no legacy dashboard code imports it. Do not reuse `TrainingBalanceResult` as Strain.
+  Define `HeartRateMinuteAggregate`, `DailyHeartRateZones`, `DailyTimeInZone`, `ExerciseInterval`, `DailyCardio`, `SleepGoal`, `MetricResult`, Recovery quality `unavailable | provisional | medium | high`, and a separate Strain status `complete | provisional | incomplete | timezone_ambiguous | unavailable`. Preserve legacy `MetricQuality` (`low` / `calibrating` included) until no legacy dashboard code imports it. Do not reuse `TrainingBalanceResult` as Strain.
 
 - [ ] **Step 4: Write failing deterministic calculation tests.**
 
@@ -104,7 +115,7 @@
   const strain = Math.round(Math.min(21, 21 * (1 - Math.exp(-dose / 140))) * 10) / 10;
   ```
 
-  Test unknown context cannot make a day complete or yield zero; a fully known sedentary day yields `0.0`; provisional/current-day, complete-day, and incomplete-day thresholds follow the spec. Test sleep target selection, the 7-day consecutive debt requirement, `T + 1` behavior, Sleep Performance, 7/28-day HRV/RHR MAD scoring, field-independent baselines, and all four Recovery quality outcomes.
+  Test unknown context cannot make a day complete or yield zero; a fully known sedentary day yields `0.0`; a past incomplete day with attributed activity yields labeled provisional Strain, not `0.0`. Test sleep target selection, 7 calendar-day debt that counts a missing non-nap day as 0 minutes and still includes a 179-minute non-nap night in the sum, `T + 1` behavior, Sleep Performance without a hardcoded 480-minute goal, 7/28-day HRV/RHR MAD scoring with a 2 ms HRV floor and even-n median, HRV+RHR Recovery without Sleep, Strain(D) recomputation cascading to Sleep/Recovery(D+1), and Recovery quality outcomes including 36-hour stale sync remaining provisional rather than unavailable.
 
 - [ ] **Step 5: Implement the pure functions until the tests pass.**
 
@@ -178,7 +189,7 @@
 
 - [ ] **Step 2: Add typed filters and API point shapes.**
 
-  Add Google filter cases for `heart-rate`, `daily-heart-rate-zones`, and `time-in-heart-rate-zone`, using the documented filter parameter names. Extend `GoogleDataPoint` to parse `heartRate.sampleTime.physicalTime`, required `utcOffset`, output civil time, optional `motionContext`, daily zone entries, and time-in-zone intervals.
+  Add Google filter cases for `heart-rate`, `daily-heart-rate-zones`, and `time-in-heart-rate-zone`, using snake_case identifiers consistent with `daily_heart_rate_variability.date`. Extend `GoogleDataPoint` to parse `heartRate.sampleTime.physicalTime`, required `utcOffset`, output civil time, optional `heartRate.metadata.motionContext`, daily zone entries, and time-in-zone intervals. Heart-rate reconcile `pageSize` is 10000.
 
 - [ ] **Step 3: Write failing mapping tests from realistic Google fixtures.**
 
@@ -212,7 +223,7 @@
 
 - [ ] **Step 1: Write failing sync tests for initial and incremental windows.**
 
-  Assert initial raw HR uses `now − 37 × 24h` through `now`, and initial daily requests use the documented 36-days-before to 1-day-after UTC date window rather than `Asia/Shanghai`; after that, raw HR/time-in-zone/exercise use cursor minus two hours and sleep/HRV/RHR/daily-zone use 48 hours. Include timezone/DST and 35-local-day boundary fixtures, page-by-page raw ingestion, duplicate overlap idempotence, a **second raw page failure** that leaves its successful watermark unchanged, and retry output with no missing/duplicate minutes, dose, or metric result. For one data-type 429 plus another successful type, assert the former writes its own retry count/error/next attempt while the latter advances; the connection becomes due at the former's earliest retry. Assert no raw point is retained after the page callback returns.
+  Assert initial raw HR uses `now − 37 × 24h` through `now`, and initial daily requests use the documented 36-days-before to 1-day-after UTC date window rather than `Asia/Shanghai`; after that, raw HR/exercise use cursor minus two hours, and sleep/HRV/RHR/daily-zone/time-in-zone use 48 hours. Include timezone/DST and 35-local-day boundary fixtures, page-by-page raw ingestion with lookahead, duplicate overlap idempotence, a **second raw page failure** that leaves its successful watermark unchanged, Strain(D) cascading to Sleep/Recovery(D+1), and retry output with no missing/duplicate minutes, dose, or metric result. For one data-type 429 plus another successful type, assert the former writes its own retry count/error/next attempt while the latter advances; the connection becomes due at the former's earliest retry. Assert no raw point is retained after the page callback returns.
 
 - [ ] **Step 2: Implement `cardio-sync.ts`.**
 
@@ -245,6 +256,7 @@
 - Modify: `src/server/health/cardio-sync.ts`
 - Create: `app/api/settings/sleep-goal/route.ts`
 - Create: `app/api/settings/time-zone/route.ts`
+- Modify: `src/server/time/civil-date.ts`
 - Modify: `src/server/dashboard/build-today.ts`
 - Modify: `src/server/dashboard/today-response.ts`
 - Modify: `app/api/today/route.ts`
@@ -273,7 +285,7 @@
   Run: `npm test -- tests/server/sleep-goal.test.ts tests/server/today-response.test.ts tests/server/build-today.test.ts`
 
   ```bash
-  git add src/server/settings/sleep-goal.ts src/server/settings/time-zone.ts src/server/health/cardio-reindex.ts src/server/health/cardio-store.ts src/server/health/cardio-sync.ts app/api/settings/sleep-goal/route.ts app/api/settings/time-zone/route.ts src/server/dashboard/build-today.ts src/server/dashboard/today-response.ts app/api/today/route.ts tests/server/sleep-goal.test.ts tests/server/today-response.test.ts tests/server/build-today.test.ts
+  git add src/server/settings/sleep-goal.ts src/server/settings/time-zone.ts src/server/health/cardio-reindex.ts src/server/health/cardio-store.ts src/server/health/cardio-sync.ts src/server/time/civil-date.ts app/api/settings/sleep-goal/route.ts app/api/settings/time-zone/route.ts src/server/dashboard/build-today.ts src/server/dashboard/today-response.ts app/api/today/route.ts tests/server/sleep-goal.test.ts tests/server/today-response.test.ts tests/server/build-today.test.ts
   git commit -m "feat: expose sleep goals and WHOOP-style metrics"
   ```
 
