@@ -218,6 +218,29 @@ test('page-boundary lookahead neither double-counts nor drops coverage', () => {
   assert.equal(merged.find((minute) => minute.minuteStartUtc === '2026-08-22T00:00:00.000Z')?.coverageSeconds, 30);
 });
 
+test('page-merge average BPM does not double-weight the same overlapping span', () => {
+  const page1 = aggregateHeartRateMinutes({
+    userId,
+    sourceFamily,
+    samples: [sample('2026-08-22T00:00:00.000Z', 80)],
+    lookaheadSample: sample('2026-08-22T00:00:30.000Z', 90),
+  });
+  const page2 = aggregateHeartRateMinutes({
+    userId,
+    sourceFamily,
+    samples: [sample('2026-08-22T00:00:00.000Z', 100)],
+    lookaheadSample: sample('2026-08-22T00:00:30.000Z', 90),
+  });
+  const merged = mergeHeartRateMinuteCoverages([page1, page2]);
+  const naiveDoubleWeighted = (80 * 30 + 100 * 30) / 60;
+
+  assert.equal(page1[0]?.coverageSeconds, 30);
+  assert.equal(page2[0]?.coverageSeconds, 30);
+  assert.equal(merged[0]?.coverageSeconds, 30);
+  assert.equal(merged[0]?.avgBpm, 80);
+  assert.notEqual(merged[0]?.avgBpm, naiveDoubleWeighted);
+});
+
 test('a minute is eligible only with at least 30 seconds of coverage', () => {
   const ineligible = aggregateHeartRateMinutes({
     userId,
@@ -299,6 +322,35 @@ test('activity-level precedence uses overlap seconds then VERY_ACTIVE > MODERATE
   assert.equal(equalOverlap, 'VERY_ACTIVE');
   assert.equal(longerSedentary, 'SEDENTARY');
   assert.equal(threeWayTie, 'MODERATELY_ACTIVE');
+});
+
+test('overlapping same-type activity-level intervals union coverage instead of summing', () => {
+  const minuteStartUtc = '2026-08-22T12:00:00.000Z';
+  const dominant = assignActivityLevel(minuteStartUtc, [
+    parseActivityLevelInterval({
+      userId,
+      sourceFamily,
+      startTime: '2026-08-22T12:00:00.000Z',
+      endTime: '2026-08-22T12:00:20.000Z',
+      activityLevelType: 'LIGHTLY_ACTIVE',
+    }),
+    parseActivityLevelInterval({
+      userId,
+      sourceFamily,
+      startTime: '2026-08-22T12:00:10.000Z',
+      endTime: '2026-08-22T12:00:30.000Z',
+      activityLevelType: 'LIGHTLY_ACTIVE',
+    }),
+    parseActivityLevelInterval({
+      userId,
+      sourceFamily,
+      startTime: '2026-08-22T12:00:30.000Z',
+      endTime: '2026-08-22T12:01:00.000Z',
+      activityLevelType: 'VERY_ACTIVE',
+    }),
+  ]);
+
+  assert.equal(dominant, 'VERY_ACTIVE');
 });
 
 test('sleep overlap excludes LIGHTLY_ACTIVE minutes from Strain unless exercise covers 30 seconds', () => {

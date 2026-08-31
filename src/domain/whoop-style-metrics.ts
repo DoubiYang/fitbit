@@ -167,17 +167,24 @@ function civilDateFromOffset(utcMs: number, utcOffsetMinutes: number): { civilDa
   };
 }
 
-function overlapMs(leftStart: number, leftEnd: number, rightStart: number, rightEnd: number): number {
-  return Math.max(0, Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart));
-}
-
 function toIso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-function unionIntervals(intervals: Array<{ startMs: number; endMs: number; bpm: number }>): Array<{ startMs: number; endMs: number; bpm: number }> {
+function clipToRange(
+  startMs: number,
+  endMs: number,
+  rangeStart: number,
+  rangeEnd: number,
+): { startMs: number; endMs: number } | undefined {
+  const clippedStart = Math.max(startMs, rangeStart);
+  const clippedEnd = Math.min(endMs, rangeEnd);
+  return clippedEnd > clippedStart ? { startMs: clippedStart, endMs: clippedEnd } : undefined;
+}
+
+function unionIntervals(intervals: Array<{ startMs: number; endMs: number }>): Array<{ startMs: number; endMs: number }> {
   const sorted = [...intervals].sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
-  const merged: Array<{ startMs: number; endMs: number; bpm: number }> = [];
+  const merged: Array<{ startMs: number; endMs: number }> = [];
 
   for (const interval of sorted) {
     const previous = merged[merged.length - 1];
@@ -192,25 +199,63 @@ function unionIntervals(intervals: Array<{ startMs: number; endMs: number; bpm: 
 }
 
 function coverageSecondsFrom(intervals: Array<{ startMs: number; endMs: number }>): number {
-  return unionIntervals(intervals.map((interval) => ({ ...interval, bpm: 0 }))).reduce(
-    (total, interval) => total + (interval.endMs - interval.startMs) / 1_000,
-    0,
-  );
+  return unionIntervals(intervals).reduce((total, interval) => total + (interval.endMs - interval.startMs) / 1_000, 0);
 }
 
-function weightedAverageBpm(intervals: Array<{ startMs: number; endMs: number; bpm: number }>): number {
+function coverageStats(intervals: Array<{ startMs: number; endMs: number; bpm: number }>): { coverageSeconds: number; avgBpm: number } {
+  const events: Array<{ ms: number; kind: 'start' | 'end'; index: number }> = [];
+  intervals.forEach((interval, index) => {
+    if (interval.endMs <= interval.startMs) {
+      return;
+    }
+    events.push({ ms: interval.startMs, kind: 'start', index });
+    events.push({ ms: interval.endMs, kind: 'end', index });
+  });
+  events.sort((left, right) => {
+    if (left.ms !== right.ms) {
+      return left.ms - right.ms;
+    }
+    if (left.kind !== right.kind) {
+      return left.kind === 'end' ? -1 : 1;
+    }
+    return left.index - right.index;
+  });
+
+  const active = new Set<number>();
+  let lastMs: number | undefined;
   let weighted = 0;
-  let seconds = 0;
-  for (const interval of intervals) {
-    const duration = (interval.endMs - interval.startMs) / 1_000;
-    weighted += interval.bpm * duration;
-    seconds += duration;
+  let coverageMs = 0;
+
+  for (const event of events) {
+    if (lastMs !== undefined && event.ms > lastMs && active.size > 0) {
+      let firstIndex = Number.POSITIVE_INFINITY;
+      for (const index of active) {
+        if (index < firstIndex) {
+          firstIndex = index;
+        }
+      }
+      const durationMs = event.ms - lastMs;
+      weighted += intervals[firstIndex]!.bpm * (durationMs / 1_000);
+      coverageMs += durationMs;
+    }
+
+    if (event.kind === 'start') {
+      active.add(event.index);
+    } else {
+      active.delete(event.index);
+    }
+    lastMs = event.ms;
   }
-  return seconds === 0 ? 0 : weighted / seconds;
+
+  const coverageSeconds = coverageMs / 1_000;
+  return {
+    coverageSeconds,
+    avgBpm: coverageSeconds === 0 ? 0 : weighted / coverageSeconds,
+  };
 }
 
 function finalizeMinute(minute: MutableMinute): AggregatedHeartRateMinute {
-  const coverageSeconds = coverageSecondsFrom(minute.intervals);
+  const { coverageSeconds, avgBpm } = coverageStats(minute.intervals);
   const local = civilDateFromOffset(minute.minuteStartMs, minute.utcOffsetMinutes);
   return {
     userId: minute.userId,
@@ -220,7 +265,7 @@ function finalizeMinute(minute: MutableMinute): AggregatedHeartRateMinute {
     utcOffsetMinutes: minute.utcOffsetMinutes,
     ianaTimeZone: null,
     localMinuteOfDay: local.localMinuteOfDay,
-    avgBpm: weightedAverageBpm(minute.intervals),
+    avgBpm,
     minBpm: minute.minBpm,
     maxBpm: minute.maxBpm,
     sampleCount: minute.samples.size,
@@ -342,19 +387,22 @@ export function mergeHeartRateMinuteCoverages(pages: AggregatedHeartRateMinute[]
 export function assignActivityLevel(minuteStartUtc: string, intervals: ActivityLevelInterval[]): MinuteActivityLevel {
   const startMs = Date.parse(minuteStartUtc);
   const endMs = startMs + MINUTE_MS;
-  const totals = new Map<ActivityLevelType, number>();
+  const byType = new Map<ActivityLevelType, Array<{ startMs: number; endMs: number }>>();
 
   for (const interval of intervals) {
-    const overlap = overlapMs(startMs, endMs, Date.parse(interval.startTime), Date.parse(interval.endTime));
-    if (overlap <= 0) {
+    const clipped = clipToRange(Date.parse(interval.startTime), Date.parse(interval.endTime), startMs, endMs);
+    if (!clipped) {
       continue;
     }
-    totals.set(interval.activityLevelType, (totals.get(interval.activityLevelType) ?? 0) + overlap);
+    const current = byType.get(interval.activityLevelType) ?? [];
+    current.push(clipped);
+    byType.set(interval.activityLevelType, current);
   }
 
   let best: ActivityLevelType | undefined;
   let bestMs = -1;
-  for (const [type, milliseconds] of totals) {
+  for (const [type, parts] of byType) {
+    const milliseconds = coverageSecondsFrom(parts) * 1_000;
     if (milliseconds > bestMs || (milliseconds === bestMs && best !== undefined && ACTIVITY_PRECEDENCE[type] > ACTIVITY_PRECEDENCE[best])) {
       best = type;
       bestMs = milliseconds;
@@ -381,11 +429,14 @@ export function isStrainAttributedMinute(input: {
 function intervalOverlapSeconds(minuteStartUtc: string, intervals: Array<{ startTime: string; endTime: string }>): number {
   const startMs = Date.parse(minuteStartUtc);
   const endMs = startMs + MINUTE_MS;
-  let total = 0;
+  const clipped: Array<{ startMs: number; endMs: number }> = [];
   for (const interval of intervals) {
-    total += overlapMs(startMs, endMs, Date.parse(interval.startTime), Date.parse(interval.endTime)) / 1_000;
+    const overlap = clipToRange(Date.parse(interval.startTime), Date.parse(interval.endTime), startMs, endMs);
+    if (overlap) {
+      clipped.push(overlap);
+    }
   }
-  return total;
+  return coverageSecondsFrom(clipped);
 }
 
 function isEligibleMinute(minute: HeartRateMinuteAggregate): boolean {

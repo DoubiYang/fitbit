@@ -272,6 +272,81 @@ test('current days stay in progress and exercise-only coverage can still be prov
   assert.equal(exerciseOnly.source.activityLevel, false);
 });
 
+test('exercise overlap uses unioned seconds so duplicate 20s sessions do not attribute strain', () => {
+  const unknownMinute = minute({
+    localMinuteOfDay: 12 * 60,
+    avgBpm: 110,
+    minBpm: 110,
+    maxBpm: 110,
+    activityLevel: 'unknown',
+  });
+  const overlapping = computeStrain({
+    userId,
+    date,
+    minutes: [unknownMinute],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [
+      parseExerciseInterval({
+        userId,
+        sourceFamily,
+        sourceRecordId: 'ex-a',
+        startTime: '2026-08-22T12:00:00.000Z',
+        endTime: '2026-08-22T12:00:20.000Z',
+        utcOffsetMinutes: 0,
+        civilDate: date,
+      }),
+      parseExerciseInterval({
+        userId,
+        sourceFamily,
+        sourceRecordId: 'ex-b',
+        startTime: '2026-08-22T12:00:00.000Z',
+        endTime: '2026-08-22T12:00:20.000Z',
+        utcOffsetMinutes: 0,
+        civilDate: date,
+      }),
+    ],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+  const adjacent = computeStrain({
+    userId,
+    date,
+    minutes: [unknownMinute],
+    zones: orderedZones,
+    sleepSessions: [],
+    exerciseIntervals: [
+      parseExerciseInterval({
+        userId,
+        sourceFamily,
+        sourceRecordId: 'ex-c',
+        startTime: '2026-08-22T12:00:00.000Z',
+        endTime: '2026-08-22T12:00:20.000Z',
+        utcOffsetMinutes: 0,
+        civilDate: date,
+      }),
+      parseExerciseInterval({
+        userId,
+        sourceFamily,
+        sourceRecordId: 'ex-d',
+        startTime: '2026-08-22T12:00:20.000Z',
+        endTime: '2026-08-22T12:00:40.000Z',
+        utcOffsetMinutes: 0,
+        civilDate: date,
+      }),
+    ],
+    timezoneUnambiguous: true,
+    isCurrentDay: false,
+  });
+
+  assert.equal(overlapping.coverage.attributedMinutes, 0);
+  assert.equal(overlapping.dose, 0);
+  assert.equal(overlapping.kind, 'no_score');
+  assert.equal(adjacent.coverage.attributedMinutes, 1);
+  assert.ok((adjacent.dose ?? 0) > 0);
+  assert.equal(adjacent.source.exercise, true);
+});
+
 test('sleep performance selects a confirmed goal, T+1 effective date, and no hardcoded 480-minute target', () => {
   const settingDate = '2026-08-20';
   const goal = parseSleepGoal({
