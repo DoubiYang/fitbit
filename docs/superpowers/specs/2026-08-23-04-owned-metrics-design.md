@@ -1,6 +1,7 @@
 # 自建恢复、睡眠与训练负荷指标设计
 
-**状态：** 草案，待用户审阅
+**状态：** 已被 2026-08-31 的 Google 心率区间方案取代；保留作一期早期设计记录。
+**替代文档：** [2026-08-31-google-heart-rate-whoop-style-metrics-design.md](2026-08-31-google-heart-rate-whoop-style-metrics-design.md)
 **日期：** 2026-08-23
 **对应工作项：** 4. 定义自建恢复、睡眠、训练负荷指标
 
