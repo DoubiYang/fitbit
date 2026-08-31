@@ -5,7 +5,6 @@ import { pathToFileURL } from 'node:url';
 import { loadConfig } from '../src/server/config/env';
 import { getPool, getPostgresStore } from '../src/server/db/postgres-store';
 import { createGoogleTokenRefresher, resolveAccessToken } from '../src/server/health/access-token';
-import { exclusiveEnd } from '../src/server/health/filters';
 import { createHealthApiClient } from '../src/server/health/health-api';
 import { civilDateFrom, parseNumeric } from '../src/server/health/proto';
 
@@ -13,7 +12,8 @@ import { civilDateFrom, parseNumeric } from '../src/server/health/proto';
 // heart-rate list returns 400 on this account; queries reuse reconcile + google-wearables. Output is counts/labels only.
 const GOOGLE_WEARABLES_SOURCE_FAMILY = 'google-wearables';
 const SAMPLE_LOOKBACK_MS = 10 * 60 * 1000;
-const DAILY_LOOKBACK_DAYS = 2;
+const DAILY_WINDOW_BEFORE_DAYS = 1;
+const DAILY_WINDOW_UNTIL_EXCLUSIVE_DAYS = 2;
 const SAMPLE_PAGE_SIZE = 1000;
 const DAILY_PAGE_SIZE = 25;
 const ACTIVITY_LEVEL_ORDER = ['SEDENTARY', 'LIGHTLY_ACTIVE', 'MODERATELY_ACTIVE', 'VERY_ACTIVE'] as const;
@@ -185,7 +185,7 @@ function summarizeHeartRateCapabilities(input: {
   return {
     sourceFamily: GOOGLE_WEARABLES_SOURCE_FAMILY,
     lookbackMinutes: SAMPLE_LOOKBACK_MS / 60_000,
-    lookbackDays: DAILY_LOOKBACK_DAYS,
+    lookbackDays: DAILY_WINDOW_BEFORE_DAYS + DAILY_WINDOW_UNTIL_EXCLUSIVE_DAYS,
     heartRate: {
       available: heartRatePoints.length > 0,
       pointCount: heartRatePoints.length,
@@ -239,8 +239,9 @@ export async function probeGoogleHeartRateCapabilities(input: {
   const sampleUntil = now.toISOString();
   const sampleFrom = new Date(now.getTime() - SAMPLE_LOOKBACK_MS).toISOString();
   const today = utcCivilDate(now);
-  const dailyFrom = addUtcDays(today, -(DAILY_LOOKBACK_DAYS - 1));
-  const dailyUntilExclusive = exclusiveEnd(today);
+  // Cover any legal UTC offset for a small recent window: UTC today-1 through UTC today+2 exclusive.
+  const dailyFrom = addUtcDays(today, -DAILY_WINDOW_BEFORE_DAYS);
+  const dailyUntilExclusive = addUtcDays(today, DAILY_WINDOW_UNTIL_EXCLUSIVE_DAYS);
 
   const [heartRate, activityLevel, dailyHeartRateZones, timeInHeartRateZone] = await Promise.all([
     api.listDataPoints({

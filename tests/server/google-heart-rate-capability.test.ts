@@ -206,6 +206,122 @@ test('capability probe reconciles google-wearables with snake_case filters', asy
   assert.equal(allFilters.includes('physicalTime'), false);
 });
 
+function zonesWithOneBpmGap() {
+  return [
+    { heartRateZoneType: 'LIGHT', minBeatsPerMinute: '97', maxBeatsPerMinute: '116' },
+    { heartRateZoneType: 'MODERATE', minBeatsPerMinute: '117', maxBeatsPerMinute: '136' },
+    { heartRateZoneType: 'VIGOROUS', minBeatsPerMinute: '137', maxBeatsPerMinute: '156' },
+    { heartRateZoneType: 'PEAK', minBeatsPerMinute: '157', maxBeatsPerMinute: '196' },
+  ];
+}
+
+function zonesWithSharedBoundary() {
+  return [
+    { heartRateZoneType: 'LIGHT', minBeatsPerMinute: '97', maxBeatsPerMinute: '117' },
+    { heartRateZoneType: 'MODERATE', minBeatsPerMinute: '117', maxBeatsPerMinute: '137' },
+    { heartRateZoneType: 'VIGOROUS', minBeatsPerMinute: '137', maxBeatsPerMinute: '157' },
+    { heartRateZoneType: 'PEAK', minBeatsPerMinute: '157', maxBeatsPerMinute: '196' },
+  ];
+}
+
+test('Fitbit Air-shaped points report no motionContext, a 1 bpm zone gap, and 60s time-in-zone without duration', async () => {
+  const report = await probeGoogleHeartRateCapabilities({
+    accessToken: ACCESS_TOKEN,
+    now: NOW,
+    api: {
+      async listDataPoints(input) {
+        if (input.dataType === 'heart-rate') {
+          return [
+            {
+              heartRate: {
+                sampleTime: { physicalTime: SAMPLE_TIMESTAMP, utcOffset: '28800s' },
+                beatsPerMinute: BPM,
+              },
+            },
+          ];
+        }
+        if (input.dataType === 'daily-heart-rate-zones') {
+          return [
+            {
+              dailyHeartRateZones: {
+                date: { year: 2026, month: 8, day: 31 },
+                heartRateZones: zonesWithOneBpmGap(),
+              },
+            },
+          ];
+        }
+        if (input.dataType === 'time-in-heart-rate-zone') {
+          return [
+            {
+              timeInHeartRateZone: {
+                interval: { startTime: ACTIVITY_START, endTime: ACTIVITY_END },
+                heartRateZoneType: 'LIGHT',
+              },
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  });
+
+  assert.equal(report.heartRate.hasMotionContext, false);
+  assert.equal(report.dailyHeartRateZones.adjacentZonesHaveOneBpmGap, true);
+  assert.equal(report.timeInHeartRateZone.hasDurationField, false);
+  assert.equal(report.timeInHeartRateZone.intervalSeconds.includes(60), true);
+});
+
+test('shared zone boundaries are not reported as a 1 bpm gap', async () => {
+  const report = await probeGoogleHeartRateCapabilities({
+    accessToken: ACCESS_TOKEN,
+    now: NOW,
+    api: {
+      async listDataPoints(input) {
+        if (input.dataType === 'daily-heart-rate-zones') {
+          return [
+            {
+              dailyHeartRateZones: {
+                date: { year: 2026, month: 8, day: 31 },
+                heartRateZones: zonesWithSharedBoundary(),
+              },
+            },
+          ];
+        }
+        return [];
+      },
+    },
+  });
+
+  assert.equal(report.dailyHeartRateZones.adjacentZonesHaveOneBpmGap, false);
+});
+
+test('daily heart-rate-zones window includes UTC+8 local today', async () => {
+  let dailyFilter = '';
+  await probeGoogleHeartRateCapabilities({
+    accessToken: ACCESS_TOKEN,
+    now: NOW,
+    api: {
+      async listDataPoints(input) {
+        if (input.dataType === 'daily-heart-rate-zones') {
+          dailyFilter = input.filter;
+        }
+        return [];
+      },
+    },
+  });
+
+  const bounds = /daily_heart_rate_zones\.date >= "(\d{4}-\d{2}-\d{2})" AND daily_heart_rate_zones\.date < "(\d{4}-\d{2}-\d{2})"/.exec(
+    dailyFilter,
+  );
+  assert.ok(bounds, `daily filter was ${dailyFilter}`);
+  const from = bounds[1] ?? '';
+  const untilExclusive = bounds[2] ?? '';
+  assert.ok(
+    from <= '2026-09-01' && untilExclusive > '2026-09-01',
+    `expected ${from} <= 2026-09-01 < ${untilExclusive} so UTC+8 local today is included`,
+  );
+});
+
 test('capability probe fails closed on a Health API error', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response('rate limited', { status: 429 });
