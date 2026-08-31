@@ -76,21 +76,19 @@ function recordsLoader(input: {
 type QueryWindow = { from: string; untilExclusive: string };
 
 export function connectionNextSyncAt(cursors: HealthSyncCursor[], now: Date): Date {
-  const hourly = new Date(now.getTime() + HOURLY_SYNC_MS);
-  let earliest: number | undefined;
+  const hourly = now.getTime() + HOURLY_SYNC_MS;
+  const times: number[] = [];
   for (const cursor of cursors) {
-    if (!cursor.nextAttemptAt) {
-      continue;
-    }
-    const time = cursor.nextAttemptAt.getTime();
-    if (earliest === undefined || time < earliest) {
-      earliest = time;
+    if (cursor.nextAttemptAt) {
+      times.push(cursor.nextAttemptAt.getTime());
+    } else if (!cursor.lastErrorCode) {
+      times.push(hourly);
     }
   }
-  if (earliest === undefined || earliest >= hourly.getTime()) {
-    return hourly;
+  if (times.length === 0) {
+    return new Date(hourly);
   }
-  return new Date(earliest);
+  return new Date(Math.min(...times));
 }
 
 export function cursorRetrySchedule(now: Date, retryCount: number): { nextAttemptAt: Date; retryCount: number } {
@@ -151,8 +149,8 @@ function fortyEightHourCivilWindow(now: Date): QueryWindow {
 
 function twoHourCivilWindow(now: Date, watermark: Date): QueryWindow {
   return {
-    from: utcDate(new Date(watermark.getTime() - TWO_HOURS_MS)),
-    untilExclusive: addCivilDays(utcDate(now), 1),
+    from: addCivilDays(utcDate(new Date(watermark.getTime() - TWO_HOURS_MS)), -1),
+    untilExclusive: addCivilDays(utcDate(now), 2),
   };
 }
 
@@ -272,6 +270,13 @@ function timezoneUnambiguous(minutes: HeartRateMinuteAggregate[], history: Healt
   return true;
 }
 
+async function requireSyncable(store: AuthStore, userId: string): Promise<void> {
+  const row = await store.connections.findByUserId(userId);
+  if (!row || (row.status !== 'active' && row.status !== 'partial')) {
+    throw new Error('connection no longer syncable');
+  }
+}
+
 function civilDatesForInterval(startTime: string, endTime: string): string[] {
   const start = utcDate(new Date(startTime));
   const end = utcDate(new Date(endTime));
@@ -317,6 +322,7 @@ async function ingestHeartRate(input: {
     });
     const persistable = persistableMinutes(combined, intervals);
     if (persistable.length > 0) {
+      await requireSyncable(input.store, input.userId);
       await input.store.healthMetrics.upsertMinutes(persistable);
       for (const minute of persistable) {
         affected.add(minute.civilDate);
@@ -344,6 +350,7 @@ async function ingestActivityLevel(input: {
     if (intervals.length === 0) {
       continue;
     }
+    await requireSyncable(input.store, input.userId);
     await input.store.healthMetrics.upsertActivityLevelIntervals(intervals);
     for (const interval of intervals) {
       for (const date of civilDatesForInterval(interval.startTime, interval.endTime)) {
@@ -380,6 +387,7 @@ async function ingestDailyZones(input: {
     if (!mapped) {
       continue;
     }
+    await requireSyncable(input.store, input.userId);
     await input.store.healthMetrics.replaceHeartRateZones(mapped);
     affected.push(mapped.date);
   }
@@ -427,6 +435,7 @@ async function ingestTimeInZone(input: {
     if (!localDayFullyInWindow(date, minutes.utcOffsetMinutes, input.window)) {
       continue;
     }
+    await requireSyncable(input.store, input.userId);
     await input.store.healthMetrics.replaceTimeInZone(
       parseDailyTimeInZone({
         userId: input.userId,
@@ -459,6 +468,7 @@ async function ingestExercise(input: {
     if (!mapped) {
       continue;
     }
+    await requireSyncable(input.store, input.userId);
     await input.store.healthMetrics.upsertExerciseIntervals([mapped]);
     affected.add(mapped.civilDate);
     for (const date of civilDatesForInterval(mapped.startTime, mapped.endTime)) {
@@ -522,6 +532,7 @@ export async function recomputeAffectedDays(
     now: Date;
     loadRecords?: LoadHealthRecords;
     loadSnapshot?: LoadHealthSnapshot;
+    lastSuccessfulSyncAt?: Date | string;
   },
 ): Promise<void> {
   const records = await recordsLoader(input)(input.userId);
@@ -632,6 +643,10 @@ export async function recomputeAffectedDays(
       }),
     );
 
+    const lastSuccessfulSyncAt =
+      input.lastSuccessfulSyncAt instanceof Date
+        ? input.lastSuccessfulSyncAt.toISOString()
+        : input.lastSuccessfulSyncAt;
     const recovery = computeRecovery({
       targetDate: date,
       hrv: dailyHrv.find((row) => row.date === date),
@@ -640,7 +655,7 @@ export async function recomputeAffectedDays(
       historicalRhr: dailyRhr,
       sleep,
       now: input.now.toISOString(),
-      lastSuccessfulSyncAt: input.now.toISOString(),
+      lastSuccessfulSyncAt,
     });
     await store.healthMetrics.upsertMetricResult(
       parseMetricResult({
@@ -681,6 +696,7 @@ export async function syncCardioConnection(input: {
   loadRecords?: LoadHealthRecords;
   loadSnapshot?: LoadHealthSnapshot;
   extraDates?: Iterable<string>;
+  lastSuccessfulSyncAt?: Date | string;
 }): Promise<CardioSyncState> {
   const dataTypes = input.dataTypes ?? CARDIO_SYNC_TYPES;
   const succeeded: HealthSyncDataType[] = [];
@@ -691,6 +707,9 @@ export async function syncCardioConnection(input: {
       connectionId: input.connection.id,
       dataType,
     });
+    if (cursor?.nextAttemptAt && cursor.nextAttemptAt.getTime() > input.now.getTime()) {
+      continue;
+    }
     const window = syncWindowFor(dataType, input.now, cursor);
     try {
       const dates = await ingestDataType({
@@ -724,6 +743,7 @@ export async function syncCardioConnection(input: {
       now: input.now,
       loadRecords: input.loadRecords,
       loadSnapshot: input.loadSnapshot,
+      lastSuccessfulSyncAt: input.lastSuccessfulSyncAt,
     });
     for (const dataType of succeeded) {
       await inner.healthMetrics.updateCursor({

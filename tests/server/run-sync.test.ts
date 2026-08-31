@@ -523,3 +523,91 @@ test('does not ingest cardio after the connection is no longer syncable', async 
   assert.equal(minutes.length, 0);
 });
 
+function priorDates(endExclusive: string, count: number): string[] {
+  const dates: string[] = [];
+  const cursor = new Date(`${endExclusive}T00:00:00.000Z`);
+  for (let index = 0; index < count; index += 1) {
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+    dates.push(cursor.toISOString().slice(0, 10));
+  }
+  return dates.reverse();
+}
+
+test('a failed snapshot keeps Recovery provisional from the previous snapshot sync time', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const syncedAt = new Date(now.getTime() - 37 * 60 * 60 * 1_000);
+  await store.connections.insert({
+    ...liveConnection('u1', 'c1'),
+    lastSuccessfulSyncAt: syncedAt,
+  });
+  const historyDates = priorDates('2026-08-23', 28);
+  const previous: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [
+      ...historyDates.map((date, index) => ({
+        userId: 'u1',
+        source: 'google_health' as const,
+        sourceRecordId: `hrv-${date}`,
+        date,
+        valueMs: 40 + (index % 5),
+      })),
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 55 },
+    ],
+    dailyRhr: [
+      ...historyDates.map((date, index) => ({
+        userId: 'u1',
+        source: 'google_health' as const,
+        sourceRecordId: `rhr-${date}`,
+        date,
+        valueBpm: 50 + (index % 4),
+      })),
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'rhr-23', date: '2026-08-23', valueBpm: 52 },
+    ],
+  };
+  const api = createFakeApi({
+    'heart-rate': [
+      [
+        {
+          heartRate: {
+            sampleTime: { physicalTime: '2026-08-23T12:00:00.000Z', utcOffset: '0s' },
+            beatsPerMinute: '70',
+          },
+        },
+      ],
+    ],
+  });
+  const originalList = api.listDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    if (
+      input.dataType === 'sleep' ||
+      input.dataType === 'daily-heart-rate-variability' ||
+      input.dataType === 'daily-resting-heart-rate'
+    ) {
+      throw new Error('health api 429');
+    }
+    return originalList(input);
+  };
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now,
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => ({ records: previous, syncedAt }),
+    loadRecords: async () => previous,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId: 'u1',
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.ok(recovery);
+  assert.equal(recovery.quality, 'provisional');
+});
+

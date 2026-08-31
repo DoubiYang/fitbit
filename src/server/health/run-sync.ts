@@ -114,6 +114,10 @@ export async function syncUserConnection(input: {
       }
       return (await loadSnapshot?.(userId))?.records ?? emptyUserHealthRecords();
     });
+  const previousSnapshot = snapshotRecords ? undefined : await loadSnapshot?.(connection.userId);
+  const lastSuccessfulSyncAt = snapshotRecords
+    ? latest.lastSuccessfulSyncAt ?? now
+    : previousSnapshot?.syncedAt ?? latest.lastSuccessfulSyncAt;
   const cardio = await syncCardioConnection({
     store: input.store,
     connection: latest,
@@ -123,6 +127,7 @@ export async function syncUserConnection(input: {
     loadRecords,
     loadSnapshot,
     extraDates: snapshotRecords ? snapshotAffectedDates(snapshotRecords) : [],
+    lastSuccessfulSyncAt,
   });
   const after = await input.store.connections.findByUserId(connection.userId);
   if (after && (after.status === 'active' || after.status === 'partial')) {

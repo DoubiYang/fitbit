@@ -238,6 +238,8 @@ async function runSync(
     now?: Date;
     records?: UserHealthRecords;
     dataTypes?: HealthSyncDataType[];
+    extraDates?: string[];
+    lastSuccessfulSyncAt?: Date;
   } = {},
 ): Promise<CardioSyncState> {
   const row = await store.connections.findByUserId(userId);
@@ -249,6 +251,8 @@ async function runSync(
     accessToken: 'access',
     now: options.now ?? NOW,
     dataTypes: options.dataTypes,
+    extraDates: options.extraDates,
+    lastSuccessfulSyncAt: options.lastSuccessfulSyncAt,
     loadRecords: async () => options.records ?? emptyUserHealthRecords(),
   });
 }
@@ -325,9 +329,36 @@ test('incremental HR, activity-level, and exercise use watermark minus two hours
     untilExclusive: NOW.toISOString(),
   });
   assert.deepEqual(filterBounds(requestFor(api.requests, 'exercise').filter), {
-    from: '2026-08-24',
-    untilExclusive: '2026-08-25',
+    from: '2026-08-23',
+    untilExclusive: '2026-08-26',
   });
+});
+
+test('incremental exercise civil window covers a Pacific evening session after UTC midnight', async () => {
+  const store = await seedStore();
+  const now = new Date('2026-08-25T02:00:00.000Z');
+  await store.healthMetrics.updateCursor({
+    connectionId,
+    dataType: 'exercise',
+    successfulWatermark: new Date('2026-08-25T00:30:00.000Z'),
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: now,
+  });
+  const api = createFakeApi({
+    exercise: [[exercisePoint('2026-08-25T04:00:00.000Z', '2026-08-24', 'pacific-evening')]],
+  });
+  await runSync(store, api, { now, dataTypes: ['exercise'] });
+
+  const bounds = filterBounds(requestFor(api.requests, 'exercise').filter);
+  assert.equal(bounds.from <= '2026-08-24', true);
+  assert.equal(bounds.untilExclusive > '2026-08-24', true);
+  const stored = await store.healthMetrics.listExerciseIntervalsInRange({
+    userId,
+    fromUtc: '2026-08-24T00:00:00.000Z',
+    toUtcExclusive: '2026-08-26T00:00:00.000Z',
+  });
+  assert.equal(stored.some((row) => row.sourceRecordId === 'pacific-evening' && row.civilDate === '2026-08-24'), true);
 });
 
 test('incremental sleep-style and daily types use a 48-hour overlap ending at now', async () => {
@@ -396,13 +427,13 @@ test('pages flush with lookahead and a second-page 429 leaves the watermark unch
 
   api.setPages('heart-rate', [page1, page2]);
   api.resetRequests();
-  const retried = await runSync(store, api);
+  const retried = await runSync(store, api, { now: new Date('2026-08-24T12:30:00.000Z') });
   const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-24' });
   const cardio = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' });
-  assert.equal(minutes.length, 1);
-  assert.equal(minutes[0]?.minuteStartUtc, '2026-08-24T11:59:00.000Z');
-  assert.equal(minutes[0]?.coverageSeconds, 60);
-  assert.equal(minutes[0]?.sampleCount, 3);
+  const merged = minutes.find((minute) => minute.minuteStartUtc === '2026-08-24T11:59:00.000Z');
+  assert.ok(merged);
+  assert.equal(merged.coverageSeconds, 60);
+  assert.equal(merged.sampleCount, 3);
   assert.equal(cardio?.dose, 0.5);
   assert.equal(cardio?.attributedMinutes, 1);
   assert.ok(retried.cursors.find((cursor) => cursor.dataType === 'heart-rate')?.successfulWatermark);
@@ -416,7 +447,7 @@ test('pages flush with lookahead and a second-page 429 leaves the watermark unch
   assert.equal(strain?.evidence.find((item) => item.label === '剂量')?.value, cardio?.dose);
 
   api.resetRequests();
-  await runSync(store, api);
+  await runSync(store, api, { now: new Date('2026-08-24T13:30:00.000Z') });
   const again = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-24' });
   const cardioAgain = await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' });
   const strainAgain = await store.healthMetrics.getMetricResult({
@@ -425,9 +456,10 @@ test('pages flush with lookahead and a second-page 429 leaves the watermark unch
     metricName: 'strain',
     metricVersion: WHOOP_STYLE_METRIC_VERSION,
   });
-  assert.equal(again.length, 1);
-  assert.equal(again[0]?.coverageSeconds, 60);
-  assert.equal(again[0]?.sampleCount, 3);
+  const againMerged = again.find((minute) => minute.minuteStartUtc === '2026-08-24T11:59:00.000Z');
+  assert.ok(againMerged);
+  assert.equal(againMerged.coverageSeconds, 60);
+  assert.equal(againMerged.sampleCount, 3);
   assert.equal(cardioAgain?.dose, cardio?.dose);
   assert.equal(cardioAgain?.attributedMinutes, 1);
   assert.equal(strainAgain?.score, strain?.score);
@@ -790,6 +822,130 @@ test('incremental time-in-zone does not replace a partially covered civil day', 
   const full = await store.healthMetrics.getTimeInZone({ userId, civilDate: '2026-08-23' });
   assert.equal(partial?.minutes.light, 400);
   assert.equal(full?.minutes.light, 2);
+});
+
+test('does not ingest a type whose nextAttemptAt is still in the future', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.updateCursor({
+    connectionId,
+    dataType: 'heart-rate',
+    successfulWatermark: NOW,
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: new Date(NOW.getTime() + 60 * 60 * 1_000),
+  });
+  await store.healthMetrics.updateCursor({
+    connectionId,
+    dataType: 'activity-level',
+    successfulWatermark: NOW,
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: NOW,
+  });
+  const api = createFakeApi();
+  await runSync(store, api, { dataTypes: ['heart-rate', 'activity-level'] });
+  assert.equal(api.requests.some((request) => request.dataType === 'heart-rate'), false);
+  assert.equal(api.requests.some((request) => request.dataType === 'activity-level'), true);
+});
+
+test('a third per-type failure schedules a two-hour retry that is not capped to one hour', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({ 'heart-rate': [new Error('health api 429')] });
+  const times = [
+    NOW,
+    new Date('2026-08-24T12:30:00.000Z'),
+    new Date('2026-08-24T13:30:00.000Z'),
+  ];
+  let state: CardioSyncState | undefined;
+  for (const now of times) {
+    state = await runSync(store, api, { now, dataTypes: ['heart-rate'] });
+  }
+  const cursor = await store.healthMetrics.readCursor({ connectionId, dataType: 'heart-rate' });
+  assert.equal(cursor?.nextAttemptAt?.toISOString(), '2026-08-24T15:30:00.000Z');
+  assert.equal(state?.nextSyncAt.toISOString(), '2026-08-24T15:30:00.000Z');
+});
+
+test('skips all cardio types in backoff but still recomputes extra snapshot dates', async () => {
+  const store = await seedStore({ timeZone: 'UTC', goal: true });
+  await store.healthMetrics.upsertMinutes([
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-22T12:00:00.000Z',
+      civilDate: '2026-08-22',
+      utcOffsetMinutes: 0,
+      ianaTimeZone: 'UTC',
+      localMinuteOfDay: 720,
+      avgBpm: 110,
+      minBpm: 110,
+      maxBpm: 110,
+      sampleCount: 4,
+      coverageSeconds: 60,
+      activityLevel: 'LIGHTLY_ACTIVE',
+    },
+  ]);
+  await store.healthMetrics.upsertActivityLevelIntervals([
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      startTime: '2026-08-22T12:00:00.000Z',
+      endTime: '2026-08-22T12:01:00.000Z',
+      activityLevelType: 'LIGHTLY_ACTIVE',
+    },
+  ]);
+  await store.healthMetrics.replaceHeartRateZones({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-08-22',
+    zones: {
+      LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
+      MODERATE: { minBeatsPerMinute: 117, maxBeatsPerMinute: 136 },
+      VIGOROUS: { minBeatsPerMinute: 137, maxBeatsPerMinute: 155 },
+      PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
+    },
+  });
+  for (const dataType of ['heart-rate', 'activity-level', 'daily-heart-rate-zones', 'time-in-heart-rate-zone', 'exercise'] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId,
+      dataType,
+      successfulWatermark: NOW,
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: new Date(NOW.getTime() + 60 * 60 * 1_000),
+    });
+  }
+  const api = createFakeApi();
+  await runSync(store, api, {
+    extraDates: ['2026-08-22'],
+    records: { ...emptyUserHealthRecords(), sleepSessions: [sleepSession('2026-08-23')] },
+  });
+  assert.equal(api.requests.length, 0);
+  const sleep = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-23',
+    metricName: 'sleep_performance',
+  });
+  assert.ok(sleep);
+});
+
+test('does not persist a heart-rate page after the connection is disconnected', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({
+    'heart-rate': [[hrPoint('2026-08-22T12:00:00.000Z', 110)], [hrPoint('2026-08-22T12:01:00.000Z', 112)]],
+  });
+  const original = api.iterateReconciledDataPoints.bind(api);
+  api.iterateReconciledDataPoints = async function* (input) {
+    if (input.dataType === 'heart-rate') {
+      const row = await store.connections.findByUserId(userId);
+      if (row) {
+        await store.connections.update({ ...row, status: 'disconnected', nextSyncAt: undefined });
+      }
+    }
+    yield* original(input);
+  };
+  await runSync(store, api, { dataTypes: ['heart-rate'] });
+  const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-08-22' });
+  assert.equal(minutes.length, 0);
 });
 
 test('sleep HRV and RHR are not silently marked successful by cardio ingest', async () => {
