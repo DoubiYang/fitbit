@@ -26,10 +26,14 @@ export async function buildTodayViewForUser(
       userId: user.id,
       now,
       lastSuccessfulSyncAt: now,
+      allowDefaultTimeZone: true,
     });
   }
   if (user.mode === 'oauth') {
     const snapshot = deps ? await oauthSnapshot(user.id, deps) : undefined;
+    const zone = deps?.store
+      ? await deps.store.healthMetrics.lookupTimeZoneHistory({ userId: user.id, at: now })
+      : undefined;
     return buildTodayView({
       provider: {
         capabilities: { mode: 'oauth', canSync: Boolean(snapshot) },
@@ -38,6 +42,8 @@ export async function buildTodayViewForUser(
       userId: user.id,
       now,
       lastSuccessfulSyncAt: snapshot?.syncedAt.toISOString(),
+      timeZone: zone?.ianaTimeZone,
+      healthMetrics: deps?.store?.healthMetrics,
     });
   }
   return undefined;

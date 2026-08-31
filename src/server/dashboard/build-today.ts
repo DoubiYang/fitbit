@@ -1,21 +1,50 @@
-import { computeRecoverySignal, computeSleepCompleteness, computeTrainingBalance, selectPrimarySleepSession } from '../../domain/metrics';
-import type { MetricEvidence, MetricQuality, RecoverySignalResult, SleepCompletenessResult, TrainingBalanceResult } from '../../domain/metric-types';
+import type { MetricResult } from '../../domain/cardio-records';
+import {
+  type MetricCoverageState,
+  type MetricEvidence,
+  type MetricSourceState,
+  type RecoveryQuality,
+  type StrainStatus,
+} from '../../domain/metric-types';
+import { computeRecovery, computeSleepPerformance } from '../../domain/whoop-style-metrics';
 import type { UserHealthRecords } from '../health/provider';
+import type { HealthMetricsStore } from '../health/cardio-store';
 import type { HealthProvider } from '../health/provider';
-import { civilDate, civilDateDaysAgo } from '../time/civil-date';
+import { civilDateDaysAgo, resolveDashboardCivilDate } from '../time/civil-date';
 
 type BuildTodayInput = {
   provider: HealthProvider;
   userId: string;
   now: string;
   lastSuccessfulSyncAt: string | undefined;
+  timeZone?: string;
+  allowDefaultTimeZone?: boolean;
+  healthMetrics?: HealthMetricsStore;
 };
 
-type TodayMetric = {
+export type StrainMetricView = {
   label: string;
   score: number | null;
-  quality: MetricQuality;
+  status: StrainStatus;
   detail: string;
+  coverage?: MetricCoverageState;
+  source?: MetricSourceState;
+  evidence?: MetricEvidence[];
+};
+
+export type RecoveryMetricView = {
+  label: string;
+  score: number | null;
+  quality: RecoveryQuality;
+  detail: string;
+  evidence?: MetricEvidence[];
+};
+
+export type SleepPerformanceMetricView = {
+  label: string;
+  score: number | null;
+  detail: string;
+  evidence?: MetricEvidence[];
 };
 
 type TodayAction =
@@ -33,22 +62,17 @@ type TodayAction =
 export type TodayView = {
   userId: string;
   generatedAt: string;
+  localDate: string;
   freshness: 'fresh' | 'stale';
   primaryAction: TodayAction;
   metrics: {
-    recovery: TodayMetric;
-    sleep: TodayMetric;
-    training: TodayMetric;
+    strain: StrainMetricView;
+    recovery: RecoveryMetricView;
+    sleepPerformance: SleepPerformanceMetricView;
   };
 };
 
-function dateFor(instant: string): string {
-  return civilDate(new Date(instant));
-}
-
-function startDateFor(now: string): string {
-  return civilDateDaysAgo(dateFor(now), 90);
-}
+const STALE_SYNC_MS = 36 * 60 * 60 * 1_000;
 
 function scopedRecords(records: UserHealthRecords, userId: string): UserHealthRecords {
   return {
@@ -59,91 +83,216 @@ function scopedRecords(records: UserHealthRecords, userId: string): UserHealthRe
   };
 }
 
-function latestDate(records: UserHealthRecords, fallback: string): string {
-  return [
-    ...records.sleepSessions.map((record) => record.civilEndDate),
-    ...records.dailyHrv.map((record) => record.date),
-    ...records.dailyRhr.map((record) => record.date),
-    ...records.trainingDays.map((record) => record.date),
-  ].sort((left, right) => right.localeCompare(left))[0] ?? fallback;
+function strainDetail(status: StrainStatus, reason: string | null | undefined): string {
+  if (status === 'complete') {
+    return '完整日心肺负荷，仅计入可归因活动分钟。';
+  }
+  if (status === 'provisional') {
+    return '临时心肺负荷，不可与完整日直接比较。';
+  }
+  if (status === 'timezone_ambiguous') {
+    return '时区不明确，当地日无法作为完整日。';
+  }
+  if (status === 'incomplete' || reason === 'insufficient_coverage') {
+    return '覆盖不足，因此没有完整日 Strain。';
+  }
+  return '缺少心率区间、活动上下文或同步结果，因此没有 Strain 分数。';
 }
 
-function metricDetail(result: SleepCompletenessResult | RecoverySignalResult | TrainingBalanceResult): string {
-  if (result.kind === 'no_score') {
-    return result.quality === 'calibrating' ? '校准中：继续积累有效数据。' : '数据不足：补齐同步或目标设置后再计算。';
+function recoveryDetail(quality: RecoveryQuality): string {
+  if (quality === 'high') {
+    return '恢复分数相对你近期的个人常态。这是趋势说明。';
   }
-
-  return result.quality === 'high' ? '数据完整。' : result.quality === 'medium' ? '存在部分缺失或临时基线。' : '数据较旧，请先同步。';
+  if (quality === 'medium') {
+    return '恢复分数相对你近期的个人常态，部分输入仍在校准。';
+  }
+  if (quality === 'provisional') {
+    return '数据质量为临时：基线、覆盖或同步尚未满足完整条件。';
+  }
+  return '数据不足或同步待完成，因此没有恢复分数。';
 }
 
-function primaryAction(recovery: RecoverySignalResult): TodayAction {
-  if (recovery.kind === 'score' && recovery.quality !== 'low' && recovery.evidence.length >= 2) {
-    const text =
-      recovery.status === '恢复优先'
-        ? '今天建议以恢复为主，保持轻量活动并留意主观疲劳。'
-        : recovery.status === '状态较好'
-          ? '今天状态相对个人常态较好，可按原计划安排训练并根据主观感受调整。'
-          : '今天建议维持原有节奏，避免在数据不完整时额外加量。';
-    return { kind: 'recommendation', text, evidence: recovery.evidence.slice(0, 3) };
+function sleepDetail(score: number | null, reason: string | null | undefined): string {
+  if (score !== null) {
+    return '昨夜主睡眠相对于动态睡眠需求的完成度。';
   }
+  if (reason === 'sleep_goal_missing') {
+    return '尚未设置基础睡眠目标，因此没有 Sleep Performance。';
+  }
+  if (reason === 'primary_sleep_missing' || reason === 'sleep_missing') {
+    return '没有可用的主睡眠记录，因此没有 Sleep Performance。';
+  }
+  return '睡眠表现尚未计算。';
+}
 
+function primaryAction(input: {
+  score: number | null;
+  quality: RecoveryQuality;
+  evidence: MetricEvidence[];
+}): TodayAction {
+  const evidence = input.evidence.slice(0, 3);
+  if (input.score !== null && input.quality === 'high') {
+    return {
+      kind: 'recommendation',
+      text: '恢复分数相对你近期个人常态较高。这只说明趋势。',
+      evidence,
+    };
+  }
+  if (input.score !== null && input.quality === 'medium') {
+    return {
+      kind: 'recommendation',
+      text: '恢复分数接近你近期个人常态。这只说明趋势。',
+      evidence,
+    };
+  }
+  if (input.quality === 'provisional') {
+    return {
+      kind: 'data_state',
+      text: '数据质量为临时：基线、覆盖或同步尚未满足完整条件。',
+      evidence,
+    };
+  }
   return {
     kind: 'data_state',
-    text: '目前数据仍在校准或不够新鲜，先同步并补齐睡眠、HRV 或静息心率后再给出个性化安排。',
-    evidence: recovery.evidence.slice(0, 3),
+    text: '数据不足或同步待完成，因此没有可比较的恢复分数。',
+    evidence,
+  };
+}
+
+function freshnessOf(now: string, lastSuccessfulSyncAt: string | undefined): 'fresh' | 'stale' {
+  if (!lastSuccessfulSyncAt) {
+    return 'stale';
+  }
+  return Date.parse(now) - Date.parse(lastSuccessfulSyncAt) > STALE_SYNC_MS ? 'stale' : 'fresh';
+}
+
+function strainFromResult(result: MetricResult | undefined): StrainMetricView {
+  const status = result?.status ?? 'unavailable';
+  return {
+    label: '全天心肺负荷',
+    score: result?.score ?? null,
+    status,
+    detail: strainDetail(status, result?.reason),
+    coverage: result?.coverage,
+    source: result?.source,
+    evidence: result?.evidence,
+  };
+}
+
+function recoveryFromResult(result: MetricResult | undefined): RecoveryMetricView {
+  const quality = result?.quality ?? 'unavailable';
+  return {
+    label: '恢复',
+    score: result?.score ?? null,
+    quality,
+    detail: recoveryDetail(quality),
+    evidence: result?.evidence,
+  };
+}
+
+function sleepFromResult(result: MetricResult | undefined): SleepPerformanceMetricView {
+  return {
+    label: '睡眠表现',
+    score: result?.score ?? null,
+    detail: sleepDetail(result?.score ?? null, result?.reason),
+    evidence: result?.evidence,
+  };
+}
+
+async function metricsFromStore(
+  store: HealthMetricsStore,
+  userId: string,
+  localDate: string,
+): Promise<TodayView['metrics']> {
+  const [strain, recovery, sleepPerformance] = await Promise.all([
+    store.getMetricResult({ userId, civilDate: localDate, metricName: 'strain' }),
+    store.getMetricResult({ userId, civilDate: localDate, metricName: 'recovery' }),
+    store.getMetricResult({ userId, civilDate: localDate, metricName: 'sleep_performance' }),
+  ]);
+  return {
+    strain: strainFromResult(strain),
+    recovery: recoveryFromResult(recovery),
+    sleepPerformance: sleepFromResult(sleepPerformance),
+  };
+}
+
+async function metricsFromRecords(
+  records: UserHealthRecords,
+  userId: string,
+  localDate: string,
+  now: string,
+  lastSuccessfulSyncAt: string | undefined,
+): Promise<TodayView['metrics']> {
+  const sleep = computeSleepPerformance({
+    targetDate: localDate,
+    sessions: records.sleepSessions,
+    goals: [],
+  });
+  const recovery = computeRecovery({
+    targetDate: localDate,
+    hrv: records.dailyHrv.find((record) => record.date === localDate && record.userId === userId),
+    rhr: records.dailyRhr.find((record) => record.date === localDate && record.userId === userId),
+    historicalHrv: records.dailyHrv,
+    historicalRhr: records.dailyRhr,
+    sleep,
+    now,
+    lastSuccessfulSyncAt,
+  });
+  return {
+    strain: {
+      label: '全天心肺负荷',
+      score: null,
+      status: 'unavailable',
+      detail: strainDetail('unavailable', 'heart_rate_zones_missing'),
+    },
+    recovery: {
+      label: '恢复',
+      score: recovery.score,
+      quality: recovery.quality,
+      detail: recoveryDetail(recovery.quality),
+      evidence: recovery.evidence,
+    },
+    sleepPerformance: {
+      label: '睡眠表现',
+      score: sleep.score,
+      detail: sleepDetail(sleep.score, sleep.reason),
+      evidence: sleep.evidence,
+    },
   };
 }
 
 export async function buildTodayView(input: BuildTodayInput): Promise<TodayView> {
-  const nowDate = dateFor(input.now);
-  const records = scopedRecords(
-    await input.provider.listRecords(input.userId, { from: startDateFor(input.now), to: nowDate }),
-    input.userId,
+  const localDate = resolveDashboardCivilDate(
+    new Date(input.now),
+    input.timeZone,
+    input.allowDefaultTimeZone ? 'default' : 'utc',
   );
-  const targetDate = latestDate(records, nowDate);
-  const targetSleep = selectPrimarySleepSession(records.sleepSessions, targetDate);
-  const sleep = computeSleepCompleteness({
-    target: targetSleep,
-    historicalPrimarySleeps: records.sleepSessions,
-    sleepGoalMinutes: 480,
-  });
-  const recovery = computeRecoverySignal({
-    targetDate,
-    hrv: records.dailyHrv.find((record) => record.date === targetDate),
-    rhr: records.dailyRhr.find((record) => record.date === targetDate),
-    historicalHrv: records.dailyHrv,
-    historicalRhr: records.dailyRhr,
-    sleep,
-    now: input.now,
-    lastSuccessfulSyncAt: input.lastSuccessfulSyncAt,
-  });
-  const training = computeTrainingBalance(records.trainingDays, targetDate);
-  const freshness = recovery.quality === 'low' ? 'stale' : 'fresh';
+  const metrics = input.healthMetrics
+    ? await metricsFromStore(input.healthMetrics, input.userId, localDate)
+    : await metricsFromRecords(
+        scopedRecords(
+          await input.provider.listRecords(input.userId, {
+            from: civilDateDaysAgo(localDate, 90),
+            to: localDate,
+          }),
+          input.userId,
+        ),
+        input.userId,
+        localDate,
+        input.now,
+        input.lastSuccessfulSyncAt,
+      );
 
   return {
     userId: input.userId,
     generatedAt: input.now,
-    freshness,
-    primaryAction: primaryAction(recovery),
-    metrics: {
-      recovery: {
-        label: '恢复信号',
-        score: recovery.score,
-        quality: recovery.quality,
-        detail: metricDetail(recovery),
-      },
-      sleep: {
-        label: '睡眠完整度',
-        score: sleep.score,
-        quality: sleep.quality,
-        detail: metricDetail(sleep),
-      },
-      training: {
-        label: '训练负荷',
-        score: training.ratio,
-        quality: training.quality,
-        detail: metricDetail(training),
-      },
-    },
+    localDate,
+    freshness: freshnessOf(input.now, input.lastSuccessfulSyncAt),
+    primaryAction: primaryAction({
+      score: metrics.recovery.score,
+      quality: metrics.recovery.quality,
+      evidence: metrics.recovery.evidence ?? [],
+    }),
+    metrics,
   };
 }

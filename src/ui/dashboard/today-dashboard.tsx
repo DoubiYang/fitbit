@@ -1,14 +1,14 @@
 import type { TodayView } from '../../server/dashboard/build-today';
-import { civilDate } from '../../server/time/civil-date';
 import { AppShell } from '../shell/app-shell';
 
 import { DataState, EvidenceList } from './data-state';
 import { formatMetricQuality, formatMetricScore, MetricCard } from './metric-card';
 
-function recordDate(generatedAt: string): string {
-  const instant = new Date(generatedAt);
-
-  return Number.isNaN(instant.valueOf()) ? '日期未知' : civilDate(instant);
+function recordDate(view: TodayView): string {
+  if (view.localDate) {
+    return view.localDate;
+  }
+  return '日期未知';
 }
 
 export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; variant?: 'demo' | 'oauth' }) {
@@ -22,7 +22,7 @@ export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; va
           <p className="eyebrow">{variant === 'demo' ? '节律 · 演示' : '节律'}</p>
           <h1>今日记录</h1>
           <p className="dashboard-sync">
-            <time dateTime={view.generatedAt}>记录日期 {recordDate(view.generatedAt)}</time>
+            <time dateTime={view.generatedAt}>记录日期 {recordDate(view)}</time>
             <span className={view.freshness === 'fresh' ? 'freshness freshness--fresh' : 'freshness freshness--stale'}>
               {view.freshness === 'fresh' ? '数据新鲜' : '等待同步'}
             </span>
@@ -81,9 +81,9 @@ export function TodayDashboard({ view, variant = 'demo' }: { view: TodayView; va
             <p className="section-note">数据质量会影响参考程度</p>
           </div>
           <div className="metric-grid">
+            <MetricCard metric={view.metrics.strain} />
             <MetricCard metric={recovery} />
-            <MetricCard metric={view.metrics.sleep} />
-            <MetricCard metric={view.metrics.training} />
+            <MetricCard metric={view.metrics.sleepPerformance} />
           </div>
         </section>
       </main>
