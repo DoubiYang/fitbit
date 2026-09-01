@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { editableMealDraftSchema, fromInternalNutrientAmount, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import { parseVisionMeal } from '../../domain/meal-vision';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
-import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, MealSyncStore, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
+import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, MealSyncStore, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, ScheduledSyncLease, SessionRow, SyncLeaseRelease } from '../auth/types';
 import {
   HealthMetricsConnectionMismatchError,
   isUniqueViolation,
@@ -136,6 +136,7 @@ function mapConnection(row: pg.QueryResult['rows'][number]): ConnectionRow {
     nextSyncAt: row.next_sync_at ?? undefined,
     syncRetryCount: row.sync_retry_count ?? 0,
     syncLeaseUntil: row.sync_lease_until ?? undefined,
+    syncLeaseToken: row.sync_lease_token ?? undefined,
     lastSyncAttemptAt: row.last_sync_attempt_at ?? undefined,
   };
 }
@@ -347,8 +348,8 @@ function storeFor(queryable: Queryable): AuthStore {
           id, user_id, health_user_id, legacy_user_id,
           token_envelope_ciphertext, token_envelope_iv, token_envelope_auth_tag, encryption_key_version,
           access_token_expires_at, refresh_token_expires_at, granted_scopes, status, last_error_code, connected_at, updated_at, last_successful_sync_at,
-          next_sync_at, sync_retry_count, sync_lease_until, last_sync_attempt_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+          next_sync_at, sync_retry_count, sync_lease_until, sync_lease_token, last_sync_attempt_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
         [
           row.id,
           row.userId,
@@ -369,6 +370,7 @@ function storeFor(queryable: Queryable): AuthStore {
           row.nextSyncAt ?? null,
           row.syncRetryCount ?? 0,
           row.syncLeaseUntil ?? null,
+          row.syncLeaseToken ?? null,
           row.lastSyncAttemptAt ?? null,
         ],
       );
@@ -380,7 +382,7 @@ function storeFor(queryable: Queryable): AuthStore {
           token_envelope_ciphertext = $4, token_envelope_iv = $5, token_envelope_auth_tag = $6, encryption_key_version = $7,
           access_token_expires_at = $8, refresh_token_expires_at = $9, granted_scopes = $10, status = $11, last_error_code = $12,
           connected_at = $13, updated_at = $14, last_successful_sync_at = $15,
-          next_sync_at = $16, sync_retry_count = $17, sync_lease_until = $18, last_sync_attempt_at = $19
+          next_sync_at = $16, sync_retry_count = $17, sync_lease_until = $18, sync_lease_token = $19, last_sync_attempt_at = $20
          WHERE id = $1`,
         [
           row.id,
@@ -401,6 +403,7 @@ function storeFor(queryable: Queryable): AuthStore {
           row.nextSyncAt ?? null,
           row.syncRetryCount ?? 0,
           row.syncLeaseUntil ?? null,
+          row.syncLeaseToken ?? null,
           row.lastSyncAttemptAt ?? null,
         ],
       );
@@ -410,7 +413,12 @@ function storeFor(queryable: Queryable): AuthStore {
         `UPDATE google_health_connections SET
           token_envelope_ciphertext = $3, token_envelope_iv = $4, token_envelope_auth_tag = $5, encryption_key_version = $6,
           access_token_expires_at = $7, refresh_token_expires_at = COALESCE($8, refresh_token_expires_at), updated_at = $9
-         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')`,
+         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')
+           AND ($10::uuid IS NULL OR (
+             sync_lease_token = $10
+             AND sync_lease_until = $11
+             AND sync_lease_until > now()
+           ))`,
         [
           input.id,
           input.userId,
@@ -421,6 +429,8 @@ function storeFor(queryable: Queryable): AuthStore {
           input.accessTokenExpiresAt,
           input.refreshTokenExpiresAt ?? null,
           input.updatedAt,
+          input.lease?.leaseToken ?? null,
+          input.lease?.leaseUntil ?? null,
         ],
       );
       return result.rowCount === 1;
@@ -429,13 +439,24 @@ function storeFor(queryable: Queryable): AuthStore {
       const result = await queryable.query(
         `UPDATE google_health_connections
          SET last_successful_sync_at = $3, updated_at = $3
-         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')`,
-        [input.id, input.userId, input.syncedAt],
+         WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')
+           AND ($4::uuid IS NULL OR (
+             sync_lease_token = $4
+             AND sync_lease_until = $5
+             AND sync_lease_until > now()
+           ))`,
+        [
+          input.id,
+          input.userId,
+          input.syncedAt,
+          input.lease?.leaseToken ?? null,
+          input.lease?.leaseUntil ?? null,
+        ],
       );
       return result.rowCount === 1;
     },
     async claimDueSyncs(input: DueSyncClaim) {
-      const values: unknown[] = [input.now, input.leaseUntil, input.limit];
+      const values: unknown[] = [input.now, input.leaseUntil, randomUUID(), input.limit];
       const userFilter = input.userId ? ` AND user_id = $${values.push(input.userId)}` : '';
       const result = await queryable.query(
         `WITH due AS (
@@ -444,16 +465,21 @@ function storeFor(queryable: Queryable): AuthStore {
            WHERE status IN ('active', 'partial')
              AND token_envelope_ciphertext IS NOT NULL
              AND (refresh_token_expires_at IS NULL OR refresh_token_expires_at > $1)
-             AND next_sync_at IS NOT NULL
-             AND next_sync_at <= $1
-             AND (sync_lease_until IS NULL OR sync_lease_until <= $1)
+             AND (
+               (next_sync_at IS NOT NULL
+                 AND next_sync_at <= $1
+                 AND (sync_lease_until IS NULL OR sync_lease_until <= $1))
+               OR (next_sync_at IS NULL
+                 AND sync_lease_until IS NOT NULL
+                 AND sync_lease_until <= $1)
+             )
              ${userFilter}
-           ORDER BY next_sync_at ASC, id ASC
+           ORDER BY COALESCE(next_sync_at, sync_lease_until) ASC, id ASC
            FOR UPDATE SKIP LOCKED
-           LIMIT $3
+           LIMIT $4
          )
          UPDATE google_health_connections AS connection
-         SET sync_lease_until = $2, last_sync_attempt_at = $1, updated_at = $1, next_sync_at = NULL
+         SET sync_lease_until = $2, sync_lease_token = $3::uuid, last_sync_attempt_at = $1, updated_at = $1, next_sync_at = NULL
          FROM due
          WHERE connection.id = due.id
          RETURNING connection.*`,
@@ -465,27 +491,31 @@ function storeFor(queryable: Queryable): AuthStore {
       const result = await queryable.query(
         `UPDATE google_health_connections
          SET next_sync_at = CASE
-               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $7 THEN next_sync_at
-               ELSE $4
-             END,
-             sync_retry_count = CASE
-               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $7 THEN sync_retry_count
+               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $8 THEN next_sync_at
                ELSE $5
              END,
-             sync_lease_until = NULL,
-             last_error_code = CASE
-               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $7 THEN last_error_code
+             sync_retry_count = CASE
+               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $8 THEN sync_retry_count
                ELSE $6
              END,
-             updated_at = $7
+             sync_lease_until = NULL,
+             sync_lease_token = NULL,
+             last_error_code = CASE
+               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $8 THEN last_error_code
+               ELSE $7
+             END,
+             updated_at = $8
          WHERE id = $1
            AND user_id = $2
            AND status IN ('active', 'partial')
-           AND sync_lease_until = $3`,
+           AND sync_lease_until = $3
+           AND sync_lease_token = $4::uuid
+           AND sync_lease_until > now()`,
         [
           input.id,
           input.userId,
           input.leaseUntil,
+          input.leaseToken,
           input.nextSyncAt,
           input.syncRetryCount,
           input.lastErrorCode ?? null,
@@ -497,21 +527,26 @@ function storeFor(queryable: Queryable): AuthStore {
     async expireIfSyncable(input: ConnectionExpire): Promise<boolean> {
       const result = await queryable.query(
         `UPDATE google_health_connections
-         SET status = 'expired', next_sync_at = NULL, sync_retry_count = 0, sync_lease_until = NULL,
+         SET status = 'expired', next_sync_at = NULL, sync_retry_count = 0, sync_lease_until = NULL, sync_lease_token = NULL,
              last_error_code = $3, updated_at = $4
          WHERE id = $1 AND user_id = $2 AND status IN ('active', 'partial')
            AND sync_lease_until = $5
-           AND token_envelope_ciphertext IS NOT DISTINCT FROM $6`,
-        [input.id, input.userId, input.lastErrorCode, input.now, input.leaseUntil, input.tokenEnvelopeCiphertext ?? null],
+           AND sync_lease_token = $6::uuid
+           AND sync_lease_until > now()
+           AND token_envelope_ciphertext IS NOT DISTINCT FROM $7`,
+        [input.id, input.userId, input.lastErrorCode, input.now, input.leaseUntil, input.leaseToken, input.tokenEnvelopeCiphertext ?? null],
       );
       return result.rowCount === 1;
     },
     async clearSyncLeaseIfHeld(input: SyncLeaseRelease): Promise<boolean> {
       const result = await queryable.query(
         `UPDATE google_health_connections
-         SET sync_lease_until = NULL, updated_at = $4
-         WHERE id = $1 AND user_id = $2 AND sync_lease_until = $3`,
-        [input.id, input.userId, input.leaseUntil, input.now],
+         SET sync_lease_until = NULL, sync_lease_token = NULL, updated_at = $5
+         WHERE id = $1 AND user_id = $2
+           AND sync_lease_until = $3
+           AND sync_lease_token = $4::uuid
+           AND sync_lease_until > now()`,
+        [input.id, input.userId, input.leaseUntil, input.leaseToken, input.now],
       );
       return result.rowCount === 1;
     },
@@ -1813,6 +1848,25 @@ function storeFor(queryable: Queryable): AuthStore {
       } finally {
         client.release();
       }
+    },
+    async withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (inner: AuthStore) => Promise<T>): Promise<T> {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn));
+      }
+      const held = await queryable.query(
+        `SELECT id
+         FROM google_health_connections
+         WHERE id = $1 AND user_id = $2
+           AND sync_lease_token = $3::uuid
+           AND sync_lease_until = $4
+           AND sync_lease_until > now()
+         FOR UPDATE`,
+        [lease.connectionId, lease.userId, lease.leaseToken, lease.leaseUntil],
+      );
+      if (held.rowCount !== 1) {
+        throw new Error('sync lease no longer held');
+      }
+      return fn(store);
     },
     users: {
       async insert(id: string): Promise<void> {

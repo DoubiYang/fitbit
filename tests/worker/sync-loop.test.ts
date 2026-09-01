@@ -51,7 +51,7 @@ test('ticks run one after another and abort hung fetches', async () => {
   assert.equal(ticks, 2);
   assert.equal(maxInFlight, 1);
   assert.equal(signals.length, 2);
-  assert.equal(FETCH_TIMEOUT_MS, 4 * 60 * 1_000);
+  assert.equal(FETCH_TIMEOUT_MS, 14 * 60 * 1_000);
   const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
   assert.ok(timeout);
 });

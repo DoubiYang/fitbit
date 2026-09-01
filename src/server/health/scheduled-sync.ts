@@ -1,14 +1,17 @@
 import type { OAuthConfig } from '../config/env';
-import type { AuthStore, ConnectionRow } from '../auth/types';
+import type { AuthStore, ConnectionRow, ScheduledSyncLease } from '../auth/types';
 import { TokenRefreshError } from './access-token';
 import { connectionNextSyncAt, HOURLY_SYNC_MS } from './cardio-sync';
 import { syncUserConnection } from './run-sync';
 
 const HOUR_MS = HOURLY_SYNC_MS;
 const LEASE_MS = 15 * 60 * 1_000;
+export const SERVER_SYNC_DEADLINE_MS = 13 * 60 * 1_000;
 const RETRY_DELAYS_MS = [30 * 60 * 1_000, 60 * 60 * 1_000, 2 * 60 * 60 * 1_000] as const;
 
 export type ScheduledSyncResult = { claimed: number; succeeded: number; failed: number };
+
+export type ScheduledSyncRun = ScheduledSyncLease & { signal: AbortSignal };
 
 type ScheduledSyncInput = {
   config: OAuthConfig;
@@ -16,7 +19,10 @@ type ScheduledSyncInput = {
   now?: Date;
   limit?: number;
   userId?: string;
-  syncConnection?: (connection: ConnectionRow) => Promise<void>;
+  syncConnection?: (connection: ConnectionRow, run: ScheduledSyncRun) => Promise<void>;
+  /** Test hook and operational escape hatch; production uses the 13-minute server deadline. */
+  deadlineMs?: number;
+  signal?: AbortSignal;
 };
 
 function failureSchedule(now: Date, retryCount: number): { nextSyncAt: Date; syncRetryCount: number } {
@@ -53,26 +59,46 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
     if (!connection) {
       break;
     }
+    if (!connection.syncLeaseUntil || !connection.syncLeaseToken) {
+      result.failed += 1;
+      continue;
+    }
+    const abort = new AbortController();
+    const deadlineMs = Math.min(input.deadlineMs ?? SERVER_SYNC_DEADLINE_MS, LEASE_MS - 60 * 1_000);
+    const deadline = setTimeout(() => abort.abort(new Error('scheduled sync deadline exceeded')), deadlineMs);
+    const abortFromInput = () => abort.abort(input.signal?.reason);
+    input.signal?.addEventListener('abort', abortFromInput, { once: true });
+    const run: ScheduledSyncRun = {
+      connectionId: connection.id,
+      userId: connection.userId,
+      leaseToken: connection.syncLeaseToken,
+      leaseUntil: connection.syncLeaseUntil,
+      now,
+      signal: abort.signal,
+    };
     const syncConnection =
       input.syncConnection ??
-      (async (row: ConnectionRow) => {
-        const synced = await syncUserConnection({ config: input.config, store: input.store, userId: row.userId, now });
+      (async (row: ConnectionRow, scheduledRun: ScheduledSyncRun) => {
+        const synced = await syncUserConnection({
+          config: input.config,
+          store: input.store,
+          userId: row.userId,
+          now,
+          scheduledRun,
+        });
         if (!synced) {
           throw new Error('connection no longer syncable');
         }
       });
     result.claimed += 1;
-    if (!connection.syncLeaseUntil) {
-      result.failed += 1;
-      continue;
-    }
     try {
-      await syncConnection(connection);
+      await syncConnection(connection, run);
       const cursors = await input.store.healthMetrics.listCursors({ connectionId: connection.id });
       const finished = await input.store.connections.finishScheduledSync({
         id: connection.id,
         userId: connection.userId,
         leaseUntil: connection.syncLeaseUntil,
+        leaseToken: connection.syncLeaseToken,
         now,
         nextSyncAt: connectionNextSyncAt(cursors, now),
         syncRetryCount: 0,
@@ -91,6 +117,7 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
           now,
           lastErrorCode: 'expired',
           leaseUntil: connection.syncLeaseUntil,
+          leaseToken: connection.syncLeaseToken,
           tokenEnvelopeCiphertext: connection.tokenEnvelopeCiphertext,
         });
         if (!expired) {
@@ -98,6 +125,7 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
             id: connection.id,
             userId: connection.userId,
             leaseUntil: connection.syncLeaseUntil,
+            leaseToken: connection.syncLeaseToken,
             now,
           });
         }
@@ -109,12 +137,16 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
         id: connection.id,
         userId: connection.userId,
         leaseUntil: connection.syncLeaseUntil,
+        leaseToken: connection.syncLeaseToken,
         now,
         nextSyncAt: next.nextSyncAt,
         syncRetryCount: next.syncRetryCount,
         lastErrorCode: errorCode(error),
       });
       result.failed += 1;
+    } finally {
+      clearTimeout(deadline);
+      input.signal?.removeEventListener('abort', abortFromInput);
     }
   }
   return result;

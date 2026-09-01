@@ -128,6 +128,55 @@ test('initial sync does not read an expired or disconnected connection', async (
   assert.equal(result, false);
 });
 
+test('an aborted scheduled run stops before Health API reads or cursor writes', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  await store.users.insert('u-abort');
+  await store.connections.insert({
+    ...liveConnection('u-abort', 'c-abort'),
+    nextSyncAt: now,
+    syncRetryCount: 0,
+  });
+  const [claimed] = await store.connections.claimDueSyncs({
+    now,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(claimed?.syncLeaseToken);
+  let reads = 0;
+  const api: HealthApiClient = {
+    async listDataPoints() {
+      reads += 1;
+      return [];
+    },
+    async *iterateReconciledDataPoints() {
+      reads += 1;
+    },
+  };
+
+  await assert.rejects(
+    () => syncUserConnection({
+      config: oauthConfig(),
+      store,
+      userId: 'u-abort',
+      now,
+      api,
+      scheduledRun: {
+        connectionId: claimed!.id,
+        userId: claimed!.userId,
+        leaseToken: claimed!.syncLeaseToken!,
+        leaseUntil: claimed!.syncLeaseUntil!,
+        now,
+        signal: AbortSignal.abort(new Error('test deadline')),
+      },
+    }),
+    /scheduled sync deadline exceeded/u,
+  );
+  assert.equal(reads, 0);
+  assert.deepEqual(await store.healthMetrics.listCursors({ connectionId: 'c-abort' }), []);
+  assert.equal((await store.connections.findByUserId('u-abort'))?.lastSuccessfulSyncAt, undefined);
+});
+
 function liveConnection(userId: string, connectionId: string): ConnectionRow {
   const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, keyBuffer, connectionId, userId);
   return connection({

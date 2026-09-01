@@ -1,5 +1,5 @@
 import type { OAuthConfig } from '../config/env';
-import type { AuthStore, ConnectionRow } from '../auth/types';
+import type { AuthStore, ConnectionRow, ScheduledSyncLease } from '../auth/types';
 import { createGoogleTokenRefresher, resolveAccessToken, TokenRefreshError, type TokenRefresher } from './access-token';
 import {
   initialCivilBackfillRange,
@@ -27,6 +27,7 @@ export async function syncUserConnection(input: {
   refresher?: TokenRefresher;
   loadSnapshot?: (userId: string) => Promise<HealthSnapshot | undefined>;
   loadRecords?: LoadHealthRecords;
+  scheduledRun?: ScheduledSyncLease & { signal: AbortSignal };
 }): Promise<boolean> {
   const now = input.now ?? new Date();
   const rangeDays = input.rangeDays ?? 35;
@@ -39,6 +40,7 @@ export async function syncUserConnection(input: {
         userId,
         records,
         syncedAt,
+        lease: input.scheduledRun,
       }));
   const connection = await input.store.connections.findByUserId(input.userId);
   if (!connection || (connection.status !== 'active' && connection.status !== 'partial')) {
@@ -48,6 +50,20 @@ export async function syncUserConnection(input: {
     await input.syncOne(connection, { from, to });
     return true;
   }
+
+  const throwIfAborted = () => {
+    if (input.scheduledRun?.signal.aborted) {
+      throw new Error('scheduled sync deadline exceeded');
+    }
+  };
+  const scheduledWrite = async <T>(write: (store: AuthStore) => Promise<T>): Promise<T> => {
+    throwIfAborted();
+    if (!input.scheduledRun) return write(input.store);
+    return input.store.withScheduledSyncLease(input.scheduledRun, async (inner) => {
+      throwIfAborted();
+      return write(inner);
+    });
+  };
 
   const api = input.api ?? createHealthApiClient();
   const refresher = input.refresher ?? createGoogleTokenRefresher(input.config);
@@ -63,12 +79,15 @@ export async function syncUserConnection(input: {
     refresher,
     persistSnapshot: (records, syncedAt) => persistSnapshot(connection.userId, records, syncedAt),
     loadSnapshot,
+    lease: input.scheduledRun,
+    signal: input.scheduledRun?.signal,
   });
   let snapshotRecords: UserHealthRecords | undefined;
   let snapshotAffectedDates: string[] = [];
   const dueSnapshotTypes: SnapshotRecordDataType[] = [];
   let hasIncompleteSnapshotBackfill = false;
   for (const dataType of SNAPSHOT_SYNC_TYPES) {
+    throwIfAborted();
     const cursor = await input.store.healthMetrics.readCursor({ connectionId: connection.id, dataType });
     if (!cursor?.nextAttemptAt || cursor.nextAttemptAt.getTime() <= now.getTime()) {
       dueSnapshotTypes.push(dataType);
@@ -86,11 +105,11 @@ export async function syncUserConnection(input: {
       snapshotRecords = snapshot.records;
       snapshotAffectedDates = snapshot.affectedDates;
       for (const dataType of snapshot.succeededDataTypes) {
-        await input.store.healthMetrics.updateCursor({
+        await scheduledWrite((store) => store.healthMetrics.updateCursor({
           connectionId: connection.id,
           dataType,
           ...successCursor(now),
-        });
+        }));
       }
       for (const failure of snapshot.failures) {
         if (!SNAPSHOT_SYNC_TYPES.includes(failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number])) {
@@ -102,6 +121,7 @@ export async function syncUserConnection(input: {
           dataType: failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number],
           now,
           error: failure.error,
+          lease: input.scheduledRun,
         });
       }
     }
@@ -123,6 +143,7 @@ export async function syncUserConnection(input: {
         dataType,
         now,
         error,
+        lease: input.scheduledRun,
       });
     }
   }
@@ -136,6 +157,7 @@ export async function syncUserConnection(input: {
     connection: latest,
     refresher,
     now,
+    lease: input.scheduledRun,
   });
   const loadRecords: LoadHealthRecords =
     input.loadRecords ??
@@ -158,6 +180,8 @@ export async function syncUserConnection(input: {
       loadSnapshot,
       extraDates: snapshotAffectedDates,
       lastSuccessfulSyncAt,
+      lease: input.scheduledRun,
+      signal: input.scheduledRun?.signal,
     });
   } catch (error) {
     if (isUnsyncableError(error)) {
@@ -166,7 +190,7 @@ export async function syncUserConnection(input: {
     throw error;
   }
   const after = await input.store.connections.findByUserId(connection.userId);
-  if (after && (after.status === 'active' || after.status === 'partial')) {
+  if (!input.scheduledRun && after && (after.status === 'active' || after.status === 'partial')) {
     await input.store.connections.update({
       ...after,
       nextSyncAt: cardio.nextSyncAt,

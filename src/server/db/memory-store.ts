@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
-import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, SessionRow } from '../auth/types';
+import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, ScheduledSyncLease, SessionRow } from '../auth/types';
 import {
   HealthMetricsConnectionMismatchError,
   mergeHeartRateMinuteUpsert,
@@ -80,6 +80,7 @@ function cloneConnection(row: ConnectionRow): ConnectionRow {
     lastSuccessfulSyncAt: row.lastSuccessfulSyncAt ? new Date(row.lastSuccessfulSyncAt) : undefined,
     nextSyncAt: row.nextSyncAt ? new Date(row.nextSyncAt) : undefined,
     syncLeaseUntil: row.syncLeaseUntil ? new Date(row.syncLeaseUntil) : undefined,
+    syncLeaseToken: row.syncLeaseToken,
     lastSyncAttemptAt: row.lastSyncAttemptAt ? new Date(row.lastSyncAttemptAt) : undefined,
   };
 }
@@ -932,6 +933,22 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         return result;
       });
     },
+    async withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (inner: AuthStore) => Promise<T>): Promise<T> {
+      if (!options.transactionChild) {
+        return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn));
+      }
+      const current = connections.get(lease.connectionId);
+      if (
+        !current ||
+        current.userId !== lease.userId ||
+        current.syncLeaseToken !== lease.leaseToken ||
+        !current.syncLeaseUntil ||
+        current.syncLeaseUntil.getTime() <= lease.now.getTime()
+      ) {
+        throw new Error('sync lease no longer held');
+      }
+      return fn(store);
+    },
     users: {
       async insert(id: string): Promise<void> {
         users.add(id);
@@ -1123,7 +1140,14 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       },
       async updateAccessTokenIfSyncable(input): Promise<boolean> {
         const current = connections.get(input.id);
-        if (!current || current.userId !== input.userId || (current.status !== 'active' && current.status !== 'partial')) {
+        if (
+          !current || current.userId !== input.userId || (current.status !== 'active' && current.status !== 'partial') ||
+          (input.lease && (
+            current.syncLeaseToken !== input.lease.leaseToken ||
+            !current.syncLeaseUntil ||
+            current.syncLeaseUntil.getTime() <= input.lease.now.getTime()
+          ))
+        ) {
           return false;
         }
         connections.set(
@@ -1143,7 +1167,14 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       },
       async markLastSuccessfulSyncIfSyncable(input): Promise<boolean> {
         const current = connections.get(input.id);
-        if (!current || current.userId !== input.userId || (current.status !== 'active' && current.status !== 'partial')) {
+        if (
+          !current || current.userId !== input.userId || (current.status !== 'active' && current.status !== 'partial') ||
+          (input.lease && (
+            current.syncLeaseToken !== input.lease.leaseToken ||
+            !current.syncLeaseUntil ||
+            current.syncLeaseUntil.getTime() <= input.lease.now.getTime()
+          ))
+        ) {
           return false;
         }
         connections.set(
@@ -1164,31 +1195,37 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
               (!input.userId || row.userId === input.userId) &&
               Boolean(row.tokenEnvelopeCiphertext) &&
               (!row.refreshTokenExpiresAt || row.refreshTokenExpiresAt.getTime() > input.now.getTime()) &&
-              row.nextSyncAt &&
-              row.nextSyncAt.getTime() <= input.now.getTime() &&
-              (!row.syncLeaseUntil || row.syncLeaseUntil.getTime() <= input.now.getTime()),
+              Boolean(
+                (row.nextSyncAt &&
+                  row.nextSyncAt.getTime() <= input.now.getTime() &&
+                  (!row.syncLeaseUntil || row.syncLeaseUntil.getTime() <= input.now.getTime())) ||
+                (!row.nextSyncAt && row.syncLeaseUntil && row.syncLeaseUntil.getTime() <= input.now.getTime()),
+              ),
           )
           .sort((left, right) => {
-            const byDue = left.nextSyncAt!.getTime() - right.nextSyncAt!.getTime();
+            const byDue = (left.nextSyncAt ?? left.syncLeaseUntil)!.getTime() - (right.nextSyncAt ?? right.syncLeaseUntil)!.getTime();
             return byDue || left.id.localeCompare(right.id);
           })
           .slice(0, input.limit);
-        for (const row of due) {
+        const claimed = due.map((row) => ({ row, leaseToken: randomUUID() }));
+        for (const { row, leaseToken } of claimed) {
           connections.set(
             row.id,
             cloneConnection({
               ...row,
               syncLeaseUntil: input.leaseUntil,
+              syncLeaseToken: leaseToken,
               lastSyncAttemptAt: input.now,
               updatedAt: input.now,
               nextSyncAt: undefined,
             }),
           );
         }
-        return due.map((row) =>
+        return claimed.map(({ row, leaseToken }) =>
           cloneConnection({
             ...row,
             syncLeaseUntil: input.leaseUntil,
+            syncLeaseToken: leaseToken,
             lastSyncAttemptAt: input.now,
             updatedAt: input.now,
             nextSyncAt: undefined,
@@ -1202,7 +1239,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           current.userId !== input.userId ||
           (current.status !== 'active' && current.status !== 'partial') ||
           !current.syncLeaseUntil ||
-          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime()
+          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime() ||
+          current.syncLeaseToken !== input.leaseToken ||
+          current.syncLeaseUntil.getTime() <= input.now.getTime()
         ) {
           return false;
         }
@@ -1214,6 +1253,7 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
             nextSyncAt: keepDue ? current.nextSyncAt : input.nextSyncAt,
             syncRetryCount: keepDue ? current.syncRetryCount : input.syncRetryCount,
             syncLeaseUntil: undefined,
+            syncLeaseToken: undefined,
             lastErrorCode: keepDue ? current.lastErrorCode : input.lastErrorCode,
             updatedAt: input.now,
           }),
@@ -1228,6 +1268,8 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           (current.status !== 'active' && current.status !== 'partial') ||
           !current.syncLeaseUntil ||
           current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime() ||
+          current.syncLeaseToken !== input.leaseToken ||
+          current.syncLeaseUntil.getTime() <= input.now.getTime() ||
           !envelopesEqual(current.tokenEnvelopeCiphertext, input.tokenEnvelopeCiphertext)
         ) {
           return false;
@@ -1240,6 +1282,7 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
             nextSyncAt: undefined,
             syncRetryCount: 0,
             syncLeaseUntil: undefined,
+            syncLeaseToken: undefined,
             lastErrorCode: input.lastErrorCode,
             updatedAt: input.now,
           }),
@@ -1252,11 +1295,13 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           !current ||
           current.userId !== input.userId ||
           !current.syncLeaseUntil ||
-          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime()
+          current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime() ||
+          current.syncLeaseToken !== input.leaseToken ||
+          current.syncLeaseUntil.getTime() <= input.now.getTime()
         ) {
           return false;
         }
-        connections.set(current.id, cloneConnection({ ...current, syncLeaseUntil: undefined, updatedAt: input.now }));
+        connections.set(current.id, cloneConnection({ ...current, syncLeaseUntil: undefined, syncLeaseToken: undefined, updatedAt: input.now }));
         return true;
       },
     },

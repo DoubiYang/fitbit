@@ -9,6 +9,7 @@ export type ReconcileDataPointsInput = {
   dataType: string;
   filter: string;
   pageSize?: number;
+  signal?: AbortSignal;
 };
 
 export type HealthApiClient = {
@@ -27,12 +28,13 @@ function reconcilePageSize(input: ReconcileDataPointsInput): number {
   return isHighVolumeDataType(input.dataType) ? HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE : DEFAULT_PAGE_SIZE;
 }
 
-async function fetchPage(url: string, accessToken: string): Promise<{ dataPoints?: GoogleDataPoint[]; nextPageToken?: string }> {
+async function fetchPage(url: string, accessToken: string, signal?: AbortSignal): Promise<{ dataPoints?: GoogleDataPoint[]; nextPageToken?: string }> {
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
     },
+    signal,
   });
   if (!response.ok) {
     throw new Error(`health api ${response.status}`);
@@ -52,7 +54,10 @@ async function* iterateReconciledPages(input: ReconcileDataPointsInput): AsyncGe
       params.set('pageToken', pageToken);
     }
     const reconcileUrl = `${API_ROOT}/users/me/dataTypes/${input.dataType}/dataPoints:reconcile?${params.toString()}`;
-    const page = await fetchPage(reconcileUrl, input.accessToken);
+    if (input.signal?.aborted) {
+      throw new Error('scheduled sync deadline exceeded');
+    }
+    const page = await fetchPage(reconcileUrl, input.accessToken, input.signal);
     yield page.dataPoints ?? [];
     pageToken = page.nextPageToken;
   } while (pageToken);

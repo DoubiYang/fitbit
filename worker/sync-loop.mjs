@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const FETCH_TIMEOUT_MS = 4 * 60 * 1_000;
+// The app owns cancellation at 13 minutes and has time to persist a token-fenced retry.
+export const FETCH_TIMEOUT_MS = 14 * 60 * 1_000;
 export const TICK_INTERVAL_MS = 60_000;
 
 export async function tick(input) {

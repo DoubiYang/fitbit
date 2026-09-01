@@ -93,3 +93,74 @@ test('does not claim expired refresh tokens or connections without a token envel
   const claimed = await store.connections.claimDueSyncs({ now, leaseUntil, limit: 10 });
   assert.deepEqual(claimed.map((row) => row.userId), ['due-user']);
 });
+
+test('claim assigns an opaque lease token and rejects another run from finishing or releasing it', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const leaseUntil = new Date('2026-08-24T12:15:00.000Z');
+  const row = connection({ id: 'due', userId: 'due-user', status: 'active', nextSyncAt: now });
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+
+  const [claimed] = await store.connections.claimDueSyncs({ now, leaseUntil, limit: 1 });
+  const leaseToken = (claimed as ScheduledConnection & { syncLeaseToken?: string }).syncLeaseToken;
+  assert.equal(typeof leaseToken, 'string');
+  assert.ok(leaseToken && leaseToken.length > 0);
+
+  const wrongToken = '00000000-0000-4000-8000-000000000000';
+  const finished = await store.connections.finishScheduledSync({
+    id: row.id,
+    userId: row.userId,
+    leaseUntil,
+    leaseToken: wrongToken,
+    now,
+    nextSyncAt: new Date('2026-08-24T13:00:00.000Z'),
+    syncRetryCount: 0,
+    lastErrorCode: undefined,
+  } as never);
+  const cleared = await store.connections.clearSyncLeaseIfHeld({
+    id: row.id,
+    userId: row.userId,
+    leaseUntil,
+    leaseToken: wrongToken,
+    now,
+  } as never);
+  const expired = await store.connections.expireIfSyncable({
+    id: row.id,
+    userId: row.userId,
+    leaseUntil,
+    leaseToken: wrongToken,
+    now,
+    lastErrorCode: 'expired',
+    tokenEnvelopeCiphertext: row.tokenEnvelopeCiphertext,
+  } as never);
+
+  assert.equal(finished, false);
+  assert.equal(cleared, false);
+  assert.equal(expired, false);
+  assert.equal((await store.connections.findByUserId(row.userId))?.syncLeaseUntil?.toISOString(), leaseUntil.toISOString());
+});
+
+test('reclaims an expired lease with a new token when the prior worker never finalized', async () => {
+  const store = createMemoryStore();
+  const startedAt = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection({ id: 'reclaim', userId: 'reclaim-user', status: 'active', nextSyncAt: startedAt });
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+
+  const [first] = await store.connections.claimDueSyncs({
+    now: startedAt,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  const [second] = await store.connections.claimDueSyncs({
+    now: new Date('2026-08-24T12:16:00.000Z'),
+    leaseUntil: new Date('2026-08-24T12:31:00.000Z'),
+    limit: 1,
+  });
+
+  assert.ok(first?.syncLeaseToken);
+  assert.ok(second?.syncLeaseToken);
+  assert.notEqual(second?.syncLeaseToken, first?.syncLeaseToken);
+  assert.equal(second?.syncLeaseUntil?.toISOString(), '2026-08-24T12:31:00.000Z');
+});

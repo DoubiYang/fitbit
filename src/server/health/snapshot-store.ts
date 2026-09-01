@@ -1,5 +1,7 @@
 import { getPool } from '../db/postgres-store';
+import type { PostgresQueryable } from '../db/postgres-store';
 import { isDeepStrictEqual } from 'node:util';
+import type { ScheduledSyncLease } from '../auth/types';
 import type { DailyHrv, DailyRhr, SleepSession, TrainingDay } from '../../domain/health-records';
 import type { UserHealthRecords } from './provider';
 
@@ -180,18 +182,29 @@ export function mergeHealthRecords(
   };
 }
 
-export async function saveHealthSnapshot(input: {
-  databaseUrl: string;
+type SaveHealthSnapshotInput = {
   userId: string;
   records: UserHealthRecords;
   syncedAt: Date;
-}): Promise<void> {
-  const pool = getPool(input.databaseUrl);
-  const result = await pool.query(
+  lease?: ScheduledSyncLease;
+};
+
+async function saveHealthSnapshotWithQueryable(
+  queryable: PostgresQueryable,
+  input: SaveHealthSnapshotInput,
+): Promise<void> {
+  const result = await queryable.query(
     `WITH active_connection AS (
        SELECT user_id
        FROM google_health_connections
-       WHERE user_id = $1 AND status IN ('active', 'partial')
+       WHERE user_id = $1
+         AND status IN ('active', 'partial')
+         AND ($8::uuid IS NULL OR (
+           id = $8
+           AND sync_lease_token = $9::uuid
+           AND sync_lease_until = $10
+           AND sync_lease_until > now()
+         ))
        FOR UPDATE
      )
      INSERT INTO health_snapshots (user_id, sleep_count, hrv_count, rhr_count, training_day_count, records, synced_at)
@@ -213,11 +226,23 @@ export async function saveHealthSnapshot(input: {
       input.records.trainingDays.length,
       JSON.stringify(input.records),
       input.syncedAt,
+      input.lease?.connectionId ?? null,
+      input.lease?.leaseToken ?? null,
+      input.lease?.leaseUntil ?? null,
     ],
   );
   if (result.rowCount !== 1) {
-    throw new Error('connection no longer syncable');
+    throw new Error(input.lease ? 'sync lease no longer held' : 'connection no longer syncable');
   }
+}
+
+export async function saveHealthSnapshot(input: SaveHealthSnapshotInput & { databaseUrl: string }): Promise<void> {
+  await saveHealthSnapshotWithQueryable(getPool(input.databaseUrl), input);
+}
+
+/** Keeps the atomic scheduled-lease predicate observable without a networked database. */
+export async function saveHealthSnapshotForTesting(input: SaveHealthSnapshotInput & { queryable: PostgresQueryable }): Promise<void> {
+  await saveHealthSnapshotWithQueryable(input.queryable, input);
 }
 
 export async function loadHealthSnapshot(databaseUrl: string, userId: string): Promise<HealthSnapshot | undefined> {

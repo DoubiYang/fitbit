@@ -1,5 +1,5 @@
 import type { OAuthConfig } from '../config/env';
-import type { AuthStore, ConnectionRow, GoogleTokenResponse } from '../auth/types';
+import type { AuthStore, ConnectionRow, GoogleTokenResponse, ScheduledSyncLease } from '../auth/types';
 import { CURRENT_KEY_VERSION, decryptTokenEnvelope, encryptTokenEnvelope } from '../crypto/token-envelope';
 
 const SKEW_MS = 60_000;
@@ -67,6 +67,7 @@ export async function resolveAccessToken(input: {
   connection: ConnectionRow;
   refresher: TokenRefresher;
   now?: Date;
+  lease?: ScheduledSyncLease;
 }): Promise<string> {
   const now = input.now ?? new Date();
   const envelope = envelopeFrom(input.connection);
@@ -103,6 +104,7 @@ export async function resolveAccessToken(input: {
     accessTokenExpiresAt: refreshed.expiresAt,
     refreshTokenExpiresAt: refreshed.refreshExpiresAt,
     updatedAt: now,
+    lease: input.lease,
   });
   if (!updated) {
     throw new Error('connection no longer syncable');

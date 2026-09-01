@@ -1,5 +1,5 @@
 import type { OAuthConfig } from '../config/env';
-import type { AuthStore, ConnectionRow } from '../auth/types';
+import type { AuthStore, ConnectionRow, ScheduledSyncLease } from '../auth/types';
 import { emptyUserHealthRecords, type HealthDateRange, type HealthProvider, type UserHealthRecords } from './provider';
 import { createHealthApiClient, type HealthApiClient } from './health-api';
 import { createGoogleTokenRefresher, resolveAccessToken, type TokenRefresher } from './access-token';
@@ -25,6 +25,8 @@ type LiveProviderInput = {
   now?: Date;
   persistSnapshot?: (records: UserHealthRecords, syncedAt: Date) => Promise<void>;
   loadSnapshot?: (userId: string) => Promise<HealthSnapshot | undefined>;
+  lease?: ScheduledSyncLease;
+  signal?: AbortSignal;
 };
 
 export type SnapshotRecordDataType = 'sleep' | 'daily-heart-rate-variability' | 'daily-resting-heart-rate';
@@ -69,6 +71,12 @@ export class GoogleHealthProvider implements HealthProvider {
 
   constructor(private readonly input: LiveProviderInput) {}
 
+  private throwIfAborted(): void {
+    if (this.input.signal?.aborted) {
+      throw new Error('scheduled sync deadline exceeded');
+    }
+  }
+
   private async collectRecords(
     userId: string,
     range: HealthDateRange,
@@ -92,12 +100,14 @@ export class GoogleHealthProvider implements HealthProvider {
         syncedAt: this.input.now ?? new Date(),
       };
     }
+    this.throwIfAborted();
     const accessToken = await resolveAccessToken({
       config: this.input.config,
       store: this.input.store,
       connection: this.input.connection,
       refresher: this.input.refresher ?? createGoogleTokenRefresher(this.input.config),
       now: this.input.now,
+      lease: this.input.lease,
     });
     const api = this.input.api ?? createHealthApiClient();
     const syncedAt = this.input.now ?? new Date();
@@ -113,6 +123,7 @@ export class GoogleHealthProvider implements HealthProvider {
           dataType: 'sleep',
           filter: dataPointFilter('sleep', queryRange.from, until),
           pageSize: 25,
+          signal: this.input.signal,
         }),
       },
       {
@@ -121,6 +132,7 @@ export class GoogleHealthProvider implements HealthProvider {
           accessToken,
           dataType: 'daily-heart-rate-variability',
           filter: dataPointFilter('daily-heart-rate-variability', queryRange.from, until),
+          signal: this.input.signal,
         }),
       },
       {
@@ -129,6 +141,7 @@ export class GoogleHealthProvider implements HealthProvider {
           accessToken,
           dataType: 'daily-resting-heart-rate',
           filter: dataPointFilter('daily-resting-heart-rate', queryRange.from, until),
+          signal: this.input.signal,
         }),
       },
       {
@@ -138,6 +151,7 @@ export class GoogleHealthProvider implements HealthProvider {
           dataType: 'exercise',
           filter: dataPointFilter('exercise', queryRange.from, until),
           pageSize: 25,
+          signal: this.input.signal,
         }),
       },
     ];
@@ -147,6 +161,7 @@ export class GoogleHealthProvider implements HealthProvider {
         (query.dataType !== 'exercise' && requestedDataTypes.includes(query.dataType)),
     );
     const settled = await Promise.allSettled(requestedQueries.map((query) => query.request()));
+    this.throwIfAborted();
     const pointsByType = new Map<SnapshotQueryDataType, GoogleDataPoint[]>();
     const failures: SnapshotRecordSyncResult['failures'] = [];
     for (const [index, result] of settled.entries()) {
@@ -210,11 +225,14 @@ export class GoogleHealthProvider implements HealthProvider {
     syncedAt: Date,
     markSnapshotSuccessful: boolean,
   ): Promise<void> {
+    this.throwIfAborted();
     const beforePersist = await this.input.store.connections.findByUserId(userId);
     if (!isSyncable(beforePersist)) {
       throw new Error('connection no longer syncable');
     }
     if (this.input.persistSnapshot) {
+      // The production snapshot writer embeds the lease predicate in the same SQL statement.
+      // Do not hold a separate row lock here, or that atomic statement would block on itself.
       await this.input.persistSnapshot(records, syncedAt);
     }
     const latest = await this.input.store.connections.findByUserId(userId);
@@ -228,6 +246,7 @@ export class GoogleHealthProvider implements HealthProvider {
       id: latest.id,
       userId: latest.userId,
       syncedAt,
+      lease: this.input.lease,
     });
     if (!stamped) {
       throw new Error('connection no longer syncable');

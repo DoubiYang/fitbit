@@ -27,13 +27,25 @@ export type ConnectionRow = TokenEnvelopeFields & {
   nextSyncAt?: Date | undefined;
   syncRetryCount?: number;
   syncLeaseUntil?: Date | undefined;
+  /** Opaque owner of a scheduled-sync lease. It is absent outside an active scheduled run. */
+  syncLeaseToken?: string | undefined;
   lastSyncAttemptAt?: Date | undefined;
+};
+
+export type ScheduledSyncLease = {
+  connectionId: string;
+  userId: string;
+  leaseToken: string;
+  leaseUntil: Date;
+  /** The server-owned clock used to reject expired leases deterministically. */
+  now: Date;
 };
 
 export type ScheduledSyncFinish = {
   id: string;
   userId: string;
   leaseUntil: Date;
+  leaseToken: string;
   now: Date;
   nextSyncAt: Date;
   syncRetryCount: number;
@@ -57,12 +69,14 @@ export type AccessTokenUpdate = {
   accessTokenExpiresAt: Date;
   refreshTokenExpiresAt: Date | undefined;
   updatedAt: Date;
+  lease?: ScheduledSyncLease;
 };
 
 export type LastSuccessfulSyncUpdate = {
   id: string;
   userId: string;
   syncedAt: Date;
+  lease?: ScheduledSyncLease;
 };
 
 export type ConnectionExpire = {
@@ -71,6 +85,7 @@ export type ConnectionExpire = {
   now: Date;
   lastErrorCode: string;
   leaseUntil: Date;
+  leaseToken: string;
   tokenEnvelopeCiphertext: Buffer | undefined;
 };
 
@@ -78,6 +93,7 @@ export type SyncLeaseRelease = {
   id: string;
   userId: string;
   leaseUntil: Date;
+  leaseToken: string;
   now: Date;
 };
 
@@ -154,6 +170,8 @@ export type OauthTransactionRow = {
 
 export type AuthStore = {
   withTransaction<T>(fn: (store: AuthStore) => Promise<T>): Promise<T>;
+  /** Runs writes only while this exact scheduled-sync lease is still current and unexpired. */
+  withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (store: AuthStore) => Promise<T>): Promise<T>;
   users: {
     insert(id: string): Promise<void>;
     setNutritionWritebackEnabled(id: string, enabled: boolean): Promise<void>;

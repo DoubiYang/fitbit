@@ -17,7 +17,7 @@ import {
   metricsAffectedByStrainRecompute,
   type AggregatedHeartRateMinute,
 } from '../../domain/whoop-style-metrics';
-import type { AuthStore, ConnectionRow } from '../auth/types';
+import type { AuthStore, ConnectionRow, ScheduledSyncLease } from '../auth/types';
 import { civilDate } from '../time/civil-date';
 import {
   mapActivityLevelIntervals,
@@ -74,6 +74,29 @@ function recordsLoader(input: {
 }
 
 type QueryWindow = { from: string; untilExclusive: string };
+type ScheduledCardioRun = ScheduledSyncLease & { signal?: AbortSignal };
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error('scheduled sync deadline exceeded');
+  }
+}
+
+async function scheduledWrite<T>(input: {
+  store: AuthStore;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
+}, write: (store: AuthStore) => Promise<T>): Promise<T> {
+  const signal = input.signal ?? input.lease?.signal;
+  throwIfAborted(signal);
+  if (!input.lease) {
+    return write(input.store);
+  }
+  return input.store.withScheduledSyncLease(input.lease, async (inner) => {
+    throwIfAborted(signal);
+    return write(inner);
+  });
+}
 
 export function connectionNextSyncAt(cursors: HealthSyncCursor[], now: Date): Date {
   const hourly = now.getTime() + HOURLY_SYNC_MS;
@@ -299,6 +322,8 @@ async function ingestHeartRate(input: {
   userId: string;
   now: Date;
   window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<string[]> {
   const affected = new Set<string>();
   let previousMinutes: AggregatedHeartRateMinute[] = [];
@@ -308,7 +333,9 @@ async function ingestHeartRate(input: {
     dataType: 'heart-rate',
     filter: dataPointFilter('heart-rate', input.window.from, input.window.untilExclusive),
     pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+    signal: input.signal,
   })) {
+    throwIfAborted(input.signal);
     const points = page.slice();
     const minutes = mapHeartRatePageToMinutes({
       userId: input.userId,
@@ -332,7 +359,7 @@ async function ingestHeartRate(input: {
     const persistable = persistableMinutes(combined, intervals);
     if (persistable.length > 0) {
       await requireSyncable(input.store, input.userId);
-      await input.store.healthMetrics.upsertMinutes(persistable);
+      await scheduledWrite(input, (store) => store.healthMetrics.upsertMinutes(persistable));
       for (const minute of persistable) {
         affected.add(minute.civilDate);
       }
@@ -347,6 +374,8 @@ async function ingestActivityLevel(input: {
   accessToken: string;
   userId: string;
   window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<string[]> {
   const affected = new Set<string>();
   for await (const page of input.api.iterateReconciledDataPoints({
@@ -354,13 +383,15 @@ async function ingestActivityLevel(input: {
     dataType: 'activity-level',
     filter: dataPointFilter('activity-level', input.window.from, input.window.untilExclusive),
     pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+    signal: input.signal,
   })) {
+    throwIfAborted(input.signal);
     const intervals = mapActivityLevelIntervals(page.slice(), input.userId);
     if (intervals.length === 0) {
       continue;
     }
     await requireSyncable(input.store, input.userId);
-    await input.store.healthMetrics.upsertActivityLevelIntervals(intervals);
+    await scheduledWrite(input, (store) => store.healthMetrics.upsertActivityLevelIntervals(intervals));
     for (const interval of intervals) {
       for (const date of civilDatesForInterval(interval.startTime, interval.endTime)) {
         affected.add(date);
@@ -384,11 +415,14 @@ async function ingestDailyZones(input: {
   accessToken: string;
   userId: string;
   window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<string[]> {
   const points = await input.api.listDataPoints({
     accessToken: input.accessToken,
     dataType: 'daily-heart-rate-zones',
     filter: dataPointFilter('daily-heart-rate-zones', input.window.from, input.window.untilExclusive),
+    signal: input.signal,
   });
   const affected: string[] = [];
   for (const point of points) {
@@ -397,7 +431,7 @@ async function ingestDailyZones(input: {
       continue;
     }
     await requireSyncable(input.store, input.userId);
-    await input.store.healthMetrics.replaceHeartRateZones(mapped);
+    await scheduledWrite(input, (store) => store.healthMetrics.replaceHeartRateZones(mapped));
     affected.push(mapped.date);
   }
   return affected;
@@ -415,6 +449,8 @@ async function ingestTimeInZone(input: {
   accessToken: string;
   userId: string;
   window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<string[]> {
   const totals = new Map<
     string,
@@ -424,9 +460,12 @@ async function ingestTimeInZone(input: {
     accessToken: input.accessToken,
     dataType: 'time-in-heart-rate-zone',
     filter: dataPointFilter('time-in-heart-rate-zone', input.window.from, input.window.untilExclusive),
+    signal: input.signal,
   })) {
+    throwIfAborted(input.signal);
     const intervals = mapTimeInZoneIntervals(page.slice());
     for (const interval of intervals) {
+      throwIfAborted(input.signal);
       const current = totals.get(interval.civilDate) ?? {
         light: 0,
         moderate: 0,
@@ -450,14 +489,14 @@ async function ingestTimeInZone(input: {
       continue;
     }
     await requireSyncable(input.store, input.userId);
-    await input.store.healthMetrics.replaceTimeInZone(
+    await scheduledWrite(input, (store) => store.healthMetrics.replaceTimeInZone(
       parseDailyTimeInZone({
         userId: input.userId,
         sourceFamily: 'google-wearables',
         date,
         minutes: { light: minutes.light, moderate: minutes.moderate, vigorous: minutes.vigorous, peak: minutes.peak },
       }),
-    );
+    ));
     affected.push(date);
   }
   return affected;
@@ -469,12 +508,15 @@ async function ingestExercise(input: {
   accessToken: string;
   userId: string;
   window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<string[]> {
   const points = await input.api.listDataPoints({
     accessToken: input.accessToken,
     dataType: 'exercise',
     filter: dataPointFilter('exercise', input.window.from, input.window.untilExclusive),
     pageSize: 25,
+    signal: input.signal,
   });
   const affected = new Set<string>();
   for (const point of points) {
@@ -483,7 +525,7 @@ async function ingestExercise(input: {
       continue;
     }
     await requireSyncable(input.store, input.userId);
-    await input.store.healthMetrics.upsertExerciseIntervals([mapped]);
+    await scheduledWrite(input, (store) => store.healthMetrics.upsertExerciseIntervals([mapped]));
     affected.add(mapped.civilDate);
     for (const date of civilDatesForInterval(mapped.startTime, mapped.endTime)) {
       affected.add(date);
@@ -500,6 +542,8 @@ async function ingestDataType(input: {
   now: Date;
   dataType: HealthSyncDataType;
   window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<string[]> {
   switch (input.dataType) {
     case 'heart-rate':
@@ -523,19 +567,21 @@ export async function scheduleTypeFailure(input: {
   dataType: HealthSyncDataType;
   now: Date;
   error: unknown;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<void> {
   const current = await input.store.healthMetrics.readCursor({
     connectionId: input.connectionId,
     dataType: input.dataType,
   });
   const scheduled = cursorRetrySchedule(input.now, current?.retryCount ?? 0);
-  await input.store.healthMetrics.scheduleCursor({
+  await scheduledWrite(input, (store) => store.healthMetrics.scheduleCursor({
     connectionId: input.connectionId,
     dataType: input.dataType,
     lastErrorCode: cursorErrorCode(input.error),
     retryCount: scheduled.retryCount,
     nextAttemptAt: scheduled.nextAttemptAt,
-  });
+  }));
 }
 
 export async function recomputeAffectedDays(
@@ -706,12 +752,15 @@ export async function syncCardioConnection(input: {
   loadSnapshot?: LoadHealthSnapshot;
   extraDates?: Iterable<string>;
   lastSuccessfulSyncAt?: Date | string;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
 }): Promise<CardioSyncState> {
   const dataTypes = input.dataTypes ?? CARDIO_SYNC_TYPES;
   const succeeded: HealthSyncDataType[] = [];
   const affected = new Set<string>(input.extraDates ?? []);
 
   for (const dataType of dataTypes) {
+    throwIfAborted(input.signal);
     const cursor = await input.store.healthMetrics.readCursor({
       connectionId: input.connection.id,
       dataType,
@@ -729,6 +778,8 @@ export async function syncCardioConnection(input: {
         now: input.now,
         dataType,
         window,
+        lease: input.lease,
+        signal: input.signal,
       });
       for (const date of dates) {
         affected.add(date);
@@ -744,11 +795,14 @@ export async function syncCardioConnection(input: {
         dataType,
         now: input.now,
         error,
+        lease: input.lease,
+        signal: input.signal,
       });
     }
   }
 
-  await input.store.withTransaction(async (inner) => {
+  const finalize = async (inner: AuthStore) => {
+    throwIfAborted(input.signal);
     await recomputeAffectedDays(inner, {
       userId: input.connection.userId,
       dates: affected,
@@ -758,14 +812,21 @@ export async function syncCardioConnection(input: {
       lastSuccessfulSyncAt: input.lastSuccessfulSyncAt,
     });
     for (const dataType of succeeded) {
+      throwIfAborted(input.signal);
       await inner.healthMetrics.updateCursor({
         connectionId: input.connection.id,
         dataType,
         ...successCursor(input.now),
       });
     }
-  });
+  };
+  if (input.lease) {
+    await input.store.withScheduledSyncLease(input.lease, (inner) => finalize(inner));
+  } else {
+    await input.store.withTransaction(finalize);
+  }
 
+  throwIfAborted(input.signal);
   const cursors = await input.store.healthMetrics.listCursors({ connectionId: input.connection.id });
   return {
     affectedDates: [...affected].sort(),
