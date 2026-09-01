@@ -394,11 +394,39 @@ test('initiating-user OAuth reauthorization locks a finished connection before r
 
   assert.equal(result.authError, undefined);
   assert.equal(controlled.userLocks, 1);
-  assert.equal(controlled.healthLocks, 1);
+  assert.equal(controlled.healthLocks, 0);
   const updated = await store.connections.findByUserId(userId);
   assert.equal(updated?.syncLeaseUntil, undefined);
   assert.equal(updated?.syncLeaseToken, undefined);
   assert.equal(updated?.nextSyncAt?.toISOString(), callbackNow.toISOString());
+});
+
+test('initiating-user OAuth identity mismatch locks only the user row to avoid cross-user lock order', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = (await readSessionUserId(store, first.sessionToken, now))!;
+  const current = (await store.connections.findByUserId(userId))!;
+  const started = await startGoogleOAuth({ config: oauthConfig(), store, sessionUserId: userId, now });
+  assert.equal(started.kind, 'redirect');
+  if (started.kind !== 'redirect') return;
+  const controlled = returnStaleConnectionUntilLocked({ store, stale: current });
+  const result = await completeGoogleOAuth({
+    config: oauthConfig(),
+    store,
+    google: googleClient({
+      async getIdentity() {
+        return { healthUserId: 'health-other', legacyUserId: undefined };
+      },
+    }),
+    query: { code: 'code-1', state: new URL(started.url).searchParams.get('state') ?? undefined },
+    transactionId: started.transactionId,
+    now,
+  });
+  controlled.restore();
+
+  assert.equal(result.authError, 'identity_mismatch');
+  assert.equal(controlled.userLocks, 1);
+  assert.equal(controlled.healthLocks, 0);
 });
 
 test('existing-user OAuth callback locks a new lease before replacing its tokens', async () => {

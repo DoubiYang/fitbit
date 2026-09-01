@@ -268,16 +268,12 @@ export async function completeGoogleOAuth(input: {
 
   try {
     return await input.store.withTransaction(async (store) => {
-      const existing = await store.connections.findByHealthUserId(identity.healthUserId);
-
       if (transaction.initiatingUserId) {
         const lockedMine = await store.connections.findByUserIdForUpdate(transaction.initiatingUserId);
-        const lockedExisting = await store.connections.findByHealthUserIdForUpdate(identity.healthUserId);
-        if (
-          !lockedMine ||
-          lockedMine.healthUserId !== identity.healthUserId ||
-          (lockedExisting && lockedExisting.userId !== transaction.initiatingUserId)
-        ) {
+        // Do not lock a foreign health row after locking this user: simultaneous cross-user
+        // callbacks could acquire those rows in reverse order. health_user_id is unique, so
+        // the locked user row's identity check is sufficient.
+        if (!lockedMine || lockedMine.healthUserId !== identity.healthUserId) {
           await revokeBestEffort();
           return { authError: 'identity_mismatch' as const, keepExistingSession: true };
         }
@@ -307,6 +303,7 @@ export async function completeGoogleOAuth(input: {
         return { keepExistingSession: true, userId: lockedMine.userId };
       }
 
+      const existing = await store.connections.findByHealthUserId(identity.healthUserId);
       if (existing) {
         const lockedExisting = await store.connections.findByHealthUserIdForUpdate(identity.healthUserId);
         if (!lockedExisting) {
