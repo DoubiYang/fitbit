@@ -400,14 +400,6 @@ async function ingestActivityLevel(input: {
       for (const date of civilDatesForInterval(interval.startTime, interval.endTime)) {
         affected.add(date);
       }
-      const minutes = await input.store.healthMetrics.listMinutesInRange({
-        userId: input.userId,
-        fromUtc: interval.startTime,
-        toUtcExclusive: interval.endTime,
-      });
-      for (const minute of minutes) {
-        affected.add(minute.civilDate);
-      }
     }
   }
   return [...affected];

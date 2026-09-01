@@ -1399,49 +1399,110 @@ function storeFor(queryable: Queryable): AuthStore {
       await applyHealthWindow(healthMetrics, input);
     },
     async upsertMinutes(minutes) {
-      for (const row of minutes) {
-        const incoming = parseHeartRateMinuteAggregate(row);
-        const existingResult = await queryable.query(
-          `SELECT * FROM heart_rate_minute_aggregates
-           WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3`,
-          [incoming.userId, incoming.sourceFamily, new Date(incoming.minuteStartUtc)],
-        );
-        const merged = existingResult.rows[0]
-          ? mergeHeartRateMinuteUpsert(mapHeartRateMinuteAggregateRow(existingResult.rows[0]), incoming)
-          : incoming;
-        await queryable.query(
-          `INSERT INTO heart_rate_minute_aggregates (
-            user_id, source_family, minute_start_utc, civil_date, utc_offset, iana_time_zone,
-            local_minute_of_day, avg_bpm, min_bpm, max_bpm, sample_count, coverage_seconds, activity_level
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-          ON CONFLICT (user_id, source_family, minute_start_utc) DO UPDATE SET
-            civil_date = EXCLUDED.civil_date,
-            utc_offset = EXCLUDED.utc_offset,
-            iana_time_zone = EXCLUDED.iana_time_zone,
-            local_minute_of_day = EXCLUDED.local_minute_of_day,
-            avg_bpm = EXCLUDED.avg_bpm,
-            min_bpm = EXCLUDED.min_bpm,
-            max_bpm = EXCLUDED.max_bpm,
-            sample_count = EXCLUDED.sample_count,
-            coverage_seconds = EXCLUDED.coverage_seconds,
-            activity_level = EXCLUDED.activity_level`,
-          [
-            merged.userId,
-            merged.sourceFamily,
-            new Date(merged.minuteStartUtc),
-            merged.civilDate,
-            merged.utcOffsetMinutes,
-            merged.ianaTimeZone,
-            merged.localMinuteOfDay,
-            merged.avgBpm,
-            merged.minBpm,
-            merged.maxBpm,
-            merged.sampleCount,
-            merged.coverageSeconds,
-            merged.activityLevel,
-          ],
-        );
+      const incoming = minutes.map((row) => parseHeartRateMinuteAggregate(row));
+      if (incoming.length === 0) {
+        return;
       }
+      const asPayload = (rows: typeof incoming) => JSON.stringify(rows.map((row) => ({
+        user_id: row.userId,
+        source_family: row.sourceFamily,
+        minute_start_utc: row.minuteStartUtc,
+        civil_date: row.civilDate,
+        utc_offset: row.utcOffsetMinutes,
+        iana_time_zone: row.ianaTimeZone,
+        local_minute_of_day: row.localMinuteOfDay,
+        avg_bpm: row.avgBpm,
+        min_bpm: row.minBpm,
+        max_bpm: row.maxBpm,
+        sample_count: row.sampleCount,
+        coverage_seconds: row.coverageSeconds,
+        activity_level: row.activityLevel,
+      })));
+      const inputPayload = asPayload(incoming);
+      const existingResult = await queryable.query(
+        `WITH incoming AS (
+           SELECT *
+           FROM jsonb_to_recordset($1::jsonb) AS item(
+             user_id UUID,
+             source_family TEXT,
+             minute_start_utc TIMESTAMPTZ,
+             civil_date DATE,
+             utc_offset INTEGER,
+             iana_time_zone TEXT,
+             local_minute_of_day INTEGER,
+             avg_bpm DOUBLE PRECISION,
+             min_bpm DOUBLE PRECISION,
+             max_bpm DOUBLE PRECISION,
+             sample_count INTEGER,
+             coverage_seconds DOUBLE PRECISION,
+             activity_level TEXT
+           )
+         ), keys AS (
+           SELECT DISTINCT user_id, source_family, minute_start_utc
+           FROM incoming
+         )
+         SELECT stored.*
+         FROM heart_rate_minute_aggregates AS stored
+         JOIN keys ON keys.user_id = stored.user_id
+           AND keys.source_family = stored.source_family
+           AND keys.minute_start_utc = stored.minute_start_utc`,
+        [inputPayload],
+      );
+      const keyFor = (row: { userId: string; sourceFamily: string; minuteStartUtc: string }) => (
+        `${row.userId}\u0000${row.sourceFamily}\u0000${row.minuteStartUtc}`
+      );
+      const mergedByKey = new Map(
+        existingResult.rows.map((row) => {
+          const parsed = mapHeartRateMinuteAggregateRow(row);
+          return [keyFor(parsed), parsed] as const;
+        }),
+      );
+      const mergedInArrivalOrder = new Map<string, typeof incoming[number]>();
+      for (const row of incoming) {
+        const key = keyFor(row);
+        const previous = mergedInArrivalOrder.get(key) ?? mergedByKey.get(key);
+        mergedInArrivalOrder.set(key, previous ? mergeHeartRateMinuteUpsert(previous, row) : row);
+      }
+      await queryable.query(
+        `WITH incoming AS (
+           SELECT *
+           FROM jsonb_to_recordset($1::jsonb) AS item(
+             user_id UUID,
+             source_family TEXT,
+             minute_start_utc TIMESTAMPTZ,
+             civil_date DATE,
+             utc_offset INTEGER,
+             iana_time_zone TEXT,
+             local_minute_of_day INTEGER,
+             avg_bpm DOUBLE PRECISION,
+             min_bpm DOUBLE PRECISION,
+             max_bpm DOUBLE PRECISION,
+             sample_count INTEGER,
+             coverage_seconds DOUBLE PRECISION,
+             activity_level TEXT
+           )
+         )
+         INSERT INTO heart_rate_minute_aggregates (
+           user_id, source_family, minute_start_utc, civil_date, utc_offset, iana_time_zone,
+           local_minute_of_day, avg_bpm, min_bpm, max_bpm, sample_count, coverage_seconds, activity_level
+         )
+         SELECT
+           user_id, source_family, minute_start_utc, civil_date, utc_offset, iana_time_zone,
+           local_minute_of_day, avg_bpm, min_bpm, max_bpm, sample_count, coverage_seconds, activity_level
+         FROM incoming
+         ON CONFLICT (user_id, source_family, minute_start_utc) DO UPDATE SET
+           civil_date = EXCLUDED.civil_date,
+           utc_offset = EXCLUDED.utc_offset,
+           iana_time_zone = EXCLUDED.iana_time_zone,
+           local_minute_of_day = EXCLUDED.local_minute_of_day,
+           avg_bpm = EXCLUDED.avg_bpm,
+           min_bpm = EXCLUDED.min_bpm,
+           max_bpm = EXCLUDED.max_bpm,
+           sample_count = EXCLUDED.sample_count,
+           coverage_seconds = EXCLUDED.coverage_seconds,
+           activity_level = EXCLUDED.activity_level`,
+        [asPayload([...mergedInArrivalOrder.values()])],
+      );
     },
     async listMinutesByCivilDate(input) {
       const result = await queryable.query(
@@ -1487,24 +1548,37 @@ function storeFor(queryable: Queryable): AuthStore {
       return (result.rowCount ?? 0) === 1;
     },
     async upsertActivityLevelIntervals(intervals) {
-      for (const row of intervals) {
-        const parsed = parseActivityLevelInterval(row);
-        await queryable.query(
-          `INSERT INTO activity_level_intervals (
-            user_id, source_family, interval_start_utc, interval_end_utc, activity_level_type
-          ) VALUES ($1,$2,$3,$4,$5)
-          ON CONFLICT (user_id, source_family, interval_start_utc) DO UPDATE SET
-            interval_end_utc = EXCLUDED.interval_end_utc,
-            activity_level_type = EXCLUDED.activity_level_type`,
-          [
-            parsed.userId,
-            parsed.sourceFamily,
-            new Date(parsed.startTime),
-            new Date(parsed.endTime),
-            parsed.activityLevelType,
-          ],
-        );
+      const parsed = intervals.map((row) => parseActivityLevelInterval(row));
+      if (parsed.length === 0) {
+        return;
       }
+      await queryable.query(
+        `WITH incoming AS (
+           SELECT *
+           FROM jsonb_to_recordset($1::jsonb) AS item(
+             user_id UUID,
+             source_family TEXT,
+             interval_start_utc TIMESTAMPTZ,
+             interval_end_utc TIMESTAMPTZ,
+             activity_level_type TEXT
+           )
+         )
+         INSERT INTO activity_level_intervals (
+           user_id, source_family, interval_start_utc, interval_end_utc, activity_level_type
+         )
+         SELECT user_id, source_family, interval_start_utc, interval_end_utc, activity_level_type
+         FROM incoming
+         ON CONFLICT (user_id, source_family, interval_start_utc) DO UPDATE SET
+           interval_end_utc = EXCLUDED.interval_end_utc,
+           activity_level_type = EXCLUDED.activity_level_type`,
+        [JSON.stringify(parsed.map((row) => ({
+          user_id: row.userId,
+          source_family: row.sourceFamily,
+          interval_start_utc: row.startTime,
+          interval_end_utc: row.endTime,
+          activity_level_type: row.activityLevelType,
+        })))],
+      );
     },
     async listActivityLevelIntervalsInRange(input) {
       const result = await queryable.query(

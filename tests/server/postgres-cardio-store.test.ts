@@ -187,10 +187,13 @@ test('upserts minutes on (user, source family, UTC minute) and never persists ra
 
   const insert = pool.queries.find((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text));
   assert.ok(insert);
+  assert.match(insert?.text ?? '', /jsonb_to_recordset\(\$1::jsonb\)/u);
+  assert.equal(insert?.values?.length, 1);
+  const inserted = JSON.parse(String(insert?.values?.[0]));
+  assert.equal(inserted[0]?.user_id, userId);
+  assert.equal(inserted[0]?.source_family, 'google-wearables');
+  assert.equal(inserted[0]?.minute_start_utc, '2026-08-22T12:00:00.000Z');
   assert.match(insert?.text ?? '', /ON CONFLICT \(user_id, source_family, minute_start_utc\)/u);
-  assert.equal(insert?.values?.[0], userId);
-  assert.equal(insert?.values?.[1], 'google-wearables');
-  assert.equal((insert?.values?.[2] as Date).toISOString(), '2026-08-22T12:00:00.000Z');
   assert.equal(healthMetricsExposesRawSamplePersistence(store.healthMetrics), false);
   assert.equal(pool.queries.some((query) => /heart_rate_samples|raw_heart_rate/u.test(query.text)), false);
 });
@@ -201,17 +204,73 @@ test('upsertMinutes preserves stored IANA when incoming IANA is null and utc off
 
   await store.healthMetrics.upsertMinutes([minute()]);
 
-  const select = pool.queries.find((query) => /SELECT \* FROM heart_rate_minute_aggregates/u.test(query.text));
+  const select = pool.queries.find((query) => (
+    /FROM heart_rate_minute_aggregates/u.test(query.text) && /JOIN keys/u.test(query.text)
+  ));
   const insert = pool.queries.find((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text));
   assert.ok(select);
-  assert.equal(select?.values?.[0], userId);
+  assert.match(select?.text ?? '', /jsonb_to_recordset\(\$1::jsonb\)/u);
+  assert.equal(select?.values?.length, 1);
   assert.ok(insert);
+  assert.match(insert?.text ?? '', /jsonb_to_recordset\(\$1::jsonb\)/u);
+  assert.equal(insert?.values?.length, 1);
   assert.match(insert?.text ?? '', /ON CONFLICT \(user_id, source_family, minute_start_utc\)/u);
-  assert.equal(insert?.values?.[3], civilDate);
-  assert.equal(insert?.values?.[4], 480);
-  assert.equal(insert?.values?.[5], 'Asia/Shanghai');
-  assert.equal(insert?.values?.[6], 0);
-  assert.equal(insert?.values?.[7], 110);
+  const inserted = JSON.parse(String(insert?.values?.[0]));
+  assert.equal(inserted[0]?.civil_date, civilDate);
+  assert.equal(inserted[0]?.utc_offset, 480);
+  assert.equal(inserted[0]?.iana_time_zone, 'Asia/Shanghai');
+  assert.equal(inserted[0]?.local_minute_of_day, 0);
+  assert.equal(inserted[0]?.avg_bpm, 110);
+});
+
+test('batches a 10,000-minute page into one matching read and one single-JSON upsert', async () => {
+  const pool = new RecordingPool([{ rows: [] }]);
+  const store = createPostgresStoreForTesting(pool);
+  const start = Date.parse('2026-08-01T00:00:00.000Z');
+  const page = Array.from({ length: 10_000 }, (_, index) => parseHeartRateMinuteAggregate({
+    ...minute(),
+    minuteStartUtc: new Date(start + index * 60_000).toISOString(),
+    localMinuteOfDay: index % 1_440,
+  }));
+
+  await store.healthMetrics.upsertMinutes(page);
+
+  const matchingReads = pool.queries.filter((query) => (
+    /FROM heart_rate_minute_aggregates/u.test(query.text) && /jsonb_to_recordset\(\$1::jsonb\)/u.test(query.text)
+  ));
+  const upserts = pool.queries.filter((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text));
+  assert.equal(matchingReads.length, 1);
+  assert.equal(upserts.length, 1);
+  for (const query of [...matchingReads, ...upserts]) {
+    assert.equal(query.values?.length, 1);
+    assert.match(query.text, /jsonb_to_recordset\(\$1::jsonb\)/u);
+    assert.doesNotMatch(query.text, /\bVALUES\s*\(/u);
+  }
+  assert.equal(JSON.parse(String(upserts[0]?.values?.[0])).length, 10_000);
+});
+
+test('merges repeated minute keys in arrival order from the stored row', async () => {
+  const pool = new RecordingPool([{ rows: [minuteRow({
+    utc_offset: 0,
+    iana_time_zone: 'UTC',
+    local_minute_of_day: 720,
+  })] }]);
+  const store = createPostgresStoreForTesting(pool);
+  const repeated = (utcOffsetMinutes: number) => parseHeartRateMinuteAggregate({
+    ...minute(),
+    utcOffsetMinutes,
+    ianaTimeZone: null,
+    localMinuteOfDay: 720 + utcOffsetMinutes,
+  });
+
+  await store.healthMetrics.upsertMinutes([repeated(0), repeated(60), repeated(0)]);
+
+  const upserts = pool.queries.filter((query) => /INSERT INTO heart_rate_minute_aggregates/u.test(query.text));
+  assert.equal(upserts.length, 1);
+  const finalRows = JSON.parse(String(upserts[0]?.values?.[0]));
+  assert.equal(finalRows.length, 1);
+  assert.equal(finalRows[0]?.iana_time_zone, null);
+  assert.equal(finalRows[0]?.utc_offset, 0);
 });
 
 test('upserts activity-level intervals on interval start and replaces zones by local date using JSONB thresholds', async () => {
@@ -234,6 +293,8 @@ test('upserts activity-level intervals on interval start and replaces zones by l
 
   const activityInsert = pool.queries.find((query) => /INSERT INTO activity_level_intervals/u.test(query.text));
   const zoneInsert = pool.queries.find((query) => /INSERT INTO daily_heart_rate_zones/u.test(query.text));
+  assert.match(activityInsert?.text ?? '', /jsonb_to_recordset\(\$1::jsonb\)/u);
+  assert.equal(activityInsert?.values?.length, 1);
   assert.match(activityInsert?.text ?? '', /ON CONFLICT \(user_id, source_family, interval_start_utc\)/u);
   assert.match(zoneInsert?.text ?? '', /ON CONFLICT \(user_id, source_family, civil_date\)/u);
   assert.match(zoneInsert?.text ?? '', /\$4::jsonb/u);

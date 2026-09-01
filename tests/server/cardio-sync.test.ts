@@ -574,6 +574,31 @@ test('HR then activity-level versus activity-level then HR produce the same stra
   assert.equal(hrFirst.dose, 0.5);
 });
 
+test('activity-level pages use the conservative four-date recompute envelope without per-interval minute reads', async () => {
+  const store = await seedStore({ timeZone: 'UTC' });
+  const api = createFakeApi({
+    'activity-level': [[
+      ...Array.from({ length: 12 }, (_, index) => activityPoint(
+        new Date(Date.parse('2026-08-22T12:00:00.000Z') + index * 60_000).toISOString(),
+        'LIGHTLY_ACTIVE',
+      )),
+    ]],
+  });
+  const originalListMinutesInRange = store.healthMetrics.listMinutesInRange.bind(store.healthMetrics);
+  let minuteRangeReads = 0;
+  store.healthMetrics.listMinutesInRange = async (input) => {
+    minuteRangeReads += 1;
+    return originalListMinutesInRange(input);
+  };
+
+  const state = await runSync(store, api, { dataTypes: ['activity-level'] });
+
+  assert.ok(state.affectedDates.includes('2026-08-21'));
+  assert.ok(state.affectedDates.includes('2026-08-22'));
+  assert.ok(state.affectedDates.includes('2026-08-23'));
+  assert.ok(minuteRangeReads < 12, `expected no per-interval minute lookup, got ${minuteRangeReads}`);
+});
+
 test('exercise arriving before or after heart-rate yields the same attributed dose', async () => {
   const sampleAt = '2026-08-22T12:00:00.000Z';
   const hrPages = [[hrPoint(sampleAt, 110)]];
