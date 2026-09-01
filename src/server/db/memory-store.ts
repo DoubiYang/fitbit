@@ -1249,16 +1249,16 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         ) {
           return false;
         }
-        const keepDue = current.nextSyncAt && current.nextSyncAt.getTime() <= input.now.getTime();
+        const keepExternalSchedule = current.nextSyncAt !== undefined;
         connections.set(
           current.id,
           cloneConnection({
             ...current,
-            nextSyncAt: keepDue ? current.nextSyncAt : input.nextSyncAt,
-            syncRetryCount: keepDue ? current.syncRetryCount : input.syncRetryCount,
+            nextSyncAt: keepExternalSchedule ? current.nextSyncAt : input.nextSyncAt,
+            syncRetryCount: keepExternalSchedule ? current.syncRetryCount : input.syncRetryCount,
             syncLeaseUntil: undefined,
             syncLeaseToken: undefined,
-            lastErrorCode: keepDue ? current.lastErrorCode : input.lastErrorCode,
+            lastErrorCode: keepExternalSchedule ? current.lastErrorCode : input.lastErrorCode,
             updatedAt: input.now,
           }),
         );

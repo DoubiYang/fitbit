@@ -495,17 +495,17 @@ function storeFor(queryable: Queryable): AuthStore {
       const result = await queryable.query(
         `UPDATE google_health_connections
          SET next_sync_at = CASE
-               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $8 THEN next_sync_at
+               WHEN next_sync_at IS NOT NULL THEN next_sync_at
                ELSE $5
              END,
              sync_retry_count = CASE
-               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $8 THEN sync_retry_count
+               WHEN next_sync_at IS NOT NULL THEN sync_retry_count
                ELSE $6
              END,
              sync_lease_until = NULL,
              sync_lease_token = NULL,
              last_error_code = CASE
-               WHEN next_sync_at IS NOT NULL AND next_sync_at <= $8 THEN last_error_code
+               WHEN next_sync_at IS NOT NULL THEN last_error_code
                ELSE $7
              END,
              updated_at = $8

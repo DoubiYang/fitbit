@@ -70,8 +70,10 @@ async function startAndCallback(input: {
   google: GoogleOAuthClient;
   sessionUserId?: string;
   query?: { code?: string; state?: string; error?: string };
+  now?: Date;
 }) {
-  const started = await startGoogleOAuth({ config: oauthConfig(), store: input.store, sessionUserId: input.sessionUserId, now });
+  const callbackNow = input.now ?? now;
+  const started = await startGoogleOAuth({ config: oauthConfig(), store: input.store, sessionUserId: input.sessionUserId, now: callbackNow });
   if (started.kind !== 'redirect') {
     throw new Error('expected redirect');
   }
@@ -82,7 +84,7 @@ async function startAndCallback(input: {
     google: input.google,
     query: input.query ?? { code: 'code-1', state },
     transactionId: started.transactionId,
-    now,
+    now: callbackNow,
   });
 }
 
@@ -255,6 +257,59 @@ test('reauthorize clears a stale sync lease token after the lease expires', asyn
   assert.equal(updated?.syncLeaseUntil, undefined);
   assert.equal(updated?.syncLeaseToken, undefined);
   assert.equal(updated?.lastSyncAttemptAt, undefined);
+});
+
+test('a late OAuth callback keeps its external schedule when the scheduled sync succeeds', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = await readSessionUserId(store, first.sessionToken, now);
+  const callbackNow = new Date('2026-08-24T12:07:00.000Z');
+
+  const result = await runDueSyncForUser({
+    config: oauthConfig(),
+    store,
+    userId: userId!,
+    now,
+    syncConnection: async () => {
+      const callback = await startAndCallback({ store, google: googleClient(), sessionUserId: userId, now: callbackNow });
+      assert.equal(callback.authError, undefined);
+    },
+  });
+
+  assert.deepEqual(result, { claimed: 1, succeeded: 1, failed: 0 });
+  const updated = await store.connections.findByUserId(userId!);
+  assert.equal(updated?.nextSyncAt?.toISOString(), callbackNow.toISOString());
+  assert.equal(updated?.syncRetryCount, 0);
+  assert.equal(updated?.lastErrorCode, undefined);
+  assert.equal(updated?.syncLeaseUntil, undefined);
+  assert.equal(updated?.syncLeaseToken, undefined);
+});
+
+test('a late OAuth callback keeps its external schedule when the scheduled sync fails', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = await readSessionUserId(store, first.sessionToken, now);
+  const callbackNow = new Date('2026-08-24T12:07:00.000Z');
+
+  const result = await runDueSyncForUser({
+    config: oauthConfig(),
+    store,
+    userId: userId!,
+    now,
+    syncConnection: async () => {
+      const callback = await startAndCallback({ store, google: googleClient(), sessionUserId: userId, now: callbackNow });
+      assert.equal(callback.authError, undefined);
+      throw new Error('simulated sync failure');
+    },
+  });
+
+  assert.deepEqual(result, { claimed: 1, succeeded: 0, failed: 1 });
+  const updated = await store.connections.findByUserId(userId!);
+  assert.equal(updated?.nextSyncAt?.toISOString(), callbackNow.toISOString());
+  assert.equal(updated?.syncRetryCount, 0);
+  assert.equal(updated?.lastErrorCode, undefined);
+  assert.equal(updated?.syncLeaseUntil, undefined);
+  assert.equal(updated?.syncLeaseToken, undefined);
 });
 
 test('logged-in callback cannot attach another user identity', async () => {

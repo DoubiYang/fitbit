@@ -220,6 +220,37 @@ test('a database deadline atomically rejects scheduled success writes but not th
   assert.equal(failure, true);
 });
 
+test('Postgres scheduled finish preserves a callback schedule for both success and failure', async () => {
+  const deadlineAt = new Date('2026-08-24T12:13:00.000Z');
+  const queryable = new RecordingQueryable(1);
+  const store = createPostgresStoreForTesting(queryable);
+  for (const [nextSyncAt, syncRetryCount, lastErrorCode] of [
+    [new Date('2026-08-24T13:00:00.000Z'), 0, undefined],
+    [new Date('2026-08-24T12:30:00.000Z'), 1, 'sync_failed'],
+  ] as const) {
+    const finished = await store.connections.finishScheduledSync({
+      id: connectionId,
+      userId,
+      leaseUntil,
+      leaseToken: oldLeaseToken,
+      now,
+      nextSyncAt,
+      syncRetryCount,
+      lastErrorCode,
+      deadlineAt,
+    } as never);
+    assert.equal(finished, true);
+  }
+
+  assert.equal(queryable.queries.length, 2);
+  for (const query of queryable.queries) {
+    assert.match(query.text, /WHEN next_sync_at IS NOT NULL\s+THEN next_sync_at/u);
+    assert.match(query.text, /WHEN next_sync_at IS NOT NULL\s+THEN sync_retry_count/u);
+    assert.match(query.text, /WHEN next_sync_at IS NOT NULL\s+THEN last_error_code/u);
+    assert.doesNotMatch(query.text, /next_sync_at IS NOT NULL AND next_sync_at <=/u);
+  }
+});
+
 test('a scheduled transaction rolls back writes when its post-write real-time deadline guard fails', async () => {
   const deadlineAt = new Date('2026-08-24T12:13:00.000Z');
   const lease = { connectionId, userId, leaseToken: oldLeaseToken, leaseUntil, now, deadlineAt };
