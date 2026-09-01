@@ -200,6 +200,8 @@ export type AuthStore = {
   connections: {
     findByHealthUserId(healthUserId: string): Promise<ConnectionRow | undefined>;
     findByUserId(userId: string): Promise<ConnectionRow | undefined>;
+    findByHealthUserIdForUpdate(healthUserId: string): Promise<ConnectionRow | undefined>;
+    findByUserIdForUpdate(userId: string): Promise<ConnectionRow | undefined>;
     insert(row: ConnectionRow): Promise<void>;
     update(row: ConnectionRow): Promise<void>;
     updateAccessTokenIfSyncable(input: AccessTokenUpdate): Promise<boolean>;

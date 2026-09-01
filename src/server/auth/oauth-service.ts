@@ -271,35 +271,20 @@ export async function completeGoogleOAuth(input: {
       const existing = await store.connections.findByHealthUserId(identity.healthUserId);
 
       if (transaction.initiatingUserId) {
-        const mine = await store.connections.findByUserId(transaction.initiatingUserId);
-        if (!mine || mine.healthUserId !== identity.healthUserId || (existing && existing.userId !== transaction.initiatingUserId)) {
+        const lockedMine = await store.connections.findByUserIdForUpdate(transaction.initiatingUserId);
+        const lockedExisting = await store.connections.findByHealthUserIdForUpdate(identity.healthUserId);
+        if (
+          !lockedMine ||
+          lockedMine.healthUserId !== identity.healthUserId ||
+          (lockedExisting && lockedExisting.userId !== transaction.initiatingUserId)
+        ) {
           await revokeBestEffort();
           return { authError: 'identity_mismatch' as const, keepExistingSession: true };
         }
 
         let refreshToken = tokens.refreshToken;
         if (!refreshToken) {
-          const envelope = envelopeFrom(mine);
-          if (!envelope) {
-            await revokeBestEffort();
-            return { authError: 'missing_refresh_token' as const, keepExistingSession: true };
-          }
-          try {
-            refreshToken = decryptTokenEnvelope(envelope, keyring, mine.id, mine.userId, mine.encryptionKeyVersion ?? CURRENT_KEY_VERSION).refreshToken;
-          } catch {
-            await store.connections.update({ ...mine, status: 'expired', lastErrorCode: 'missing_refresh_token', updatedAt: now });
-            return { authError: 'missing_refresh_token' as const, keepExistingSession: true };
-          }
-        }
-
-        await store.connections.update(applyTokens(mine, tokens, refreshToken, identity, keyring.current, now));
-        return { keepExistingSession: true, userId: mine.userId };
-      }
-
-      if (existing) {
-        let refreshToken = tokens.refreshToken;
-        if (!refreshToken) {
-          const envelope = envelopeFrom(existing);
+          const envelope = envelopeFrom(lockedMine);
           if (!envelope) {
             await revokeBestEffort();
             return { authError: 'missing_refresh_token' as const, keepExistingSession: true };
@@ -308,18 +293,49 @@ export async function completeGoogleOAuth(input: {
             refreshToken = decryptTokenEnvelope(
               envelope,
               keyring,
-              existing.id,
-              existing.userId,
-              existing.encryptionKeyVersion ?? CURRENT_KEY_VERSION,
+              lockedMine.id,
+              lockedMine.userId,
+              lockedMine.encryptionKeyVersion ?? CURRENT_KEY_VERSION,
             ).refreshToken;
           } catch {
-            await store.connections.update({ ...existing, status: 'expired', lastErrorCode: 'missing_refresh_token', updatedAt: now });
+            await store.connections.update({ ...lockedMine, status: 'expired', lastErrorCode: 'missing_refresh_token', updatedAt: now });
             return { authError: 'missing_refresh_token' as const, keepExistingSession: true };
           }
         }
-        await store.connections.update(applyTokens(existing, tokens, refreshToken, identity, keyring.current, now));
-        const sessionToken = await createSession(store, existing.userId, now);
-        return { sessionToken, userId: existing.userId, keepExistingSession: false };
+
+        await store.connections.update(applyTokens(lockedMine, tokens, refreshToken, identity, keyring.current, now));
+        return { keepExistingSession: true, userId: lockedMine.userId };
+      }
+
+      if (existing) {
+        const lockedExisting = await store.connections.findByHealthUserIdForUpdate(identity.healthUserId);
+        if (!lockedExisting) {
+          await revokeBestEffort();
+          return { authError: 'identity_unavailable' as const, keepExistingSession: true };
+        }
+        let refreshToken = tokens.refreshToken;
+        if (!refreshToken) {
+          const envelope = envelopeFrom(lockedExisting);
+          if (!envelope) {
+            await revokeBestEffort();
+            return { authError: 'missing_refresh_token' as const, keepExistingSession: true };
+          }
+          try {
+            refreshToken = decryptTokenEnvelope(
+              envelope,
+              keyring,
+              lockedExisting.id,
+              lockedExisting.userId,
+              lockedExisting.encryptionKeyVersion ?? CURRENT_KEY_VERSION,
+            ).refreshToken;
+          } catch {
+            await store.connections.update({ ...lockedExisting, status: 'expired', lastErrorCode: 'missing_refresh_token', updatedAt: now });
+            return { authError: 'missing_refresh_token' as const, keepExistingSession: true };
+          }
+        }
+        await store.connections.update(applyTokens(lockedExisting, tokens, refreshToken, identity, keyring.current, now));
+        const sessionToken = await createSession(store, lockedExisting.userId, now);
+        return { sessionToken, userId: lockedExisting.userId, keepExistingSession: false };
       }
 
       if (!tokens.refreshToken) {

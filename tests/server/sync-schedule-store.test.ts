@@ -96,6 +96,23 @@ test('does not claim expired refresh tokens or connections without a token envel
   assert.deepEqual(claimed.map((row) => row.userId), ['due-user']);
 });
 
+test('memory locked connection reads return the current row', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection({ id: 'locked', userId: 'locked-user', status: 'active', nextSyncAt: now });
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+  const lockedConnections = store.connections as typeof store.connections & {
+    findByHealthUserIdForUpdate(healthUserId: string): Promise<ConnectionRow | undefined>;
+    findByUserIdForUpdate(userId: string): Promise<ConnectionRow | undefined>;
+  };
+
+  const byUser = await lockedConnections.findByUserIdForUpdate(row.userId);
+  const byHealth = await lockedConnections.findByHealthUserIdForUpdate(row.healthUserId);
+  assert.equal(byUser?.id, row.id);
+  assert.equal(byHealth?.id, row.id);
+});
+
 test('claim assigns an opaque lease token and rejects another run from finishing or releasing it', async () => {
   const store = createMemoryStore();
   const now = new Date('2026-08-24T12:00:00.000Z');

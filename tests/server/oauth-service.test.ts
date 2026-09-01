@@ -14,7 +14,7 @@ import {
 import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { completeGoogleOAuth, disconnectUser, readSessionUserId, startGoogleOAuth } from '../../src/server/auth/oauth-service';
 import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
-import type { GoogleOAuthClient, GoogleTokenResponse } from '../../src/server/auth/types';
+import type { ConnectionRow, GoogleOAuthClient, GoogleTokenResponse } from '../../src/server/auth/types';
 import { loadConfig, redirectUri } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { runDueSyncForUser } from '../../src/server/health/scheduled-sync';
@@ -62,6 +62,49 @@ function googleClient(overrides: Partial<GoogleOAuthClient> = {}): GoogleOAuthCl
       revoked.push(token);
     },
     ...overrides,
+  };
+}
+
+type LockableConnections = ReturnType<typeof createMemoryStore>['connections'] & {
+  findByHealthUserIdForUpdate(healthUserId: string): Promise<ConnectionRow | undefined>;
+  findByUserIdForUpdate(userId: string): Promise<ConnectionRow | undefined>;
+};
+
+function returnStaleConnectionUntilLocked(input: {
+  store: ReturnType<typeof createMemoryStore>;
+  stale: ConnectionRow;
+}) {
+  const connections = input.store.connections as LockableConnections;
+  const findByHealthUserId = connections.findByHealthUserId.bind(connections);
+  const findByUserId = connections.findByUserId.bind(connections);
+  const withTransaction = input.store.withTransaction.bind(input.store);
+  let healthLocks = 0;
+  let userLocks = 0;
+
+  connections.findByHealthUserId = async (healthUserId) =>
+    healthUserId === input.stale.healthUserId ? input.stale : findByHealthUserId(healthUserId);
+  connections.findByUserId = async (userId) =>
+    userId === input.stale.userId ? input.stale : findByUserId(userId);
+  connections.findByHealthUserIdForUpdate = async (healthUserId) => {
+    healthLocks += 1;
+    return findByHealthUserId(healthUserId);
+  };
+  connections.findByUserIdForUpdate = async (userId) => {
+    userLocks += 1;
+    return findByUserId(userId);
+  };
+  input.store.withTransaction = async (fn) => fn(input.store);
+
+  return {
+    get healthLocks() { return healthLocks; },
+    get userLocks() { return userLocks; },
+    restore() {
+      connections.findByHealthUserId = findByHealthUserId;
+      connections.findByUserId = findByUserId;
+      delete (connections as Partial<LockableConnections>).findByHealthUserIdForUpdate;
+      delete (connections as Partial<LockableConnections>).findByUserIdForUpdate;
+      input.store.withTransaction = withTransaction;
+    },
   };
 }
 
@@ -310,6 +353,96 @@ test('a late OAuth callback keeps its external schedule when the scheduled sync 
   assert.equal(updated?.lastErrorCode, undefined);
   assert.equal(updated?.syncLeaseUntil, undefined);
   assert.equal(updated?.syncLeaseToken, undefined);
+});
+
+test('initiating-user OAuth reauthorization locks a finished connection before replacing its tokens', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = (await readSessionUserId(store, first.sessionToken, now))!;
+  const leaseUntil = new Date('2026-08-24T12:15:00.000Z');
+  const current = (await store.connections.findByUserId(userId))!;
+  await store.connections.update({
+    ...current,
+    nextSyncAt: undefined,
+    syncLeaseUntil: leaseUntil,
+    syncLeaseToken: '00000000-0000-4000-8000-000000000001',
+  });
+  const staleL1 = (await store.connections.findByUserId(userId))!;
+  await store.connections.update({
+    ...staleL1,
+    nextSyncAt: new Date('2026-08-24T12:30:00.000Z'),
+    syncRetryCount: 1,
+    syncLeaseUntil: undefined,
+    syncLeaseToken: undefined,
+    lastErrorCode: 'sync_failed',
+  });
+
+  const callbackNow = new Date('2026-08-24T12:06:00.000Z');
+  const started = await startGoogleOAuth({ config: oauthConfig(), store, sessionUserId: userId, now: callbackNow });
+  assert.equal(started.kind, 'redirect');
+  if (started.kind !== 'redirect') return;
+  const controlled = returnStaleConnectionUntilLocked({ store, stale: staleL1 });
+  const result = await completeGoogleOAuth({
+    config: oauthConfig(),
+    store,
+    google: googleClient(),
+    query: { code: 'code-1', state: new URL(started.url).searchParams.get('state') ?? undefined },
+    transactionId: started.transactionId,
+    now: callbackNow,
+  });
+  controlled.restore();
+
+  assert.equal(result.authError, undefined);
+  assert.equal(controlled.userLocks, 1);
+  assert.equal(controlled.healthLocks, 1);
+  const updated = await store.connections.findByUserId(userId);
+  assert.equal(updated?.syncLeaseUntil, undefined);
+  assert.equal(updated?.syncLeaseToken, undefined);
+  assert.equal(updated?.nextSyncAt?.toISOString(), callbackNow.toISOString());
+});
+
+test('existing-user OAuth callback locks a new lease before replacing its tokens', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = (await readSessionUserId(store, first.sessionToken, now))!;
+  const current = (await store.connections.findByUserId(userId))!;
+  await store.connections.update({
+    ...current,
+    nextSyncAt: undefined,
+    syncLeaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    syncLeaseToken: '00000000-0000-4000-8000-000000000001',
+  });
+  const staleL1 = (await store.connections.findByUserId(userId))!;
+  const l2Now = new Date('2026-08-24T12:16:00.000Z');
+  const [l2] = await store.connections.claimDueSyncs({
+    now: l2Now,
+    leaseUntil: new Date('2026-08-24T12:31:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(l2?.syncLeaseToken);
+
+  const callbackNow = new Date('2026-08-24T12:17:00.000Z');
+  const started = await startGoogleOAuth({ config: oauthConfig(), store, now: callbackNow });
+  assert.equal(started.kind, 'redirect');
+  if (started.kind !== 'redirect') return;
+  const controlled = returnStaleConnectionUntilLocked({ store, stale: staleL1 });
+  const result = await completeGoogleOAuth({
+    config: oauthConfig(),
+    store,
+    google: googleClient(),
+    query: { code: 'code-1', state: new URL(started.url).searchParams.get('state') ?? undefined },
+    transactionId: started.transactionId,
+    now: callbackNow,
+  });
+  controlled.restore();
+
+  assert.equal(result.authError, undefined);
+  assert.equal(controlled.healthLocks, 1);
+  assert.equal(controlled.userLocks, 0);
+  const updated = await store.connections.findByUserId(userId);
+  assert.equal(updated?.syncLeaseUntil?.toISOString(), '2026-08-24T12:31:00.000Z');
+  assert.equal(updated?.syncLeaseToken, l2?.syncLeaseToken);
+  assert.equal(updated?.nextSyncAt?.toISOString(), callbackNow.toISOString());
 });
 
 test('logged-in callback cannot attach another user identity', async () => {

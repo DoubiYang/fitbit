@@ -342,6 +342,14 @@ function storeFor(queryable: Queryable): AuthStore {
       const result = await queryable.query('SELECT * FROM google_health_connections WHERE user_id = $1', [userId]);
       return result.rows[0] ? mapConnection(result.rows[0]) : undefined;
     },
+    async findByHealthUserIdForUpdate(healthUserId: string): Promise<ConnectionRow | undefined> {
+      const result = await queryable.query('SELECT * FROM google_health_connections WHERE health_user_id = $1 FOR UPDATE', [healthUserId]);
+      return result.rows[0] ? mapConnection(result.rows[0]) : undefined;
+    },
+    async findByUserIdForUpdate(userId: string): Promise<ConnectionRow | undefined> {
+      const result = await queryable.query('SELECT * FROM google_health_connections WHERE user_id = $1 FOR UPDATE', [userId]);
+      return result.rows[0] ? mapConnection(result.rows[0]) : undefined;
+    },
     async insert(row: ConnectionRow): Promise<void> {
       await queryable.query(
         `INSERT INTO google_health_connections (

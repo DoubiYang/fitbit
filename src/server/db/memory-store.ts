@@ -1133,6 +1133,14 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         const row = [...connections.values()].find((item) => item.userId === userId);
         return row ? cloneConnection(row) : undefined;
       },
+      async findByHealthUserIdForUpdate(healthUserId: string): Promise<ConnectionRow | undefined> {
+        const row = [...connections.values()].find((item) => item.healthUserId === healthUserId);
+        return row ? cloneConnection(row) : undefined;
+      },
+      async findByUserIdForUpdate(userId: string): Promise<ConnectionRow | undefined> {
+        const row = [...connections.values()].find((item) => item.userId === userId);
+        return row ? cloneConnection(row) : undefined;
+      },
       async insert(row: ConnectionRow): Promise<void> {
         connections.set(row.id, cloneConnection(row));
       },

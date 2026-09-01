@@ -126,6 +126,21 @@ test('Postgres success watermark update is one atomic lease-fenced statement', a
   assert.ok(query.values?.includes(oldLeaseToken));
 });
 
+test('Postgres connection rereads use row locks inside OAuth transactions', async () => {
+  const queryable = new RecordingQueryable(0);
+  const store = createPostgresStoreForTesting(queryable);
+  const lockedConnections = store.connections as typeof store.connections & {
+    findByHealthUserIdForUpdate(healthUserId: string): Promise<undefined>;
+    findByUserIdForUpdate(userId: string): Promise<undefined>;
+  };
+
+  await lockedConnections.findByUserIdForUpdate(userId);
+  await lockedConnections.findByHealthUserIdForUpdate('health-1');
+
+  assert.match(queryable.queries[0]?.text ?? '', /WHERE user_id = \$1\s+FOR UPDATE/u);
+  assert.match(queryable.queries[1]?.text ?? '', /WHERE health_user_id = \$1\s+FOR UPDATE/u);
+});
+
 test('snapshot persistence atomically rejects a superseded token', async () => {
   const queryable = new LeaseAwareSnapshotQueryable(oldLeaseToken);
   queryable.takeOver('55555555-5555-4555-8555-555555555555');
