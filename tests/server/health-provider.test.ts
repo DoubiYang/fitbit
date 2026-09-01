@@ -145,6 +145,7 @@ test('scheduled provider passes its abort signal through token refresh and stops
       leaseToken: claimed!.syncLeaseToken!,
       leaseUntil: claimed!.syncLeaseUntil!,
       now,
+      deadlineAt: new Date('2026-08-24T12:13:00.000Z'),
       signal: controller.signal,
     },
     signal: controller.signal,
@@ -174,6 +175,86 @@ test('scheduled provider passes its abort signal through token refresh and stops
   const current = await store.connections.findByUserId('u-signal');
   assert.deepEqual(current?.tokenEnvelopeCiphertext, encrypted.ciphertext);
   assert.equal(current?.lastSuccessfulSyncAt, undefined);
+});
+
+test('an abort after snapshot persistence cannot advance the scheduled success watermark', async () => {
+  const config = loadConfig({
+    DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+    GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+    TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
+    APP_ORIGIN: 'http://localhost:3000',
+  });
+  assert.equal(config.kind, 'oauth');
+  if (config.kind !== 'oauth') return;
+
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, key, 'c-persist-abort', 'u-persist-abort');
+  await store.users.insert('u-persist-abort');
+  await store.connections.insert({
+    id: 'c-persist-abort',
+    userId: 'u-persist-abort',
+    healthUserId: 'h-persist-abort',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2026-08-24T13:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2026-08-31T12:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active',
+    lastErrorCode: undefined,
+    connectedAt: now,
+    updatedAt: now,
+    lastSuccessfulSyncAt: undefined,
+    nextSyncAt: now,
+    syncRetryCount: 0,
+  });
+  const [claimed] = await store.connections.claimDueSyncs({
+    now,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(claimed?.syncLeaseToken);
+  const controller = new AbortController();
+  let persisted = 0;
+  const provider = new GoogleHealthProvider({
+    config,
+    store,
+    connection: claimed!,
+    now,
+    lease: {
+      connectionId: claimed!.id,
+      userId: claimed!.userId,
+      leaseToken: claimed!.syncLeaseToken!,
+      leaseUntil: claimed!.syncLeaseUntil!,
+      deadlineAt: new Date('2026-08-24T12:13:00.000Z'),
+      now,
+      signal: controller.signal,
+    },
+    signal: controller.signal,
+    api: {
+      async *iterateReconciledDataPoints() {},
+      async listDataPoints() {
+        return [];
+      },
+    },
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+    persistSnapshot: async () => {
+      persisted += 1;
+      controller.abort(new Error('test deadline'));
+    },
+  });
+
+  await assert.rejects(
+    () => provider.syncRecords('u-persist-abort', range),
+    /scheduled sync deadline exceeded/u,
+  );
+  assert.equal(persisted, 1);
+  assert.equal((await store.connections.findByUserId('u-persist-abort'))?.lastSuccessfulSyncAt, undefined);
 });
 
 test('live provider fails closed when one core Health API filter fails', async () => {

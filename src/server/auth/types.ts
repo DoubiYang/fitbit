@@ -37,6 +37,8 @@ export type ScheduledSyncLease = {
   userId: string;
   leaseToken: string;
   leaseUntil: Date;
+  /** Database-enforced deadline for successful scheduled writes. */
+  deadlineAt: Date;
   /** The server-owned clock used to reject expired leases deterministically. */
   now: Date;
   /** Cancels every external request and persistence step before the lease can expire. */
@@ -52,6 +54,8 @@ export type ScheduledSyncFinish = {
   nextSyncAt: Date;
   syncRetryCount: number;
   lastErrorCode: string | undefined;
+  /** Successful completion must occur before this deadline; failure retries may still close the lease. */
+  deadlineAt: Date;
 };
 
 export type DueSyncClaim = {
@@ -173,7 +177,11 @@ export type OauthTransactionRow = {
 export type AuthStore = {
   withTransaction<T>(fn: (store: AuthStore) => Promise<T>): Promise<T>;
   /** Runs writes only while this exact scheduled-sync lease is still current and unexpired. */
-  withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (store: AuthStore) => Promise<T>): Promise<T>;
+  withScheduledSyncLease<T>(
+    lease: ScheduledSyncLease,
+    fn: (store: AuthStore) => Promise<T>,
+    options?: { allowPastDeadline?: boolean },
+  ): Promise<T>;
   users: {
     insert(id: string): Promise<void>;
     setNutritionWritebackEnabled(id: string, enabled: boolean): Promise<void>;

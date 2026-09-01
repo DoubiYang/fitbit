@@ -235,6 +235,7 @@ export class GoogleHealthProvider implements HealthProvider {
       // Do not hold a separate row lock here, or that atomic statement would block on itself.
       await this.input.persistSnapshot(records, syncedAt);
     }
+    this.throwIfAborted();
     const latest = await this.input.store.connections.findByUserId(userId);
     if (!isSyncable(latest)) {
       throw new Error('connection no longer syncable');

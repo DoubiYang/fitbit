@@ -933,9 +933,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         return result;
       });
     },
-    async withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (inner: AuthStore) => Promise<T>): Promise<T> {
+    async withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (inner: AuthStore) => Promise<T>, leaseOptions?: { allowPastDeadline?: boolean }): Promise<T> {
       if (!options.transactionChild) {
-        return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn));
+        return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn, leaseOptions));
       }
       const current = connections.get(lease.connectionId);
       if (
@@ -943,7 +943,8 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         current.userId !== lease.userId ||
         current.syncLeaseToken !== lease.leaseToken ||
         !current.syncLeaseUntil ||
-        current.syncLeaseUntil.getTime() <= lease.now.getTime()
+        current.syncLeaseUntil.getTime() <= lease.now.getTime() ||
+        (!leaseOptions?.allowPastDeadline && lease.deadlineAt.getTime() <= lease.now.getTime())
       ) {
         throw new Error('sync lease no longer held');
       }
@@ -1145,7 +1146,8 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           (input.lease && (
             current.syncLeaseToken !== input.lease.leaseToken ||
             !current.syncLeaseUntil ||
-            current.syncLeaseUntil.getTime() <= input.lease.now.getTime()
+            current.syncLeaseUntil.getTime() <= input.lease.now.getTime() ||
+            input.lease.deadlineAt.getTime() <= input.lease.now.getTime()
           ))
         ) {
           return false;
@@ -1172,7 +1174,8 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           (input.lease && (
             current.syncLeaseToken !== input.lease.leaseToken ||
             !current.syncLeaseUntil ||
-            current.syncLeaseUntil.getTime() <= input.lease.now.getTime()
+            current.syncLeaseUntil.getTime() <= input.lease.now.getTime() ||
+            input.lease.deadlineAt.getTime() <= input.lease.now.getTime()
           ))
         ) {
           return false;
@@ -1241,7 +1244,8 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
           !current.syncLeaseUntil ||
           current.syncLeaseUntil.getTime() !== input.leaseUntil.getTime() ||
           current.syncLeaseToken !== input.leaseToken ||
-          current.syncLeaseUntil.getTime() <= input.now.getTime()
+          current.syncLeaseUntil.getTime() <= input.now.getTime() ||
+          (input.lastErrorCode === undefined && input.deadlineAt.getTime() <= input.now.getTime())
         ) {
           return false;
         }

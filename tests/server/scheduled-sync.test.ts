@@ -369,8 +369,11 @@ test('an aborted scheduled run only schedules a retry through its own lease toke
   await store.users.insert(row.userId);
   await store.connections.insert(row);
   const abort = new AbortController();
-  abort.abort(new Error('test deadline'));
-  let syncStarted = false;
+  const reason = new Error('test deadline');
+  abort.abort(reason);
+  let syncStarted = 0;
+  let callbackSawAborted: boolean | undefined;
+  let callbackReason: unknown;
 
   const result = await runDueSyncForUser({
     config,
@@ -378,13 +381,17 @@ test('an aborted scheduled run only schedules a retry through its own lease toke
     userId: row.userId,
     now,
     signal: abort.signal,
-    syncConnection: async () => {
-      syncStarted = true;
+    syncConnection: async (_connection, run) => {
+      syncStarted += 1;
+      callbackSawAborted = run.signal.aborted;
+      callbackReason = run.signal.reason;
     },
   });
 
   assert.deepEqual(result, { claimed: 1, succeeded: 0, failed: 1 });
-  assert.equal(syncStarted, false);
+  assert.equal(syncStarted, 0);
+  assert.equal(callbackSawAborted, undefined);
+  assert.equal(callbackReason, undefined);
   const current = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
   assert.equal(current.syncLeaseUntil, undefined);
   assert.equal(current.nextSyncAt?.toISOString(), '2026-08-24T12:30:00.000Z');

@@ -86,16 +86,20 @@ async function scheduledWrite<T>(input: {
   store: AuthStore;
   lease?: ScheduledCardioRun;
   signal?: AbortSignal;
-}, write: (store: AuthStore) => Promise<T>): Promise<T> {
+}, write: (store: AuthStore) => Promise<T>, options?: { allowPastDeadline?: boolean; allowAborted?: boolean }): Promise<T> {
   const signal = input.signal ?? input.lease?.signal;
-  throwIfAborted(signal);
+  if (!options?.allowAborted) {
+    throwIfAborted(signal);
+  }
   if (!input.lease) {
     return write(input.store);
   }
   return input.store.withScheduledSyncLease(input.lease, async (inner) => {
-    throwIfAborted(signal);
+    if (!options?.allowAborted) {
+      throwIfAborted(signal);
+    }
     return write(inner);
-  });
+  }, { allowPastDeadline: options?.allowPastDeadline });
 }
 
 export function connectionNextSyncAt(cursors: HealthSyncCursor[], now: Date): Date {
@@ -581,7 +585,7 @@ export async function scheduleTypeFailure(input: {
     lastErrorCode: cursorErrorCode(input.error),
     retryCount: scheduled.retryCount,
     nextAttemptAt: scheduled.nextAttemptAt,
-  }));
+  }), { allowPastDeadline: true, allowAborted: true });
 }
 
 export async function recomputeAffectedDays(
@@ -593,10 +597,14 @@ export async function recomputeAffectedDays(
     loadRecords?: LoadHealthRecords;
     loadSnapshot?: LoadHealthSnapshot;
     lastSuccessfulSyncAt?: Date | string;
+    signal?: AbortSignal;
   },
 ): Promise<void> {
+  throwIfAborted(input.signal);
   const records = await recordsLoader(input)(input.userId);
+  throwIfAborted(input.signal);
   const history = await store.healthMetrics.listTimeZoneHistory(input.userId);
+  throwIfAborted(input.signal);
   const zone = historyAt(history, input.now.toISOString());
   const today = zone ? civilDate(input.now, zone.ianaTimeZone) : utcDate(input.now);
   const expanded = new Set<string>();
@@ -618,19 +626,24 @@ export async function recomputeAffectedDays(
   );
 
   for (const date of ordered) {
+    throwIfAborted(input.signal);
     const range = dayQueryRange(date);
     const storedMinutes = await store.healthMetrics.listMinutesByCivilDate({ userId: input.userId, civilDate: date });
+    throwIfAborted(input.signal);
     const activityLevelIntervals = await store.healthMetrics.listActivityLevelIntervalsInRange({
       userId: input.userId,
       fromUtc: range.fromUtc,
       toUtcExclusive: range.toUtcExclusive,
     });
+    throwIfAborted(input.signal);
     const exerciseIntervals = await store.healthMetrics.listExerciseIntervalsInRange({
       userId: input.userId,
       fromUtc: range.fromUtc,
       toUtcExclusive: range.toUtcExclusive,
     });
+    throwIfAborted(input.signal);
     const zones = await store.healthMetrics.getHeartRateZones({ userId: input.userId, civilDate: date });
+    throwIfAborted(input.signal);
     const minutes = storedMinutes.map((minute) =>
       parseHeartRateMinuteAggregate({
         ...minute,
@@ -638,7 +651,9 @@ export async function recomputeAffectedDays(
       }),
     );
     if (minutes.length > 0) {
+      throwIfAborted(input.signal);
       await store.healthMetrics.upsertMinutes(minutes);
+      throwIfAborted(input.signal);
     }
     const strain = computeStrain({
       userId: input.userId,
@@ -652,6 +667,7 @@ export async function recomputeAffectedDays(
       isCurrentDay: date === today,
       now: input.now.toISOString(),
     });
+    throwIfAborted(input.signal);
     await store.healthMetrics.upsertDailyCardio(
       parseDailyCardio({
         userId: input.userId,
@@ -666,6 +682,7 @@ export async function recomputeAffectedDays(
         metricVersion: WHOOP_STYLE_METRIC_VERSION,
       }),
     );
+    throwIfAborted(input.signal);
     await store.healthMetrics.upsertMetricResult(
       parseMetricResult({
         userId: input.userId,
@@ -681,10 +698,13 @@ export async function recomputeAffectedDays(
         coverage: strain.coverage,
       }),
     );
+    throwIfAborted(input.signal);
 
     const previousDate = addCivilDays(date, -1);
     const previousCardio = await store.healthMetrics.getDailyCardio({ userId: input.userId, civilDate: previousDate });
+    throwIfAborted(input.signal);
     const goal = await store.healthMetrics.lookupSleepGoal({ userId: input.userId, civilDate: date });
+    throwIfAborted(input.signal);
     const sleep = computeSleepPerformance({
       targetDate: date,
       sessions: sleepSessions,
@@ -693,6 +713,7 @@ export async function recomputeAffectedDays(
         ? { status: previousCardio.status, score: previousCardio.strain }
         : undefined,
     });
+    throwIfAborted(input.signal);
     await store.healthMetrics.upsertMetricResult(
       parseMetricResult({
         userId: input.userId,
@@ -708,6 +729,7 @@ export async function recomputeAffectedDays(
         coverage: sleep.coverage,
       }),
     );
+    throwIfAborted(input.signal);
 
     const lastSuccessfulSyncAt =
       input.lastSuccessfulSyncAt instanceof Date
@@ -723,6 +745,7 @@ export async function recomputeAffectedDays(
       now: input.now.toISOString(),
       lastSuccessfulSyncAt,
     });
+    throwIfAborted(input.signal);
     await store.healthMetrics.upsertMetricResult(
       parseMetricResult({
         userId: input.userId,
@@ -738,7 +761,9 @@ export async function recomputeAffectedDays(
         coverage: recovery.coverage,
       }),
     );
+    throwIfAborted(input.signal);
   }
+  throwIfAborted(input.signal);
 }
 
 export async function syncCardioConnection(input: {
@@ -810,7 +835,9 @@ export async function syncCardioConnection(input: {
       loadRecords: input.loadRecords,
       loadSnapshot: input.loadSnapshot,
       lastSuccessfulSyncAt: input.lastSuccessfulSyncAt,
+      signal: input.signal,
     });
+    throwIfAborted(input.signal);
     for (const dataType of succeeded) {
       throwIfAborted(input.signal);
       await inner.healthMetrics.updateCursor({
@@ -819,6 +846,7 @@ export async function syncCardioConnection(input: {
         ...successCursor(input.now),
       });
     }
+    throwIfAborted(input.signal);
   };
   if (input.lease) {
     await input.store.withScheduledSyncLease(input.lease, (inner) => finalize(inner));

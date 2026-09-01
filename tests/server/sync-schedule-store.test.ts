@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { parseMetricResult } from '../../src/domain/cardio-records';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import type { ConnectionRow } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 
@@ -195,6 +197,7 @@ test('a taken-over token cannot enter the aggregate, cursor, or metric-result wr
       leaseToken: first!.syncLeaseToken!,
       leaseUntil: first!.syncLeaseUntil!,
       now: takeoverNow,
+      deadlineAt: new Date('2026-08-24T12:29:00.000Z'),
     }, async (inner) => {
       aggregateWrite = true;
       await inner.healthMetrics.upsertMinutes([]);
@@ -207,6 +210,33 @@ test('a taken-over token cannot enter the aggregate, cursor, or metric-result wr
         retryCount: 0,
         nextAttemptAt: undefined,
       });
+      await inner.healthMetrics.upsertMetricResult(parseMetricResult({
+        userId: first!.userId,
+        civilDate: '2026-08-24',
+        metricName: 'strain',
+        metricVersion: WHOOP_STYLE_METRIC_VERSION,
+        score: 3,
+        status: 'provisional',
+        quality: null,
+        reason: null,
+        evidence: [],
+        source: {
+          heartRateZones: false,
+          activityLevel: false,
+          exercise: false,
+          sleep: false,
+          hrv: false,
+          rhr: false,
+          sleepGoal: false,
+          timeZone: 'missing',
+        },
+        coverage: {
+          knownContextMinutes: 0,
+          rawHeartRateMinutes: 0,
+          attributedMinutes: 0,
+          lastKnownContextAt: null,
+        },
+      }));
       metricResultWrite = true;
     }),
     /sync lease no longer held/u,
@@ -214,6 +244,7 @@ test('a taken-over token cannot enter the aggregate, cursor, or metric-result wr
   assert.equal(aggregateWrite, false);
   assert.equal(cursorWrite, false);
   assert.equal(metricResultWrite, false);
+  assert.deepEqual(await store.healthMetrics.listMetricResults({ userId: first!.userId, civilDate: '2026-08-24' }), []);
 
   const refreshed = await store.connections.updateAccessTokenIfSyncable({
     id: first!.id,
@@ -231,6 +262,7 @@ test('a taken-over token cannot enter the aggregate, cursor, or metric-result wr
       leaseToken: first!.syncLeaseToken!,
       leaseUntil: first!.syncLeaseUntil!,
       now: takeoverNow,
+      deadlineAt: new Date('2026-08-24T12:29:00.000Z'),
     },
   });
   const stamped = await store.connections.markLastSuccessfulSyncIfSyncable({
@@ -243,6 +275,7 @@ test('a taken-over token cannot enter the aggregate, cursor, or metric-result wr
       leaseToken: first!.syncLeaseToken!,
       leaseUntil: first!.syncLeaseUntil!,
       now: takeoverNow,
+      deadlineAt: new Date('2026-08-24T12:29:00.000Z'),
     },
   });
   const finished = await store.connections.finishScheduledSync({
@@ -254,6 +287,7 @@ test('a taken-over token cannot enter the aggregate, cursor, or metric-result wr
     nextSyncAt: new Date('2026-08-24T13:16:00.000Z'),
     syncRetryCount: 0,
     lastErrorCode: undefined,
+    deadlineAt: new Date('2026-08-24T12:29:00.000Z'),
   });
   const failed = await store.connections.clearSyncLeaseIfHeld({
     id: first!.id,

@@ -418,6 +418,7 @@ function storeFor(queryable: Queryable): AuthStore {
              sync_lease_token = $10
              AND sync_lease_until = $11
              AND sync_lease_until > now()
+             AND now() < $12
            ))`,
         [
           input.id,
@@ -431,6 +432,7 @@ function storeFor(queryable: Queryable): AuthStore {
           input.updatedAt,
           input.lease?.leaseToken ?? null,
           input.lease?.leaseUntil ?? null,
+          input.lease?.deadlineAt ?? null,
         ],
       );
       return result.rowCount === 1;
@@ -444,6 +446,7 @@ function storeFor(queryable: Queryable): AuthStore {
              sync_lease_token = $4
              AND sync_lease_until = $5
              AND sync_lease_until > now()
+             AND now() < $6
            ))`,
         [
           input.id,
@@ -451,6 +454,7 @@ function storeFor(queryable: Queryable): AuthStore {
           input.syncedAt,
           input.lease?.leaseToken ?? null,
           input.lease?.leaseUntil ?? null,
+          input.lease?.deadlineAt ?? null,
         ],
       );
       return result.rowCount === 1;
@@ -510,7 +514,8 @@ function storeFor(queryable: Queryable): AuthStore {
            AND status IN ('active', 'partial')
            AND sync_lease_until = $3
            AND sync_lease_token = $4::uuid
-           AND sync_lease_until > now()`,
+           AND sync_lease_until > now()
+           AND ($9::timestamptz IS NULL OR $7::text IS NOT NULL OR now() < $9)`,
         [
           input.id,
           input.userId,
@@ -520,6 +525,7 @@ function storeFor(queryable: Queryable): AuthStore {
           input.syncRetryCount,
           input.lastErrorCode ?? null,
           input.now,
+          input.deadlineAt,
         ],
       );
       return result.rowCount === 1;
@@ -1849,9 +1855,9 @@ function storeFor(queryable: Queryable): AuthStore {
         client.release();
       }
     },
-    async withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (inner: AuthStore) => Promise<T>): Promise<T> {
+    async withScheduledSyncLease<T>(lease: ScheduledSyncLease, fn: (inner: AuthStore) => Promise<T>, options?: { allowPastDeadline?: boolean }): Promise<T> {
       if (canStartTransaction(queryable)) {
-        return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn));
+        return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn, options));
       }
       const held = await queryable.query(
         `SELECT id
@@ -1860,8 +1866,9 @@ function storeFor(queryable: Queryable): AuthStore {
            AND sync_lease_token = $3::uuid
            AND sync_lease_until = $4
            AND sync_lease_until > now()
+           AND ($6::boolean OR now() < $5)
          FOR UPDATE`,
-        [lease.connectionId, lease.userId, lease.leaseToken, lease.leaseUntil],
+        [lease.connectionId, lease.userId, lease.leaseToken, lease.leaseUntil, lease.deadlineAt, options?.allowPastDeadline ?? false],
       );
       if (held.rowCount !== 1) {
         throw new Error('sync lease no longer held');

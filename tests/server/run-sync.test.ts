@@ -167,6 +167,7 @@ test('an aborted scheduled run stops before Health API reads or cursor writes', 
         leaseToken: claimed!.syncLeaseToken!,
         leaseUntil: claimed!.syncLeaseUntil!,
         now,
+        deadlineAt: new Date('2026-08-24T12:13:00.000Z'),
         signal: AbortSignal.abort(new Error('test deadline')),
       },
     }),
@@ -238,6 +239,7 @@ test('a deadline during the first cardio page stops later page reads, writes, an
         leaseToken: claimed!.syncLeaseToken!,
         leaseUntil: claimed!.syncLeaseUntil!,
         now,
+        deadlineAt: new Date('2026-08-24T12:13:00.000Z'),
         signal: controller.signal,
       },
     }),
@@ -248,7 +250,9 @@ test('a deadline during the first cardio page stops later page reads, writes, an
     userId: 'u-midrun-abort',
     fromUtc: '2026-08-24T00:00:00.000Z',
   }), []);
-  assert.equal(await store.healthMetrics.readCursor({ connectionId: 'c-midrun-abort', dataType: 'heart-rate' }), undefined);
+  const cursor = await store.healthMetrics.readCursor({ connectionId: 'c-midrun-abort', dataType: 'heart-rate' });
+  assert.equal(cursor?.successfulWatermark, undefined);
+  assert.equal(cursor?.lastErrorCode, 'sync_failed');
   assert.deepEqual(await store.healthMetrics.listMetricResults({ userId: 'u-midrun-abort', civilDate: '2026-08-24' }), []);
 });
 

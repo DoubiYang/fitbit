@@ -204,6 +204,7 @@ async function saveHealthSnapshotWithQueryable(
            AND sync_lease_token = $9::uuid
            AND sync_lease_until = $10
            AND sync_lease_until > now()
+           AND now() < $11
          ))
        FOR UPDATE
      )
@@ -229,6 +230,7 @@ async function saveHealthSnapshotWithQueryable(
       input.lease?.connectionId ?? null,
       input.lease?.leaseToken ?? null,
       input.lease?.leaseUntil ?? null,
+      input.lease?.deadlineAt ?? null,
     ],
   );
   if (result.rowCount !== 1) {

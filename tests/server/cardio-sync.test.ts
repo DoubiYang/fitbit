@@ -1022,6 +1022,71 @@ test('skips all cardio types in backoff but still recomputes extra snapshot date
   assert.ok(sleep);
 });
 
+test('a scheduled deadline before final recompute commit rolls back snapshot extra-date metrics', async () => {
+  const store = await seedStore({ timeZone: 'UTC' });
+  const claimedAt = NOW;
+  const due = await store.connections.findByUserId(userId);
+  assert.ok(due);
+  await store.connections.update({ ...due, nextSyncAt: claimedAt, syncRetryCount: 0 });
+  const [claimed] = await store.connections.claimDueSyncs({
+    now: claimedAt,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(claimed?.syncLeaseToken);
+  const controller = new AbortController();
+  let metricWrites = 0;
+  const withInstrumentedLease = store.withScheduledSyncLease.bind(store);
+  const instrumentedStore = {
+    ...store,
+    withScheduledSyncLease: async (lease: Parameters<typeof store.withScheduledSyncLease>[0], work: Parameters<typeof store.withScheduledSyncLease>[1]) =>
+      withInstrumentedLease(lease, async (inner) => {
+        const upsertMetricResult = inner.healthMetrics.upsertMetricResult.bind(inner.healthMetrics);
+        return work({
+          ...inner,
+          healthMetrics: {
+            ...inner.healthMetrics,
+            upsertMetricResult: async (row) => {
+              await upsertMetricResult(row);
+              metricWrites += 1;
+              if (metricWrites === 6) {
+                controller.abort(new Error('test deadline'));
+              }
+            },
+          },
+        });
+      }),
+  } as typeof store;
+
+  await assert.rejects(
+    () => syncCardioConnection({
+      store: instrumentedStore,
+      connection: claimed!,
+      api: createFakeApi(),
+      accessToken: 'access',
+      now: NOW,
+      dataTypes: [],
+      extraDates: ['2026-08-22'],
+      loadRecords: async () => emptyUserHealthRecords(),
+      lease: {
+        connectionId: claimed!.id,
+        userId: claimed!.userId,
+        leaseToken: claimed!.syncLeaseToken!,
+        leaseUntil: claimed!.syncLeaseUntil!,
+        now: NOW,
+        deadlineAt: new Date('2026-08-24T12:13:00.000Z'),
+        signal: controller.signal,
+      },
+      signal: controller.signal,
+    }),
+    /scheduled sync deadline exceeded/u,
+  );
+  assert.equal(metricWrites, 6);
+  assert.equal(await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-22' }), undefined);
+  assert.deepEqual(await store.healthMetrics.listMetricResults({ userId, civilDate: '2026-08-22' }), []);
+  assert.deepEqual(await store.healthMetrics.listCursors({ connectionId }), []);
+});
+
 test('does not persist a heart-rate page after the connection is disconnected', async () => {
   const store = await seedStore();
   const api = createFakeApi({

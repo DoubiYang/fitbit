@@ -19,6 +19,34 @@ class RecordingQueryable implements PostgresQueryable {
   }
 }
 
+class LeaseAwareSnapshotQueryable implements PostgresQueryable {
+  readonly queries: Query[] = [];
+
+  constructor(private activeLeaseToken: string) {}
+
+  takeOver(leaseToken: string): void {
+    this.activeLeaseToken = leaseToken;
+  }
+
+  async query(text: string, values?: unknown[]) {
+    this.queries.push({ text, values });
+    return { rows: [], rowCount: values?.[8] === this.activeLeaseToken ? 1 : 0 };
+  }
+}
+
+class DeadlineRaceQueryable implements PostgresQueryable {
+  readonly queries: Query[] = [];
+
+  constructor(private readonly expiredDeadlineAt: Date) {}
+
+  async query(text: string, values?: unknown[]) {
+    this.queries.push({ text, values });
+    const failureFinish = text.includes('UPDATE google_health_connections') && values?.[6] === 'sync_failed';
+    const hasDeadlinePredicate = /now\(\) < \$\d+/u.test(text) && values?.includes(this.expiredDeadlineAt);
+    return { rows: [], rowCount: failureFinish || !hasDeadlinePredicate ? 1 : 0 };
+  }
+}
+
 const connectionId = '11111111-1111-4111-8111-111111111111';
 const userId = '22222222-2222-4222-8222-222222222222';
 const oldLeaseToken = '44444444-4444-4444-8444-444444444444';
@@ -75,7 +103,8 @@ test('Postgres success watermark update is one atomic lease-fenced statement', a
 });
 
 test('snapshot persistence atomically rejects a superseded token', async () => {
-  const queryable = new RecordingQueryable(0);
+  const queryable = new LeaseAwareSnapshotQueryable(oldLeaseToken);
+  queryable.takeOver('55555555-5555-4555-8555-555555555555');
   const saveWithQueryable = (snapshots as Record<string, unknown>).saveHealthSnapshotForTesting as
     | ((input: Record<string, unknown>) => Promise<void>)
     | undefined;
@@ -98,4 +127,71 @@ test('snapshot persistence atomically rejects a superseded token', async () => {
   assert.ok(query.values?.includes(connectionId));
   assert.ok(query.values?.includes(userId));
   assert.ok(query.values?.includes(oldLeaseToken));
+});
+
+test('a database deadline atomically rejects scheduled success writes but not the failure retry', async () => {
+  const deadlineAt = new Date('2026-08-24T11:59:00.000Z');
+  const lease = { connectionId, userId, leaseToken: oldLeaseToken, leaseUntil, now, deadlineAt };
+  const queryable = new DeadlineRaceQueryable(deadlineAt);
+  const store = createPostgresStoreForTesting(queryable);
+  const updated = await store.connections.updateAccessTokenIfSyncable({
+    id: connectionId,
+    userId,
+    tokenEnvelopeCiphertext: Buffer.from('ciphertext'),
+    tokenEnvelopeIv: Buffer.alloc(12),
+    tokenEnvelopeAuthTag: Buffer.alloc(16),
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: now,
+    refreshTokenExpiresAt: undefined,
+    updatedAt: now,
+    lease,
+  } as never);
+  assert.equal(updated, false);
+  const stamped = await store.connections.markLastSuccessfulSyncIfSyncable({
+    id: connectionId,
+    userId,
+    syncedAt: now,
+    lease,
+  } as never);
+  assert.equal(stamped, false);
+  let leaseBodyRan = false;
+  await assert.rejects(
+    () => store.withScheduledSyncLease(lease as never, async () => {
+      leaseBodyRan = true;
+    }),
+    /sync lease no longer held/u,
+  );
+  assert.equal(leaseBodyRan, false);
+  const saveWithQueryable = (snapshots as Record<string, unknown>).saveHealthSnapshotForTesting as
+    | ((input: Record<string, unknown>) => Promise<void>)
+    | undefined;
+  assert.ok(saveWithQueryable, 'snapshot test seam must exist');
+  await assert.rejects(
+    () => saveWithQueryable!({ queryable, userId, records: emptyUserHealthRecords(), syncedAt: now, lease }),
+    /sync lease no longer held/u,
+  );
+  const success = await store.connections.finishScheduledSync({
+    id: connectionId,
+    userId,
+    leaseUntil,
+    leaseToken: oldLeaseToken,
+    now,
+    nextSyncAt: new Date('2026-08-24T13:00:00.000Z'),
+    syncRetryCount: 0,
+    lastErrorCode: undefined,
+    deadlineAt,
+  } as never);
+  assert.equal(success, false);
+  const failure = await store.connections.finishScheduledSync({
+    id: connectionId,
+    userId,
+    leaseUntil,
+    leaseToken: oldLeaseToken,
+    now,
+    nextSyncAt: new Date('2026-08-24T12:30:00.000Z'),
+    syncRetryCount: 1,
+    lastErrorCode: 'sync_failed',
+    deadlineAt,
+  } as never);
+  assert.equal(failure, true);
 });
