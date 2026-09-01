@@ -54,3 +54,12 @@ Add failing tests before implementation for:
 5. the server deadline provides cleanup headroom below the lease and the worker deadline is longer than the server deadline.
 
 Then run focused tests, the full suite, lint, and production build. Rebuild the local Docker services, wait for the abandoned pre-fix lease to become claimable (or safely expire it using the existing state transition), and validate only anonymous row counts, cursor state, result count, and freshness/quality labels from the authorized account.
+
+## Local validation outcome — 2026-09-01
+
+- Migration `011_sync_lease_fencing.sql` applied successfully while retaining the existing PostgreSQL volume.
+- The rebuilt application and both sync workers became healthy; the food import completed successfully.
+- The authorized local account has a completed sync and a future hourly schedule, with no active lease or retained lease token.
+- All eight sync cursors have success watermarks and no recorded error. The local database contains minute and activity aggregates, daily cardio rows, and metric results; no raw heart-rate samples were inspected or logged.
+- A manually authenticated internal-sync request returned `claimed: 0`, confirming that the account was not stuck in a stale lease and was already scheduled for its next run.
+- Some metric results remain deliberately withheld while the required history or coverage matures; only eligible results receive a score.
