@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useState } from 'react';
 
 export const TIME_ZONE_ENDPOINT = '/rhythm/api/settings/time-zone';
 export const TIME_ZONE_READY_EVENT = 'rhythm:timezone-ready';
@@ -20,12 +21,23 @@ export async function submitBrowserTimeZone(fetchImpl: typeof fetch = fetch): Pr
   }
 }
 
-export function TimeZoneBootstrap() {
+export async function submitBrowserTimeZoneAndRefresh(
+  refreshReadModel: () => void,
+  fetchImpl: typeof fetch = fetch,
+): Promise<'submitted' | 'failed'> {
+  const result = await submitBrowserTimeZone(fetchImpl);
+  if (result === 'submitted') {
+    refreshReadModel();
+  }
+  return result;
+}
+
+export function TimeZoneBootstrap({ refreshReadModel }: { refreshReadModel?: () => void } = {}) {
   const [status, setStatus] = useState<'idle' | 'submitted' | 'failed'>('idle');
 
   useEffect(() => {
     let cancelled = false;
-    void submitBrowserTimeZone().then((result) => {
+    void (refreshReadModel ? submitBrowserTimeZoneAndRefresh(refreshReadModel) : submitBrowserTimeZone()).then((result) => {
       if (cancelled) {
         return;
       }
@@ -37,7 +49,13 @@ export function TimeZoneBootstrap() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshReadModel]);
 
   return <span hidden data-timezone-bootstrap={status} />;
+}
+
+export function DashboardTimeZoneBootstrap() {
+  const router = useRouter();
+  const refreshReadModel = useCallback(() => router.refresh(), [router]);
+  return <TimeZoneBootstrap refreshReadModel={refreshReadModel} />;
 }

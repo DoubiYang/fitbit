@@ -6,7 +6,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { TodayView } from '../../src/server/dashboard/build-today';
 import { TodayDashboard } from '../../src/ui/dashboard/today-dashboard';
-import { submitBrowserTimeZone, TimeZoneBootstrap } from '../../src/ui/settings/time-zone-bootstrap';
+import {
+  submitBrowserTimeZone,
+  submitBrowserTimeZoneAndRefresh,
+  TimeZoneBootstrap,
+} from '../../src/ui/settings/time-zone-bootstrap';
 
 const coverage = {
   knownContextMinutes: 600,
@@ -332,6 +336,37 @@ test('first authenticated load submits the browser IANA zone over the settings e
   assert.equal(calls[0]?.init.credentials, 'same-origin');
   assert.match(String(calls[0]?.init.headers && (calls[0].init.headers as Record<string, string>)['content-type']), /application\/json/i);
   assert.deepEqual(JSON.parse(String(calls[0]?.init.body)), { ianaTimeZone: zone });
+});
+
+test('a successful timezone update refreshes the dashboard read model once, while a failed update does not refresh or retry', async () => {
+  let refreshes = 0;
+  let requests = 0;
+  const successfulFetch = async () => {
+    requests += 1;
+    return new Response('{}', { status: 200 });
+  };
+
+  assert.equal(
+    await submitBrowserTimeZoneAndRefresh(() => {
+      refreshes += 1;
+    }, successfulFetch as typeof fetch),
+    'submitted',
+  );
+  assert.equal(refreshes, 1);
+  assert.equal(requests, 1);
+
+  const failedFetch = async () => {
+    requests += 1;
+    return new Response('{}', { status: 500 });
+  };
+  assert.equal(
+    await submitBrowserTimeZoneAndRefresh(() => {
+      refreshes += 1;
+    }, failedFetch as typeof fetch),
+    'failed',
+  );
+  assert.equal(refreshes, 1);
+  assert.equal(requests, 2);
 });
 
 test('refreshed read model can show reindexed historical complete strain', () => {

@@ -112,7 +112,7 @@ test('classifies every Google zone as an inclusive [min, max] interval', () => {
   assert.equal(classifyHeartRateZone(201, zones), null);
 });
 
-test('rejects overlapping, incomplete, or inverted zone maps', () => {
+test('rejects overlapping, gapped, incomplete, or inverted zone maps', () => {
   assert.throws(() =>
     parseDailyHeartRateZones(
       zonesInput({
@@ -132,6 +132,14 @@ test('rejects overlapping, incomplete, or inverted zone maps', () => {
         VIGOROUS: orderedZones.VIGOROUS,
       },
     }),
+  );
+  assert.throws(() =>
+    parseDailyHeartRateZones(
+      zonesInput({
+        ...orderedZones,
+        MODERATE: { minBeatsPerMinute: 118, maxBeatsPerMinute: 136 },
+      }),
+    ),
   );
   assert.throws(() =>
     parseDailyHeartRateZones(
@@ -523,24 +531,8 @@ test('strain dose requires at least 30 seconds of active overlap, not just a dom
   assert.ok((longActive.dose ?? 0) > 0);
 });
 
-test('a BPM in a 1 bpm zone gap produces no dose', () => {
-  const zones = parseDailyHeartRateZones(zonesInput(gappedZones));
-  assert.equal(classifyHeartRateZone(117, zones), null);
-
-  const result = computeStrain({
-    userId,
-    date: '2026-08-22',
-    minutes: [parseHeartRateMinuteAggregate(minuteInput({ avgBpm: 117, minBpm: 117, maxBpm: 117 }))],
-    zones,
-    sleepSessions: [],
-    exerciseIntervals: [],
-    timezoneUnambiguous: true,
-    isCurrentDay: false,
-  });
-
-  assert.equal(result.zoneMinutes.light, 0);
-  assert.equal(result.zoneMinutes.moderate, 0);
-  assert.equal(result.dose, 0);
+test('rejects a BPM gap before it can become an unscored strain minute', () => {
+  assert.throws(() => parseDailyHeartRateZones(zonesInput(gappedZones)));
 });
 
 test('validated cardio records keep sleep-goal T+1 and whoop-style-v2 metric results', () => {

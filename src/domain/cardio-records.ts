@@ -91,10 +91,10 @@ const dailyHeartRateZonesSchema = z
     for (let index = 0; index < order.length - 1; index += 1) {
       const current = value.zones[order[index]];
       const next = value.zones[order[index + 1]];
-      if (next.minBeatsPerMinute <= current.maxBeatsPerMinute) {
+      if (next.minBeatsPerMinute !== current.maxBeatsPerMinute + 1) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          message: 'Heart-rate zones must be ordered, inclusive, and non-overlapping.',
+          message: 'Adjacent heart-rate zones must be ordered, inclusive, and separated by exactly 1 bpm.',
           path: ['zones', order[index + 1], 'minBeatsPerMinute'],
         });
       }
