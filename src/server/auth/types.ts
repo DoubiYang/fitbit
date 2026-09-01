@@ -1,4 +1,5 @@
 import type { VisionMeal } from '../../domain/meal-vision';
+import type { HealthMetricsStore } from '../health/cardio-store';
 import type { ConfirmMealInput, ConfirmMealResult, CurrentMealStore, MealDraftRow, MealIngredientRow, MealNutrientRow, MealSyncGenerationRow, MealSyncPointRow, MealSyncPointStatus, MealType, MealVersionRow, OutboxRow } from '../meals/types';
 import type { LocalTwFdaFood } from '../nutrition/tw-fda';
 import type { ConnectionStatus } from './scopes';
@@ -189,6 +190,7 @@ export type AuthStore = {
   healthSnapshots: {
     deleteForUser(userId: string): Promise<void>;
   };
+  healthMetrics: HealthMetricsStore;
   foodComposition: {
     findExactFood(nameZh: string): Promise<LocalTwFdaFood | undefined>;
   };

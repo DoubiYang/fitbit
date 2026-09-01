@@ -3,6 +3,7 @@ import { buildTodayViewForUser } from '../src/server/dashboard/today-response';
 import { createRequestDeps, requestCookieHeader } from '../src/server/auth/runtime';
 import { getCurrentUser } from '../src/server/session/current-user';
 import { TodayDashboard } from '../src/ui/dashboard/today-dashboard';
+import { DashboardTimeZoneBootstrap } from '../src/ui/settings/time-zone-bootstrap';
 import { StatusPage } from '../src/ui/shell/status-page';
 
 export const dynamic = 'force-dynamic';
@@ -56,5 +57,14 @@ export default async function Home() {
     );
   }
 
-  return <TodayDashboard view={view} variant={user.mode === 'demo' ? 'demo' : 'oauth'} />;
+  if (user.mode === 'oauth') {
+    return (
+      <>
+        <DashboardTimeZoneBootstrap />
+        <TodayDashboard view={view} variant="oauth" bootstrapTimeZone={false} />
+      </>
+    );
+  }
+
+  return <TodayDashboard view={view} variant="demo" />;
 }

@@ -26,10 +26,17 @@ export async function buildTodayViewForUser(
       userId: user.id,
       now,
       lastSuccessfulSyncAt: now,
+      allowDefaultTimeZone: true,
     });
   }
   if (user.mode === 'oauth') {
     const snapshot = deps ? await oauthSnapshot(user.id, deps) : undefined;
+    const [connection, zone] = deps?.store
+      ? await Promise.all([
+          deps.store.connections.findByUserId(user.id),
+          deps.store.healthMetrics.lookupTimeZoneHistory({ userId: user.id, at: now }),
+        ])
+      : [undefined, undefined];
     return buildTodayView({
       provider: {
         capabilities: { mode: 'oauth', canSync: Boolean(snapshot) },
@@ -37,7 +44,9 @@ export async function buildTodayViewForUser(
       },
       userId: user.id,
       now,
-      lastSuccessfulSyncAt: snapshot?.syncedAt.toISOString(),
+      lastSuccessfulSyncAt: connection?.lastSuccessfulSyncAt?.toISOString(),
+      timeZone: zone?.ianaTimeZone,
+      healthMetrics: deps?.store?.healthMetrics,
     });
   }
   return undefined;

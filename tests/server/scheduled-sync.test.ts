@@ -5,6 +5,7 @@ import type { ConnectionRow } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { TokenRefreshError } from '../../src/server/health/access-token';
 import { runDueSyncForUser, runDueSyncs, scheduleInitialSync } from '../../src/server/health/scheduled-sync';
+import type { HealthSyncDataType } from '../../src/server/health/cardio-store';
 
 type ScheduledConnection = ConnectionRow & {
   nextSyncAt: Date;
@@ -108,7 +109,7 @@ test('claims each due user under a fresh lease instead of leasing the whole batc
   assert.deepEqual(claimLimits, [1, 1]);
 });
 
-test('a successful due sync schedules only the claimed user six hours later', async () => {
+test('a successful due sync schedules only the claimed user one hour later', async () => {
   const store = createMemoryStore();
   const now = new Date('2026-08-24T12:00:00.000Z');
   const due = connection('due-user', now);
@@ -132,14 +133,14 @@ test('a successful due sync schedules only the claimed user six hours later', as
   assert.deepEqual(result, { claimed: 1, succeeded: 1, failed: 0 });
   assert.deepEqual(calls, ['due-user']);
   const scheduled = (await store.connections.findByUserId(due.userId)) as ScheduledConnection;
-  assert.equal(scheduled.nextSyncAt.toISOString(), '2026-08-24T18:00:00.000Z');
+  assert.equal(scheduled.nextSyncAt.toISOString(), '2026-08-24T13:00:00.000Z');
   assert.equal(scheduled.syncRetryCount, 0);
   assert.equal(scheduled.syncLeaseUntil, undefined);
   assert.equal(scheduled.lastErrorCode, undefined);
   assert.equal(((await store.connections.findByUserId(other.userId)) as ScheduledConnection).nextSyncAt.toISOString(), now.toISOString());
 });
 
-test('failed due syncs retry at 30 minutes, one hour, two hours, then return to the six-hour cycle', async () => {
+test('failed due syncs retry at 30 minutes, one hour, two hours, then return to the one-hour cycle', async () => {
   const store = createMemoryStore();
   const startedAt = new Date('2026-08-24T12:00:00.000Z');
   const row = connection('retry-user', startedAt);
@@ -149,7 +150,7 @@ test('failed due syncs retry at 30 minutes, one hour, two hours, then return to 
     '2026-08-24T12:30:00.000Z',
     '2026-08-24T13:30:00.000Z',
     '2026-08-24T15:30:00.000Z',
-    '2026-08-24T21:30:00.000Z',
+    '2026-08-24T16:30:00.000Z',
   ];
   let now = startedAt;
   for (const nextSyncAt of expected) {
@@ -229,7 +230,7 @@ test('an in-flight auth failure does not expire a reauthorized envelope', async 
   assert.deepEqual(current.tokenEnvelopeCiphertext, Buffer.from('new-envelope'));
 });
 
-test('a successful in-flight sync keeps a reauthorize due time instead of pushing six hours', async () => {
+test('a successful in-flight sync keeps a reauthorize due time instead of pushing one hour', async () => {
   const store = createMemoryStore();
   const now = new Date('2026-08-24T12:00:00.000Z');
   const row = connection('success-reauth', now);
@@ -292,6 +293,41 @@ test('token refresh auth failures expire; 5xx stays on retry', async () => {
   assert.equal(retried.status, 'active');
   assert.equal(retried.nextSyncAt.toISOString(), '2026-08-24T12:30:00.000Z');
   assert.equal(retried.lastErrorCode, 'sync_failed');
+});
+
+test('a successful sync becomes due at the earliest per-type cursor retry', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection('cursor-user', now);
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+  await store.healthMetrics.updateCursor({
+    connectionId: row.id,
+    dataType: 'heart-rate' satisfies HealthSyncDataType,
+    successfulWatermark: undefined,
+    lastErrorCode: 'rate_limited',
+    retryCount: 1,
+    nextAttemptAt: new Date('2026-08-24T12:30:00.000Z'),
+  });
+  await store.healthMetrics.updateCursor({
+    connectionId: row.id,
+    dataType: 'activity-level',
+    successfulWatermark: now,
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: new Date('2026-08-24T13:00:00.000Z'),
+  });
+
+  await runDueSyncForUser({
+    config,
+    store,
+    userId: row.userId,
+    now,
+    syncConnection: async () => {},
+  });
+
+  const scheduled = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
+  assert.equal(scheduled.nextSyncAt.toISOString(), '2026-08-24T12:30:00.000Z');
 });
 
 test('a disconnected in-flight sync does not requeue or leave a lease', async () => {

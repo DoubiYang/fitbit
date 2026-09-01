@@ -411,6 +411,7 @@ export async function disconnectUser(input: {
     await input.store.withTransaction(async (store) => {
       await store.connections.update(clearTokens(connection, now));
       await store.healthSnapshots.deleteForUser(input.userId);
+      await store.healthMetrics.deleteForUser(input.userId);
       await store.sessions.deleteAllForUser(input.userId);
     });
   } else {

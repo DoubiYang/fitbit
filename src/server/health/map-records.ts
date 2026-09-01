@@ -31,6 +31,35 @@ export type GoogleDataPoint = {
       heartRateZoneDurations?: { lightTime?: string; moderateTime?: string; vigorousTime?: string; peakTime?: string };
     };
   };
+  heartRate?: {
+    sampleTime?: {
+      physicalTime?: string;
+      utcOffset?: string;
+      civilTime?: { date?: { year?: number; month?: number; day?: number } };
+    };
+    beatsPerMinute?: string | number;
+  };
+  activityLevel?: {
+    interval?: { startTime?: string; endTime?: string };
+    activityLevelType?: string;
+  };
+  dailyHeartRateZones?: {
+    date?: { year?: number; month?: number; day?: number };
+    heartRateZones?: Array<{
+      heartRateZoneType?: string;
+      minBeatsPerMinute?: string | number;
+      maxBeatsPerMinute?: string | number;
+    }>;
+  };
+  timeInHeartRateZone?: {
+    interval?: {
+      startTime?: string;
+      endTime?: string;
+      startUtcOffset?: string;
+      utcOffset?: string;
+    };
+    heartRateZoneType?: string;
+  };
 };
 
 function recordId(point: GoogleDataPoint, fallback: string): string {

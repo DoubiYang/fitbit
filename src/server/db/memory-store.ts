@@ -2,7 +2,29 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
 import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, SessionRow } from '../auth/types';
+import {
+  HealthMetricsConnectionMismatchError,
+  mergeHeartRateMinuteUpsert,
+  parseActivityLevelInterval,
+  parseDailyCardio,
+  parseDailyHeartRateZones,
+  parseDailyTimeInZone,
+  parseExerciseInterval,
+  parseHealthSyncCursor,
+  parseHealthTimeZoneHistory,
+  parseHeartRateMinuteAggregate,
+  parseMetricResult,
+  parseSleepGoal,
+  SleepGoalConflictError,
+  TimeZoneHistoryConflictError,
+  type HealthMetricsStore,
+  type HealthMetricsWindowWrite,
+  type HealthSyncCursor,
+  type HealthTimeZoneHistory,
+  type HeartRateMinuteAggregate,
+} from '../health/cardio-store';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
 import { buildCurrentMealGooglePayloads } from '../meals/current-meal';
 import { CurrentMealEditLockedError, type CurrentMealDishRow, type CurrentMealIngredientRow, type CurrentMealNutrientRow, type CurrentMealSnapshot, type CurrentMealStore, type MealDishRow, type MealDraftRow, type MealIngredientRow, type MealNutrientRow, type MealNutritionProvenanceRow, type MealSyncGenerationRow, type MealSyncPointRow, type MealSyncPointStatus, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
@@ -96,6 +118,33 @@ function cloneCurrentMeal(row: CurrentMealSnapshot): CurrentMealSnapshot {
   };
 }
 
+function compositeKey(...parts: string[]): string {
+  return parts.join('\0');
+}
+
+function cloneCursor(row: HealthSyncCursor): HealthSyncCursor {
+  return {
+    ...row,
+    successfulWatermark: row.successfulWatermark ? new Date(row.successfulWatermark) : undefined,
+    nextAttemptAt: row.nextAttemptAt ? new Date(row.nextAttemptAt) : undefined,
+  };
+}
+
+function intervalOverlaps(start: string, end: string, fromUtc: string, toUtcExclusive?: string): boolean {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  const fromMs = Date.parse(fromUtc);
+  const toMs = toUtcExclusive === undefined ? Number.POSITIVE_INFINITY : Date.parse(toUtcExclusive);
+  return endMs > fromMs && startMs < toMs;
+}
+
+function inUtcRange(instant: string, fromUtc: string, toUtcExclusive?: string): boolean {
+  const value = Date.parse(instant);
+  const fromMs = Date.parse(fromUtc);
+  const toMs = toUtcExclusive === undefined ? Number.POSITIVE_INFINITY : Date.parse(toUtcExclusive);
+  return value >= fromMs && value < toMs;
+}
+
 const mealTypes = new Set<MealType>(['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK']);
 
 function parseEditorForCurrentMeal(editor: EditableMealDraft, mealId: string): EditableMealDraft & { mealType: MealType } {
@@ -152,6 +201,16 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
   const sessions = new Map<string, SessionRow>();
   const transactions = new Map<string, OauthTransactionRow>();
   const deletedHealthSnapshotUserIds: string[] = [];
+  const heartRateMinutes = new Map<string, HeartRateMinuteAggregate>();
+  const activityLevelIntervals = new Map<string, ReturnType<typeof parseActivityLevelInterval>>();
+  const heartRateZones = new Map<string, ReturnType<typeof parseDailyHeartRateZones>>();
+  const timeInZone = new Map<string, ReturnType<typeof parseDailyTimeInZone>>();
+  const exerciseIntervals = new Map<string, ReturnType<typeof parseExerciseInterval>>();
+  const dailyCardio = new Map<string, ReturnType<typeof parseDailyCardio>>();
+  const metricResults = new Map<string, ReturnType<typeof parseMetricResult>>();
+  const healthCursors = new Map<string, HealthSyncCursor>();
+  const sleepGoals = new Map<string, ReturnType<typeof parseSleepGoal>>();
+  const timeZoneHistory = new Map<string, HealthTimeZoneHistory>();
   let foodComposition: LocalTwFdaFood[] = [];
   let rootTransactionTail = Promise.resolve();
 
@@ -223,6 +282,16 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       sessions: new Map([...sessions].map(([id, row]) => [id, structuredClone(row)])),
       transactions: new Map([...transactions].map(([id, row]) => [id, structuredClone(row)])),
       deletedHealthSnapshotUserIds: [...deletedHealthSnapshotUserIds],
+      heartRateMinutes: new Map([...heartRateMinutes].map(([id, row]) => [id, structuredClone(row)])),
+      activityLevelIntervals: new Map([...activityLevelIntervals].map(([id, row]) => [id, structuredClone(row)])),
+      heartRateZones: new Map([...heartRateZones].map(([id, row]) => [id, structuredClone(row)])),
+      timeInZone: new Map([...timeInZone].map(([id, row]) => [id, structuredClone(row)])),
+      exerciseIntervals: new Map([...exerciseIntervals].map(([id, row]) => [id, structuredClone(row)])),
+      dailyCardio: new Map([...dailyCardio].map(([id, row]) => [id, structuredClone(row)])),
+      metricResults: new Map([...metricResults].map(([id, row]) => [id, structuredClone(row)])),
+      healthCursors: new Map([...healthCursors].map(([id, row]) => [id, cloneCursor(row)])),
+      sleepGoals: new Map([...sleepGoals].map(([id, row]) => [id, structuredClone(row)])),
+      timeZoneHistory: new Map([...timeZoneHistory].map(([id, row]) => [id, structuredClone(row)])),
       foodComposition: structuredClone(foodComposition),
     };
   }
@@ -254,6 +323,16 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
     restoreMap(sessions, state.sessions, (row) => structuredClone(row));
     restoreMap(transactions, state.transactions, (row) => structuredClone(row));
     deletedHealthSnapshotUserIds.splice(0, deletedHealthSnapshotUserIds.length, ...state.deletedHealthSnapshotUserIds);
+    restoreMap(heartRateMinutes, state.heartRateMinutes, (row) => structuredClone(row));
+    restoreMap(activityLevelIntervals, state.activityLevelIntervals, (row) => structuredClone(row));
+    restoreMap(heartRateZones, state.heartRateZones, (row) => structuredClone(row));
+    restoreMap(timeInZone, state.timeInZone, (row) => structuredClone(row));
+    restoreMap(exerciseIntervals, state.exerciseIntervals, (row) => structuredClone(row));
+    restoreMap(dailyCardio, state.dailyCardio, (row) => structuredClone(row));
+    restoreMap(metricResults, state.metricResults, (row) => structuredClone(row));
+    restoreMap(healthCursors, state.healthCursors, cloneCursor);
+    restoreMap(sleepGoals, state.sleepGoals, (row) => structuredClone(row));
+    restoreMap(timeZoneHistory, state.timeZoneHistory, (row) => structuredClone(row));
     foodComposition = structuredClone(state.foodComposition);
   }
 
@@ -581,6 +660,259 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         hasUnknownPoint: points.some((point) => point.status === 'unknown'),
         recoveryRequestedAt: recoveryRequestedAt ? new Date(recoveryRequestedAt) : undefined,
       };
+    },
+  };
+
+  function assertWindowUser<T extends { userId: string }>(userId: string, rows: T[] | undefined): T[] {
+    const list = rows ?? [];
+    for (const row of list) {
+      if (row.userId !== userId) {
+        throw new Error('health metrics write user mismatch');
+      }
+    }
+    return list;
+  }
+
+  async function applyHealthWindow(input: HealthMetricsWindowWrite): Promise<void> {
+    if (connections.get(input.connectionId)?.userId !== input.userId) {
+      throw new HealthMetricsConnectionMismatchError();
+    }
+    await healthMetrics.upsertMinutes(assertWindowUser(input.userId, input.minutes));
+    await healthMetrics.upsertActivityLevelIntervals(assertWindowUser(input.userId, input.activityLevelIntervals));
+    for (const row of assertWindowUser(input.userId, input.heartRateZones)) {
+      await healthMetrics.replaceHeartRateZones(row);
+    }
+    for (const row of assertWindowUser(input.userId, input.timeInZone)) {
+      await healthMetrics.replaceTimeInZone(row);
+    }
+    await healthMetrics.upsertExerciseIntervals(assertWindowUser(input.userId, input.exerciseIntervals));
+    for (const row of assertWindowUser(input.userId, input.dailyCardio)) {
+      await healthMetrics.upsertDailyCardio(row);
+    }
+    for (const row of assertWindowUser(input.userId, input.metricResults)) {
+      await healthMetrics.upsertMetricResult(row);
+    }
+    await healthMetrics.updateCursor({
+      connectionId: input.connectionId,
+      dataType: input.dataType,
+      ...input.cursor,
+    });
+  }
+
+  const healthMetrics: HealthMetricsStore = {
+    async ingestWindow(input) {
+      if (!options.transactionChild) {
+        return store.withTransaction((inner) => inner.healthMetrics.ingestWindow(input));
+      }
+      await applyHealthWindow(input);
+    },
+    async upsertMinutes(minutes) {
+      for (const row of minutes) {
+        const incoming = parseHeartRateMinuteAggregate(row);
+        const key = compositeKey(incoming.userId, incoming.sourceFamily, incoming.minuteStartUtc);
+        const existing = heartRateMinutes.get(key);
+        const merged = existing ? mergeHeartRateMinuteUpsert(existing, incoming) : incoming;
+        heartRateMinutes.set(key, structuredClone(merged));
+      }
+    },
+    async listMinutesByCivilDate(input) {
+      return [...heartRateMinutes.values()]
+        .filter((row) => row.userId === input.userId && row.civilDate === input.civilDate)
+        .sort((left, right) => left.minuteStartUtc.localeCompare(right.minuteStartUtc))
+        .map((row) => structuredClone(row));
+    },
+    async listMinutesInRange(input) {
+      return [...heartRateMinutes.values()]
+        .filter((row) => row.userId === input.userId && inUtcRange(row.minuteStartUtc, input.fromUtc, input.toUtcExclusive))
+        .sort((left, right) => left.minuteStartUtc.localeCompare(right.minuteStartUtc))
+        .map((row) => structuredClone(row));
+    },
+    async updateMinuteLocalAssociation(input) {
+      const key = compositeKey(input.userId, input.sourceFamily, input.minuteStartUtc);
+      const current = heartRateMinutes.get(key);
+      if (!current) return false;
+      heartRateMinutes.set(key, parseHeartRateMinuteAggregate({
+        ...current,
+        civilDate: input.civilDate,
+        ianaTimeZone: input.ianaTimeZone,
+        localMinuteOfDay: input.localMinuteOfDay,
+      }));
+      return true;
+    },
+    async upsertActivityLevelIntervals(intervals) {
+      for (const row of intervals) {
+        const parsed = parseActivityLevelInterval(row);
+        activityLevelIntervals.set(compositeKey(parsed.userId, parsed.sourceFamily, parsed.startTime), structuredClone(parsed));
+      }
+    },
+    async listActivityLevelIntervalsInRange(input) {
+      return [...activityLevelIntervals.values()]
+        .filter((row) => row.userId === input.userId && intervalOverlaps(row.startTime, row.endTime, input.fromUtc, input.toUtcExclusive))
+        .sort((left, right) => left.startTime.localeCompare(right.startTime))
+        .map((row) => structuredClone(row));
+    },
+    async replaceHeartRateZones(zones) {
+      const parsed = parseDailyHeartRateZones(zones);
+      heartRateZones.set(compositeKey(parsed.userId, parsed.sourceFamily, parsed.date), structuredClone(parsed));
+    },
+    async getHeartRateZones(input) {
+      const row = [...heartRateZones.values()].find((item) => item.userId === input.userId && item.date === input.civilDate);
+      return row ? structuredClone(row) : undefined;
+    },
+    async replaceTimeInZone(row) {
+      const parsed = parseDailyTimeInZone(row);
+      timeInZone.set(compositeKey(parsed.userId, parsed.sourceFamily, parsed.date), structuredClone(parsed));
+    },
+    async getTimeInZone(input) {
+      const row = [...timeInZone.values()].find((item) => item.userId === input.userId && item.date === input.civilDate);
+      return row ? structuredClone(row) : undefined;
+    },
+    async upsertExerciseIntervals(intervals) {
+      for (const row of intervals) {
+        const parsed = parseExerciseInterval(row);
+        exerciseIntervals.set(compositeKey(parsed.userId, parsed.sourceFamily, parsed.sourceRecordId), structuredClone(parsed));
+      }
+    },
+    async listExerciseIntervalsInRange(input) {
+      return [...exerciseIntervals.values()]
+        .filter((row) => row.userId === input.userId && intervalOverlaps(row.startTime, row.endTime, input.fromUtc, input.toUtcExclusive))
+        .sort((left, right) => left.startTime.localeCompare(right.startTime))
+        .map((row) => structuredClone(row));
+    },
+    async upsertDailyCardio(row) {
+      const parsed = parseDailyCardio(row);
+      dailyCardio.set(compositeKey(parsed.userId, parsed.date), structuredClone(parsed));
+    },
+    async getDailyCardio(input) {
+      const row = dailyCardio.get(compositeKey(input.userId, input.civilDate));
+      return row ? structuredClone(row) : undefined;
+    },
+    async listDailyCardio(input) {
+      return [...dailyCardio.values()]
+        .filter((row) => row.userId === input.userId && row.date >= input.fromCivilDate && row.date <= input.toCivilDate)
+        .sort((left, right) => left.date.localeCompare(right.date))
+        .map((row) => structuredClone(row));
+    },
+    async upsertMetricResult(row) {
+      const parsed = parseMetricResult(row);
+      metricResults.set(compositeKey(parsed.userId, parsed.civilDate, parsed.metricName, parsed.metricVersion), structuredClone(parsed));
+    },
+    async getMetricResult(input) {
+      const row = metricResults.get(compositeKey(
+        input.userId,
+        input.civilDate,
+        input.metricName,
+        input.metricVersion ?? WHOOP_STYLE_METRIC_VERSION,
+      ));
+      return row ? structuredClone(row) : undefined;
+    },
+    async listMetricResults(input) {
+      return [...metricResults.values()]
+        .filter((row) => row.userId === input.userId && row.civilDate === input.civilDate)
+        .sort((left, right) => left.metricName.localeCompare(right.metricName))
+        .map((row) => structuredClone(row));
+    },
+    async readCursor(input) {
+      const row = healthCursors.get(compositeKey(input.connectionId, input.dataType));
+      return row ? cloneCursor(row) : undefined;
+    },
+    async listCursors(input) {
+      return [...healthCursors.values()]
+        .filter((row) => row.connectionId === input.connectionId)
+        .sort((left, right) => left.dataType.localeCompare(right.dataType))
+        .map(cloneCursor);
+    },
+    async updateCursor(cursor) {
+      const parsed = parseHealthSyncCursor(cursor);
+      healthCursors.set(compositeKey(parsed.connectionId, parsed.dataType), cloneCursor(parsed));
+    },
+    async scheduleCursor(input) {
+      const parsed = parseHealthSyncCursor({
+        connectionId: input.connectionId,
+        dataType: input.dataType,
+        lastErrorCode: input.lastErrorCode,
+        retryCount: input.retryCount,
+        nextAttemptAt: input.nextAttemptAt,
+      });
+      const key = compositeKey(parsed.connectionId, parsed.dataType);
+      const current = healthCursors.get(key);
+      healthCursors.set(key, cloneCursor({
+        ...parsed,
+        successfulWatermark: current?.successfulWatermark,
+      }));
+    },
+    async listDueCursors(input) {
+      return [...healthCursors.values()]
+        .filter((row) => (
+          row.nextAttemptAt
+          && row.nextAttemptAt.getTime() <= input.now.getTime()
+          && (!input.connectionId || row.connectionId === input.connectionId)
+        ))
+        .sort((left, right) => {
+          const byDue = left.nextAttemptAt!.getTime() - right.nextAttemptAt!.getTime();
+          return byDue || left.connectionId.localeCompare(right.connectionId) || left.dataType.localeCompare(right.dataType);
+        })
+        .map(cloneCursor);
+    },
+    async insertSleepGoal(goal) {
+      const parsed = parseSleepGoal(goal);
+      const key = compositeKey(parsed.userId, parsed.effectiveCivilDate);
+      if (sleepGoals.has(key)) throw new SleepGoalConflictError();
+      sleepGoals.set(key, structuredClone(parsed));
+    },
+    async lookupSleepGoal(input) {
+      const match = [...sleepGoals.values()]
+        .filter((row) => row.userId === input.userId && row.effectiveCivilDate <= input.civilDate)
+        .sort((left, right) => right.effectiveCivilDate.localeCompare(left.effectiveCivilDate))[0];
+      return match ? structuredClone(match) : undefined;
+    },
+    async insertTimeZoneHistory(row) {
+      const parsed = parseHealthTimeZoneHistory(row);
+      const key = compositeKey(parsed.userId, parsed.effectiveAt);
+      if (timeZoneHistory.has(key)) throw new TimeZoneHistoryConflictError();
+      if (parsed.isBackfillAnchor) {
+        for (const existing of timeZoneHistory.values()) {
+          if (existing.userId === parsed.userId && existing.isBackfillAnchor) {
+            throw new TimeZoneHistoryConflictError();
+          }
+        }
+      }
+      timeZoneHistory.set(key, structuredClone(parsed));
+    },
+    async lookupTimeZoneHistory(input) {
+      const at = Date.parse(input.at);
+      const match = [...timeZoneHistory.values()]
+        .filter((row) => row.userId === input.userId && Date.parse(row.effectiveAt) <= at)
+        .sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
+      return match ? structuredClone(match) : undefined;
+    },
+    async listTimeZoneHistory(userId) {
+      return [...timeZoneHistory.values()]
+        .filter((row) => row.userId === userId)
+        .sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt))
+        .map((row) => structuredClone(row));
+    },
+    async deleteForUser(userId) {
+      const removeUser = <T extends { userId: string }>(map: Map<string, T>) => {
+        for (const [key, row] of map) {
+          if (row.userId === userId) map.delete(key);
+        }
+      };
+      removeUser(heartRateMinutes);
+      removeUser(activityLevelIntervals);
+      removeUser(heartRateZones);
+      removeUser(timeInZone);
+      removeUser(exerciseIntervals);
+      removeUser(dailyCardio);
+      removeUser(metricResults);
+      removeUser(sleepGoals);
+      removeUser(timeZoneHistory);
+      const connectionIds = new Set(
+        [...connections.values()].filter((row) => row.userId === userId).map((row) => row.id),
+      );
+      for (const [key, row] of healthCursors) {
+        if (connectionIds.has(row.connectionId)) healthCursors.delete(key);
+      }
     },
   };
 
@@ -952,6 +1284,7 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         deletedHealthSnapshotUserIds.push(userId);
       },
     },
+    healthMetrics,
     foodComposition: {
       async findExactFood(nameZh: string): Promise<LocalTwFdaFood | undefined> {
         return resolveExactTwFdaFood(nameZh, foodComposition);

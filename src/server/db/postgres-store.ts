@@ -4,7 +4,37 @@ import { randomUUID } from 'node:crypto';
 
 import { editableMealDraftSchema, fromInternalNutrientAmount, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import { parseVisionMeal } from '../../domain/meal-vision';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, MealSyncStore, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, SessionRow, SyncLeaseRelease } from '../auth/types';
+import {
+  HealthMetricsConnectionMismatchError,
+  isUniqueViolation,
+  mapActivityLevelIntervalRow,
+  mapDailyCardioRow,
+  mapDailyHeartRateZonesRow,
+  mapDailyTimeInZoneRow,
+  mapExerciseIntervalRow,
+  mapHealthSyncCursorRow,
+  mapHealthTimeZoneHistoryRow,
+  mapHeartRateMinuteAggregateRow,
+  mapMetricResultRow,
+  mapSleepGoalRow,
+  mergeHeartRateMinuteUpsert,
+  parseActivityLevelInterval,
+  parseDailyCardio,
+  parseDailyHeartRateZones,
+  parseDailyTimeInZone,
+  parseExerciseInterval,
+  parseHealthSyncCursor,
+  parseHealthTimeZoneHistory,
+  parseHeartRateMinuteAggregate,
+  parseMetricResult,
+  parseSleepGoal,
+  SleepGoalConflictError,
+  TimeZoneHistoryConflictError,
+  type HealthMetricsStore,
+  type HealthMetricsWindowWrite,
+} from '../health/cardio-store';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
 import { buildCurrentMealGooglePayloads } from '../meals/current-meal';
 import { CurrentMealEditLockedError, type CurrentMealSnapshot, type CurrentMealStore, type CurrentMealSyncState, type MealDraftRow, type MealSyncGenerationPhase, type MealSyncGenerationRow, type MealSyncPointRow, type MealSyncPointStatus, type MealType, type MealVersionRow, type OutboxRow } from '../meals/types';
@@ -1282,6 +1312,489 @@ function storeFor(queryable: Queryable): AuthStore {
     },
   };
 
+  function assertWindowUser<T extends { userId: string }>(userId: string, rows: T[] | undefined): T[] {
+    const list = rows ?? [];
+    for (const row of list) {
+      if (row.userId !== userId) throw new Error('health metrics write user mismatch');
+    }
+    return list;
+  }
+
+  async function applyHealthWindow(metrics: HealthMetricsStore, input: HealthMetricsWindowWrite): Promise<void> {
+    await metrics.upsertMinutes(assertWindowUser(input.userId, input.minutes));
+    await metrics.upsertActivityLevelIntervals(assertWindowUser(input.userId, input.activityLevelIntervals));
+    for (const row of assertWindowUser(input.userId, input.heartRateZones)) await metrics.replaceHeartRateZones(row);
+    for (const row of assertWindowUser(input.userId, input.timeInZone)) await metrics.replaceTimeInZone(row);
+    await metrics.upsertExerciseIntervals(assertWindowUser(input.userId, input.exerciseIntervals));
+    for (const row of assertWindowUser(input.userId, input.dailyCardio)) await metrics.upsertDailyCardio(row);
+    for (const row of assertWindowUser(input.userId, input.metricResults)) await metrics.upsertMetricResult(row);
+    await metrics.updateCursor({
+      connectionId: input.connectionId,
+      dataType: input.dataType,
+      ...input.cursor,
+    });
+  }
+
+  const healthMetrics: HealthMetricsStore = {
+    async ingestWindow(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.healthMetrics.ingestWindow(input));
+      }
+      const owner = await queryable.query(
+        'SELECT user_id FROM google_health_connections WHERE id = $1',
+        [input.connectionId],
+      );
+      if (owner.rows[0]?.user_id !== input.userId) {
+        throw new HealthMetricsConnectionMismatchError();
+      }
+      await applyHealthWindow(healthMetrics, input);
+    },
+    async upsertMinutes(minutes) {
+      for (const row of minutes) {
+        const incoming = parseHeartRateMinuteAggregate(row);
+        const existingResult = await queryable.query(
+          `SELECT * FROM heart_rate_minute_aggregates
+           WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3`,
+          [incoming.userId, incoming.sourceFamily, new Date(incoming.minuteStartUtc)],
+        );
+        const merged = existingResult.rows[0]
+          ? mergeHeartRateMinuteUpsert(mapHeartRateMinuteAggregateRow(existingResult.rows[0]), incoming)
+          : incoming;
+        await queryable.query(
+          `INSERT INTO heart_rate_minute_aggregates (
+            user_id, source_family, minute_start_utc, civil_date, utc_offset, iana_time_zone,
+            local_minute_of_day, avg_bpm, min_bpm, max_bpm, sample_count, coverage_seconds, activity_level
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          ON CONFLICT (user_id, source_family, minute_start_utc) DO UPDATE SET
+            civil_date = EXCLUDED.civil_date,
+            utc_offset = EXCLUDED.utc_offset,
+            iana_time_zone = EXCLUDED.iana_time_zone,
+            local_minute_of_day = EXCLUDED.local_minute_of_day,
+            avg_bpm = EXCLUDED.avg_bpm,
+            min_bpm = EXCLUDED.min_bpm,
+            max_bpm = EXCLUDED.max_bpm,
+            sample_count = EXCLUDED.sample_count,
+            coverage_seconds = EXCLUDED.coverage_seconds,
+            activity_level = EXCLUDED.activity_level`,
+          [
+            merged.userId,
+            merged.sourceFamily,
+            new Date(merged.minuteStartUtc),
+            merged.civilDate,
+            merged.utcOffsetMinutes,
+            merged.ianaTimeZone,
+            merged.localMinuteOfDay,
+            merged.avgBpm,
+            merged.minBpm,
+            merged.maxBpm,
+            merged.sampleCount,
+            merged.coverageSeconds,
+            merged.activityLevel,
+          ],
+        );
+      }
+    },
+    async listMinutesByCivilDate(input) {
+      const result = await queryable.query(
+        `SELECT * FROM heart_rate_minute_aggregates
+         WHERE user_id = $1 AND civil_date = $2
+         ORDER BY minute_start_utc ASC`,
+        [input.userId, input.civilDate],
+      );
+      return result.rows.map(mapHeartRateMinuteAggregateRow);
+    },
+    async listMinutesInRange(input) {
+      const result = await queryable.query(
+        `SELECT * FROM heart_rate_minute_aggregates
+         WHERE user_id = $1
+           AND minute_start_utc >= $2
+           AND ($3::timestamptz IS NULL OR minute_start_utc < $3)
+         ORDER BY minute_start_utc ASC`,
+        [input.userId, new Date(input.fromUtc), input.toUtcExclusive ? new Date(input.toUtcExclusive) : null],
+      );
+      return result.rows.map(mapHeartRateMinuteAggregateRow);
+    },
+    async updateMinuteLocalAssociation(input) {
+      const existingResult = await queryable.query(
+        `SELECT * FROM heart_rate_minute_aggregates
+         WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3`,
+        [input.userId, input.sourceFamily, new Date(input.minuteStartUtc)],
+      );
+      const existingRow = existingResult.rows[0];
+      if (!existingRow) return false;
+      const merged = parseHeartRateMinuteAggregate({
+        ...mapHeartRateMinuteAggregateRow(existingRow),
+        civilDate: input.civilDate,
+        ianaTimeZone: input.ianaTimeZone,
+        localMinuteOfDay: input.localMinuteOfDay,
+      });
+      const result = await queryable.query(
+        `UPDATE heart_rate_minute_aggregates
+         SET civil_date = $4, iana_time_zone = $5, local_minute_of_day = $6
+         WHERE user_id = $1 AND source_family = $2 AND minute_start_utc = $3
+         RETURNING user_id`,
+        [merged.userId, merged.sourceFamily, new Date(merged.minuteStartUtc), merged.civilDate, merged.ianaTimeZone, merged.localMinuteOfDay],
+      );
+      return (result.rowCount ?? 0) === 1;
+    },
+    async upsertActivityLevelIntervals(intervals) {
+      for (const row of intervals) {
+        const parsed = parseActivityLevelInterval(row);
+        await queryable.query(
+          `INSERT INTO activity_level_intervals (
+            user_id, source_family, interval_start_utc, interval_end_utc, activity_level_type
+          ) VALUES ($1,$2,$3,$4,$5)
+          ON CONFLICT (user_id, source_family, interval_start_utc) DO UPDATE SET
+            interval_end_utc = EXCLUDED.interval_end_utc,
+            activity_level_type = EXCLUDED.activity_level_type`,
+          [
+            parsed.userId,
+            parsed.sourceFamily,
+            new Date(parsed.startTime),
+            new Date(parsed.endTime),
+            parsed.activityLevelType,
+          ],
+        );
+      }
+    },
+    async listActivityLevelIntervalsInRange(input) {
+      const result = await queryable.query(
+        `SELECT * FROM activity_level_intervals
+         WHERE user_id = $1
+           AND interval_end_utc > $2
+           AND ($3::timestamptz IS NULL OR interval_start_utc < $3)
+         ORDER BY interval_start_utc ASC`,
+        [input.userId, new Date(input.fromUtc), input.toUtcExclusive ? new Date(input.toUtcExclusive) : null],
+      );
+      return result.rows.map(mapActivityLevelIntervalRow);
+    },
+    async replaceHeartRateZones(zones) {
+      const parsed = parseDailyHeartRateZones(zones);
+      await queryable.query(
+        `INSERT INTO daily_heart_rate_zones (user_id, source_family, civil_date, zones, received_at)
+         VALUES ($1,$2,$3,$4::jsonb, now())
+         ON CONFLICT (user_id, source_family, civil_date) DO UPDATE SET
+           zones = EXCLUDED.zones,
+           received_at = EXCLUDED.received_at`,
+        [parsed.userId, parsed.sourceFamily, parsed.date, JSON.stringify(parsed.zones)],
+      );
+    },
+    async getHeartRateZones(input) {
+      const result = await queryable.query(
+        `SELECT * FROM daily_heart_rate_zones
+         WHERE user_id = $1 AND civil_date = $2 AND source_family = 'google-wearables'`,
+        [input.userId, input.civilDate],
+      );
+      return result.rows[0] ? mapDailyHeartRateZonesRow(result.rows[0]) : undefined;
+    },
+    async replaceTimeInZone(row) {
+      const parsed = parseDailyTimeInZone(row);
+      await queryable.query(
+        `INSERT INTO daily_time_in_zone (
+          user_id, source_family, civil_date, light_minutes, moderate_minutes, vigorous_minutes, peak_minutes
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (user_id, source_family, civil_date) DO UPDATE SET
+           light_minutes = EXCLUDED.light_minutes,
+           moderate_minutes = EXCLUDED.moderate_minutes,
+           vigorous_minutes = EXCLUDED.vigorous_minutes,
+           peak_minutes = EXCLUDED.peak_minutes`,
+        [
+          parsed.userId,
+          parsed.sourceFamily,
+          parsed.date,
+          parsed.minutes.light,
+          parsed.minutes.moderate,
+          parsed.minutes.vigorous,
+          parsed.minutes.peak,
+        ],
+      );
+    },
+    async getTimeInZone(input) {
+      const result = await queryable.query(
+        `SELECT * FROM daily_time_in_zone
+         WHERE user_id = $1 AND civil_date = $2 AND source_family = 'google-wearables'`,
+        [input.userId, input.civilDate],
+      );
+      return result.rows[0] ? mapDailyTimeInZoneRow(result.rows[0]) : undefined;
+    },
+    async upsertExerciseIntervals(intervals) {
+      for (const row of intervals) {
+        const parsed = parseExerciseInterval(row);
+        await queryable.query(
+          `INSERT INTO exercise_intervals (
+            user_id, source_family, source_record_id, start_time_utc, end_time_utc, utc_offset, civil_date
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+          ON CONFLICT (user_id, source_family, source_record_id) DO UPDATE SET
+            start_time_utc = EXCLUDED.start_time_utc,
+            end_time_utc = EXCLUDED.end_time_utc,
+            utc_offset = EXCLUDED.utc_offset,
+            civil_date = EXCLUDED.civil_date`,
+          [
+            parsed.userId,
+            parsed.sourceFamily,
+            parsed.sourceRecordId,
+            new Date(parsed.startTime),
+            new Date(parsed.endTime),
+            parsed.utcOffsetMinutes,
+            parsed.civilDate,
+          ],
+        );
+      }
+    },
+    async listExerciseIntervalsInRange(input) {
+      const result = await queryable.query(
+        `SELECT * FROM exercise_intervals
+         WHERE user_id = $1
+           AND end_time_utc > $2
+           AND ($3::timestamptz IS NULL OR start_time_utc < $3)
+         ORDER BY start_time_utc ASC`,
+        [input.userId, new Date(input.fromUtc), input.toUtcExclusive ? new Date(input.toUtcExclusive) : null],
+      );
+      return result.rows.map(mapExerciseIntervalRow);
+    },
+    async upsertDailyCardio(row) {
+      const parsed = parseDailyCardio(row);
+      await queryable.query(
+        `INSERT INTO daily_cardio (
+          user_id, civil_date, status, strain, dose,
+          light_minutes, moderate_minutes, vigorous_minutes, peak_minutes,
+          known_context_minutes, raw_coverage_minutes, attributed_minutes, metric_version
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (user_id, civil_date) DO UPDATE SET
+           status = EXCLUDED.status,
+           strain = EXCLUDED.strain,
+           dose = EXCLUDED.dose,
+           light_minutes = EXCLUDED.light_minutes,
+           moderate_minutes = EXCLUDED.moderate_minutes,
+           vigorous_minutes = EXCLUDED.vigorous_minutes,
+           peak_minutes = EXCLUDED.peak_minutes,
+           known_context_minutes = EXCLUDED.known_context_minutes,
+           raw_coverage_minutes = EXCLUDED.raw_coverage_minutes,
+           attributed_minutes = EXCLUDED.attributed_minutes,
+           metric_version = EXCLUDED.metric_version`,
+        [
+          parsed.userId,
+          parsed.date,
+          parsed.status,
+          parsed.strain,
+          parsed.dose,
+          parsed.zoneMinutes.light,
+          parsed.zoneMinutes.moderate,
+          parsed.zoneMinutes.vigorous,
+          parsed.zoneMinutes.peak,
+          parsed.knownContextMinutes,
+          parsed.rawCoverageMinutes,
+          parsed.attributedMinutes,
+          parsed.metricVersion,
+        ],
+      );
+    },
+    async getDailyCardio(input) {
+      const result = await queryable.query(
+        'SELECT * FROM daily_cardio WHERE user_id = $1 AND civil_date = $2',
+        [input.userId, input.civilDate],
+      );
+      return result.rows[0] ? mapDailyCardioRow(result.rows[0]) : undefined;
+    },
+    async listDailyCardio(input) {
+      const result = await queryable.query(
+        `SELECT * FROM daily_cardio
+         WHERE user_id = $1 AND civil_date >= $2 AND civil_date <= $3
+         ORDER BY civil_date ASC`,
+        [input.userId, input.fromCivilDate, input.toCivilDate],
+      );
+      return result.rows.map(mapDailyCardioRow);
+    },
+    async upsertMetricResult(row) {
+      const parsed = parseMetricResult(row);
+      await queryable.query(
+        `INSERT INTO metric_results (
+          user_id, civil_date, metric_name, metric_version, score, status, quality, reason,
+          evidence, source, coverage, computed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb, now())
+         ON CONFLICT (user_id, civil_date, metric_name, metric_version) DO UPDATE SET
+           score = EXCLUDED.score,
+           status = EXCLUDED.status,
+           quality = EXCLUDED.quality,
+           reason = EXCLUDED.reason,
+           evidence = EXCLUDED.evidence,
+           source = EXCLUDED.source,
+           coverage = EXCLUDED.coverage,
+           computed_at = EXCLUDED.computed_at`,
+        [
+          parsed.userId,
+          parsed.civilDate,
+          parsed.metricName,
+          parsed.metricVersion,
+          parsed.score,
+          parsed.status,
+          parsed.quality,
+          parsed.reason,
+          JSON.stringify(parsed.evidence),
+          JSON.stringify(parsed.source),
+          JSON.stringify(parsed.coverage),
+        ],
+      );
+    },
+    async getMetricResult(input) {
+      const result = await queryable.query(
+        `SELECT * FROM metric_results
+         WHERE user_id = $1 AND civil_date = $2 AND metric_name = $3 AND metric_version = $4`,
+        [input.userId, input.civilDate, input.metricName, input.metricVersion ?? WHOOP_STYLE_METRIC_VERSION],
+      );
+      return result.rows[0] ? mapMetricResultRow(result.rows[0]) : undefined;
+    },
+    async listMetricResults(input) {
+      const result = await queryable.query(
+        `SELECT * FROM metric_results
+         WHERE user_id = $1 AND civil_date = $2
+         ORDER BY metric_name ASC`,
+        [input.userId, input.civilDate],
+      );
+      return result.rows.map(mapMetricResultRow);
+    },
+    async readCursor(input) {
+      const result = await queryable.query(
+        'SELECT * FROM health_sync_cursors WHERE connection_id = $1 AND data_type = $2',
+        [input.connectionId, input.dataType],
+      );
+      return result.rows[0] ? mapHealthSyncCursorRow(result.rows[0]) : undefined;
+    },
+    async listCursors(input) {
+      const result = await queryable.query(
+        'SELECT * FROM health_sync_cursors WHERE connection_id = $1 ORDER BY data_type ASC',
+        [input.connectionId],
+      );
+      return result.rows.map(mapHealthSyncCursorRow);
+    },
+    async updateCursor(cursor) {
+      const parsed = parseHealthSyncCursor(cursor);
+      await queryable.query(
+        `INSERT INTO health_sync_cursors (
+          connection_id, data_type, successful_watermark, last_error_code, retry_count, next_attempt_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6, now())
+         ON CONFLICT (connection_id, data_type) DO UPDATE SET
+           successful_watermark = EXCLUDED.successful_watermark,
+           last_error_code = EXCLUDED.last_error_code,
+           retry_count = EXCLUDED.retry_count,
+           next_attempt_at = EXCLUDED.next_attempt_at,
+           updated_at = EXCLUDED.updated_at`,
+        [
+          parsed.connectionId,
+          parsed.dataType,
+          parsed.successfulWatermark ?? null,
+          parsed.lastErrorCode ?? null,
+          parsed.retryCount,
+          parsed.nextAttemptAt ?? null,
+        ],
+      );
+    },
+    async scheduleCursor(input) {
+      const parsed = parseHealthSyncCursor({
+        connectionId: input.connectionId,
+        dataType: input.dataType,
+        lastErrorCode: input.lastErrorCode,
+        retryCount: input.retryCount,
+        nextAttemptAt: input.nextAttemptAt,
+      });
+      await queryable.query(
+        `INSERT INTO health_sync_cursors (
+          connection_id, data_type, last_error_code, retry_count, next_attempt_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5, now())
+         ON CONFLICT (connection_id, data_type) DO UPDATE SET
+           last_error_code = EXCLUDED.last_error_code,
+           retry_count = EXCLUDED.retry_count,
+           next_attempt_at = EXCLUDED.next_attempt_at,
+           updated_at = EXCLUDED.updated_at`,
+        [parsed.connectionId, parsed.dataType, parsed.lastErrorCode ?? null, parsed.retryCount, parsed.nextAttemptAt ?? null],
+      );
+    },
+    async listDueCursors(input) {
+      const result = await queryable.query(
+        `SELECT * FROM health_sync_cursors
+         WHERE next_attempt_at IS NOT NULL AND next_attempt_at <= $1
+           AND ($2::uuid IS NULL OR connection_id = $2)
+         ORDER BY next_attempt_at ASC, connection_id ASC, data_type ASC`,
+        [input.now, input.connectionId ?? null],
+      );
+      return result.rows.map(mapHealthSyncCursorRow);
+    },
+    async insertSleepGoal(goal) {
+      const parsed = parseSleepGoal(goal);
+      try {
+        await queryable.query(
+          `INSERT INTO user_sleep_goal_history (user_id, effective_civil_date, goal_minutes)
+           VALUES ($1,$2,$3)`,
+          [parsed.userId, parsed.effectiveCivilDate, parsed.goalMinutes],
+        );
+      } catch (error) {
+        if (isUniqueViolation(error)) throw new SleepGoalConflictError();
+        throw error;
+      }
+    },
+    async lookupSleepGoal(input) {
+      const result = await queryable.query(
+        `SELECT * FROM user_sleep_goal_history
+         WHERE user_id = $1 AND effective_civil_date <= $2
+         ORDER BY effective_civil_date DESC
+         LIMIT 1`,
+        [input.userId, input.civilDate],
+      );
+      return result.rows[0] ? mapSleepGoalRow(result.rows[0]) : undefined;
+    },
+    async insertTimeZoneHistory(row) {
+      const parsed = parseHealthTimeZoneHistory(row);
+      try {
+        await queryable.query(
+          `INSERT INTO user_health_time_zone_history (user_id, effective_at, iana_time_zone, is_backfill_anchor)
+           VALUES ($1,$2,$3,$4)`,
+          [parsed.userId, new Date(parsed.effectiveAt), parsed.ianaTimeZone, parsed.isBackfillAnchor],
+        );
+      } catch (error) {
+        if (isUniqueViolation(error)) throw new TimeZoneHistoryConflictError();
+        throw error;
+      }
+    },
+    async lookupTimeZoneHistory(input) {
+      const result = await queryable.query(
+        `SELECT * FROM user_health_time_zone_history
+         WHERE user_id = $1 AND effective_at <= $2
+         ORDER BY effective_at DESC
+         LIMIT 1`,
+        [input.userId, new Date(input.at)],
+      );
+      return result.rows[0] ? mapHealthTimeZoneHistoryRow(result.rows[0]) : undefined;
+    },
+    async listTimeZoneHistory(userId) {
+      const result = await queryable.query(
+        `SELECT * FROM user_health_time_zone_history
+         WHERE user_id = $1
+         ORDER BY effective_at ASC`,
+        [userId],
+      );
+      return result.rows.map(mapHealthTimeZoneHistoryRow);
+    },
+    async deleteForUser(userId) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.healthMetrics.deleteForUser(userId));
+      }
+      await queryable.query('DELETE FROM heart_rate_minute_aggregates WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM activity_level_intervals WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM daily_heart_rate_zones WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM daily_time_in_zone WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM exercise_intervals WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM daily_cardio WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM metric_results WHERE user_id = $1', [userId]);
+      await queryable.query(
+        `DELETE FROM health_sync_cursors
+         WHERE connection_id IN (SELECT id FROM google_health_connections WHERE user_id = $1)`,
+        [userId],
+      );
+      await queryable.query('DELETE FROM user_sleep_goal_history WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM user_health_time_zone_history WHERE user_id = $1', [userId]);
+    },
+  };
+
   store = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
       const pool = canStartTransaction(queryable) ? queryable : undefined;
@@ -1487,6 +2000,7 @@ function storeFor(queryable: Queryable): AuthStore {
         await queryable.query('DELETE FROM health_snapshots WHERE user_id = $1', [userId]);
       },
     },
+    healthMetrics,
     foodComposition,
     nutritionOutbox,
     transactions: {

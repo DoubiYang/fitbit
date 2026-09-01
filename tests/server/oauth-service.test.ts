@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import {
+  parseActivityLevelInterval,
+  parseDailyCardio,
+  parseDailyHeartRateZones,
+  parseDailyTimeInZone,
+  parseExerciseInterval,
+  parseHeartRateMinuteAggregate,
+  parseMetricResult,
+  parseSleepGoal,
+} from '../../src/domain/cardio-records';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { completeGoogleOAuth, disconnectUser, readSessionUserId, startGoogleOAuth } from '../../src/server/auth/oauth-service';
 import { REQUESTED_SCOPES } from '../../src/server/auth/scopes';
 import type { GoogleOAuthClient, GoogleTokenResponse } from '../../src/server/auth/types';
@@ -253,6 +264,85 @@ test('two users only read their own connection', async () => {
   const other = await store.connections.findByHealthUserId('health-1');
   assert.equal(own?.healthUserId, 'health-2');
   assert.notEqual(own?.userId, other?.userId);
+});
+
+test('disconnect deletes cardio metrics in the same transaction as snapshots and credentials', async () => {
+  const store = createMemoryStore();
+  const google = googleClient();
+  const first = await startAndCallback({ store, google });
+  const userId = (await readSessionUserId(store, first.sessionToken, now))!;
+  const connection = (await store.connections.findByUserId(userId))!;
+  const sourceFamily = 'google-wearables' as const;
+  const civilDate = '2026-08-22';
+  const zones = {
+    LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
+    MODERATE: { minBeatsPerMinute: 117, maxBeatsPerMinute: 136 },
+    VIGOROUS: { minBeatsPerMinute: 137, maxBeatsPerMinute: 155 },
+    PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
+  };
+
+  await store.healthMetrics.ingestWindow({
+    userId,
+    connectionId: connection.id,
+    dataType: 'heart-rate',
+    minutes: [parseHeartRateMinuteAggregate({
+      userId, sourceFamily, minuteStartUtc: '2026-08-22T12:00:00.000Z', civilDate,
+      utcOffsetMinutes: 480, ianaTimeZone: null, localMinuteOfDay: 1200,
+      avgBpm: 110, minBpm: 110, maxBpm: 110, sampleCount: 8, coverageSeconds: 60, activityLevel: 'LIGHTLY_ACTIVE',
+    })],
+    activityLevelIntervals: [parseActivityLevelInterval({
+      userId, sourceFamily, startTime: '2026-08-22T12:00:00.000Z', endTime: '2026-08-22T12:01:00.000Z',
+      activityLevelType: 'LIGHTLY_ACTIVE',
+    })],
+    heartRateZones: [parseDailyHeartRateZones({ userId, sourceFamily, date: civilDate, zones })],
+    timeInZone: [parseDailyTimeInZone({
+      userId, sourceFamily, date: civilDate, minutes: { light: 400, moderate: 20, vigorous: 5, peak: 0 },
+    })],
+    exerciseIntervals: [parseExerciseInterval({
+      userId, sourceFamily, sourceRecordId: 'exercise-1',
+      startTime: '2026-08-22T13:00:00.000Z', endTime: '2026-08-22T13:30:00.000Z',
+      utcOffsetMinutes: 480, civilDate,
+    })],
+    dailyCardio: [parseDailyCardio({
+      userId, date: civilDate, status: 'complete', strain: 8.4, dose: 70,
+      zoneMinutes: { light: 12, moderate: 8, vigorous: 4, peak: 0 },
+      knownContextMinutes: 600, rawCoverageMinutes: 610, attributedMinutes: 24,
+      metricVersion: WHOOP_STYLE_METRIC_VERSION,
+    })],
+    metricResults: [parseMetricResult({
+      userId, civilDate, metricName: 'strain', metricVersion: WHOOP_STYLE_METRIC_VERSION,
+      score: 8.4, status: 'complete', quality: null, reason: null,
+      evidence: [{ label: 'dose', date: civilDate, value: 70 }],
+      source: {
+        heartRateZones: true, activityLevel: true, exercise: true, sleep: false, hrv: false, rhr: false,
+        sleepGoal: false, timeZone: 'missing',
+      },
+      coverage: {
+        knownContextMinutes: 600, rawHeartRateMinutes: 610, attributedMinutes: 24,
+        lastKnownContextAt: '2026-08-22T15:50:00.000Z',
+      },
+    })],
+    cursor: { successfulWatermark: now, lastErrorCode: undefined, retryCount: 0, nextAttemptAt: undefined },
+  });
+  await store.healthMetrics.insertSleepGoal(parseSleepGoal({ userId, goalMinutes: 480, effectiveCivilDate: '2026-08-23' }));
+  await store.healthMetrics.insertTimeZoneHistory({
+    userId, ianaTimeZone: 'Asia/Shanghai', effectiveAt: '2026-08-01T00:00:00.000Z', isBackfillAnchor: true,
+  });
+
+  await disconnectUser({ store, google, config: oauthConfig(), userId, now });
+
+  assert.equal((await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate })).length, 0);
+  assert.equal((await store.healthMetrics.listActivityLevelIntervalsInRange({ userId, fromUtc: '2026-08-22T00:00:00.000Z' })).length, 0);
+  assert.equal(await store.healthMetrics.getHeartRateZones({ userId, civilDate }), undefined);
+  assert.equal(await store.healthMetrics.getTimeInZone({ userId, civilDate }), undefined);
+  assert.equal((await store.healthMetrics.listExerciseIntervalsInRange({ userId, fromUtc: '2026-08-22T00:00:00.000Z' })).length, 0);
+  assert.equal(await store.healthMetrics.getDailyCardio({ userId, civilDate }), undefined);
+  assert.equal((await store.healthMetrics.listMetricResults({ userId, civilDate })).length, 0);
+  assert.equal(await store.healthMetrics.readCursor({ connectionId: connection.id, dataType: 'heart-rate' }), undefined);
+  assert.equal(await store.healthMetrics.lookupSleepGoal({ userId, civilDate: '2026-08-23' }), undefined);
+  assert.equal(await store.healthMetrics.lookupTimeZoneHistory({ userId, at: '2026-08-22T00:00:00.000Z' }), undefined);
+  assert.deepEqual(store.deletedHealthSnapshotUserIds, [userId]);
+  assert.equal((await store.connections.findByUserId(userId))?.status, 'disconnected');
 });
 
 test('disconnect still clears local credentials when Google revoke fails', async () => {

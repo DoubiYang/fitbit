@@ -313,6 +313,36 @@ h3 {
   color: var(--sage-deep);
 }
 
+.quality[data-quality="provisional"],
+.quality[data-quality="timezone_ambiguous"],
+.quality[data-quality="incomplete"],
+.quality[data-quality="unavailable"] {
+  color: var(--caution);
+}
+
+.quality[data-quality="complete"],
+.quality[data-quality="high"] {
+  color: var(--success);
+}
+
+.settings-form {
+  display: grid;
+  gap: 0.875rem;
+}
+
+.settings-form label {
+  display: grid;
+  gap: 0.4rem;
+  color: #536762;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.settings-form input {
+  max-width: 12rem;
+  padding: 0.55rem 0.8rem;
+}
+
 .metric-card__score {
   font-size: clamp(2.2rem, 6vw, 3.25rem);
   font-variant-numeric: tabular-nums;
