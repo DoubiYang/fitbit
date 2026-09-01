@@ -831,3 +831,161 @@ test('a failed snapshot keeps Recovery provisional from the previous snapshot sy
   assert.ok(recovery);
   assert.equal(recovery.quality, 'provisional');
 });
+
+test('partial snapshot success does not mark Recovery fresh before a complete snapshot succeeds', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const historyDates = priorDates('2026-08-23', 28);
+  const previous: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [
+      ...historyDates.map((date, index) => ({
+        userId: 'u1',
+        source: 'google_health' as const,
+        sourceRecordId: `hrv-${date}`,
+        date,
+        valueMs: 40 + (index % 5),
+      })),
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 55 },
+    ],
+    dailyRhr: [
+      ...historyDates.map((date, index) => ({
+        userId: 'u1',
+        source: 'google_health' as const,
+        sourceRecordId: `rhr-${date}`,
+        date,
+        valueBpm: 50 + (index % 4),
+      })),
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'rhr-23', date: '2026-08-23', valueBpm: 52 },
+    ],
+  };
+  const api = createFakeApi({
+    'heart-rate': [
+      [
+        {
+          heartRate: {
+            sampleTime: { physicalTime: '2026-08-23T12:00:00.000Z', utcOffset: '0s' },
+            beatsPerMinute: '70',
+          },
+        },
+      ],
+    ],
+  });
+  const originalList = api.listDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    if (input.dataType === 'sleep') {
+      throw new Error('health api 429');
+    }
+    return originalList(input);
+  };
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now,
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => ({ records: previous, syncedAt: now }),
+    loadRecords: async () => previous,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId: 'u1',
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.ok(recovery);
+  assert.equal(recovery.quality, 'provisional');
+  assert.equal((await store.connections.findByUserId('u1'))?.lastSuccessfulSyncAt, undefined);
+});
+
+test('an incremental snapshot merge recomputes only dates changed in its 48-hour window', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const dates = priorDates('2026-08-25', 35);
+  const previous: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: dates.map((date, index) => ({
+      userId: 'u1',
+      source: 'google_health' as const,
+      sourceRecordId: `hrv-${date}`,
+      date,
+      valueMs: 40 + (index % 4),
+    })),
+    dailyRhr: dates.map((date, index) => ({
+      userId: 'u1',
+      source: 'google_health' as const,
+      sourceRecordId: `rhr-${date}`,
+      date,
+      valueBpm: 50 + (index % 4),
+    })),
+  };
+  for (const dataType of [
+    'sleep',
+    'daily-heart-rate-variability',
+    'daily-resting-heart-rate',
+  ] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId: 'c1',
+      dataType,
+      successfulWatermark: new Date(now.getTime() - 60 * 60 * 1_000),
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: now,
+    });
+  }
+  for (const dataType of [
+    'heart-rate',
+    'activity-level',
+    'daily-heart-rate-zones',
+    'time-in-heart-rate-zone',
+    'exercise',
+  ] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId: 'c1',
+      dataType,
+      successfulWatermark: now,
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: new Date(now.getTime() + 60 * 60 * 1_000),
+    });
+  }
+  let persisted: UserHealthRecords | undefined;
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now,
+    api: createFakeApi({}),
+    persistSnapshot: async (_userId, records) => {
+      persisted = records;
+    },
+    loadSnapshot: async () => ({ records: previous, syncedAt: new Date(now.getTime() - 60 * 60 * 1_000) }),
+    loadRecords: async () => persisted ?? previous,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  assert.equal((await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'sleep' }))?.lastErrorCode, undefined);
+  assert.ok(persisted);
+  assert.equal(persisted.dailyHrv.length, 35);
+  assert.ok(await store.healthMetrics.getMetricResult({
+    userId: 'u1',
+    civilDate: '2026-08-24',
+    metricName: 'recovery',
+  }));
+  assert.equal(
+    await store.healthMetrics.getMetricResult({
+      userId: 'u1',
+      civilDate: '2026-07-21',
+      metricName: 'recovery',
+    }),
+    undefined,
+  );
+});

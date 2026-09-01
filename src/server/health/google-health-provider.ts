@@ -5,7 +5,7 @@ import { createHealthApiClient, type HealthApiClient } from './health-api';
 import { createGoogleTokenRefresher, resolveAccessToken, type TokenRefresher } from './access-token';
 import { dataPointFilter, exclusiveEnd } from './filters';
 import { mapDailyHrv, mapDailyRhr, mapSleepSession, mapTrainingDays, type GoogleDataPoint } from './map-records';
-import { mergeHealthRecords, type HealthSnapshot } from './snapshot-store';
+import { changedHealthRecordDates, mergeHealthRecords, type HealthSnapshot } from './snapshot-store';
 
 export class IntegrationUnavailableError extends Error {
   readonly code = 'integration_unavailable';
@@ -37,6 +37,7 @@ const SNAPSHOT_RECORD_TYPES: SnapshotRecordDataType[] = [
 
 export type SnapshotRecordSyncResult = {
   records?: UserHealthRecords;
+  affectedDates: string[];
   succeededDataTypes: SnapshotRecordDataType[];
   failures: Array<{ dataType: SnapshotQueryDataType; error: unknown }>;
 };
@@ -78,6 +79,7 @@ export class GoogleHealthProvider implements HealthProvider {
     hasSuccessfulQuery: boolean;
     succeededDataTypes: SnapshotRecordDataType[];
     failures: Array<{ dataType: SnapshotQueryDataType; error: unknown }>;
+    affectedDates: string[];
     syncedAt: Date;
   }> {
     if (userId !== this.input.connection.userId) {
@@ -86,6 +88,7 @@ export class GoogleHealthProvider implements HealthProvider {
         hasSuccessfulQuery: false,
         succeededDataTypes: [],
         failures: [],
+        affectedDates: [],
         syncedAt: this.input.now ?? new Date(),
       };
     }
@@ -185,6 +188,7 @@ export class GoogleHealthProvider implements HealthProvider {
       hasSuccessfulQuery: pointsByType.size > 0,
       succeededDataTypes,
       failures,
+      affectedDates: changedHealthRecordDates(previous?.records, records),
       syncedAt,
     };
   }
@@ -236,6 +240,7 @@ export class GoogleHealthProvider implements HealthProvider {
     }
     return {
       records: collected.hasSuccessfulQuery ? collected.records : undefined,
+      affectedDates: collected.hasSuccessfulQuery ? collected.affectedDates : [],
       succeededDataTypes: collected.succeededDataTypes,
       failures: collected.failures,
     };

@@ -824,6 +824,54 @@ test('incremental time-in-zone does not replace a partially covered civil day', 
   assert.equal(full?.minutes.light, 2);
 });
 
+test('time-in-zone retains a spring DST day when source intervals cross its offset change', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.replaceTimeInZone({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-03-08',
+    minutes: { light: 400, moderate: 20, vigorous: 5, peak: 0 },
+  });
+  const api = createFakeApi({
+    'time-in-heart-rate-zone': [[
+      timeInZonePoint('2026-03-08T05:00:00.000Z', 'LIGHT', '-18000s'),
+      timeInZonePoint('2026-03-08T07:00:00.000Z', 'LIGHT', '-14400s'),
+    ]],
+  });
+
+  await runSync(store, api, {
+    now: new Date('2026-03-10T12:00:00.000Z'),
+    dataTypes: ['time-in-heart-rate-zone'],
+  });
+
+  const stored = await store.healthMetrics.getTimeInZone({ userId, civilDate: '2026-03-08' });
+  assert.equal(stored?.minutes.light, 400);
+});
+
+test('time-in-zone retains a fall DST day when source intervals cross its offset change', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.replaceTimeInZone({
+    userId,
+    sourceFamily: 'google-wearables',
+    date: '2026-11-01',
+    minutes: { light: 400, moderate: 20, vigorous: 5, peak: 0 },
+  });
+  const api = createFakeApi({
+    'time-in-heart-rate-zone': [[
+      timeInZonePoint('2026-11-01T04:00:00.000Z', 'LIGHT', '-14400s'),
+      timeInZonePoint('2026-11-01T06:00:00.000Z', 'LIGHT', '-18000s'),
+    ]],
+  });
+
+  await runSync(store, api, {
+    now: new Date('2026-11-03T12:00:00.000Z'),
+    dataTypes: ['time-in-heart-rate-zone'],
+  });
+
+  const stored = await store.healthMetrics.getTimeInZone({ userId, civilDate: '2026-11-01' });
+  assert.equal(stored?.minutes.light, 400);
+});
+
 test('does not ingest a type whose nextAttemptAt is still in the future', async () => {
   const store = await seedStore();
   await store.healthMetrics.updateCursor({

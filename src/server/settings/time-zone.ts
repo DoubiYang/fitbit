@@ -139,7 +139,7 @@ export async function handlePutTimeZone(request: Request, deps: HttpDeps): Promi
         toUtcExclusive: next?.effectiveAt,
         now,
         loadSnapshot,
-        lastSuccessfulSyncAt: connection?.lastSuccessfulSyncAt ?? now,
+        lastSuccessfulSyncAt: connection?.lastSuccessfulSyncAt,
       });
       written = { ianaTimeZone, effectiveAt, isBackfillAnchor };
     });

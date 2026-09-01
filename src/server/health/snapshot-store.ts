@@ -1,4 +1,5 @@
 import { getPool } from '../db/postgres-store';
+import { isDeepStrictEqual } from 'node:util';
 import type { DailyHrv, DailyRhr, SleepSession, TrainingDay } from '../../domain/health-records';
 import type { UserHealthRecords } from './provider';
 
@@ -24,6 +25,66 @@ function mergeByKey<T>(existing: T[], incoming: T[], keyOf: (row: T) => string):
     merged.set(keyOf(row), row);
   }
   return [...merged.values()];
+}
+
+function addChangedDates<T>(input: {
+  before: T[];
+  after: T[];
+  keyOf: (row: T) => string;
+  dateOf: (row: T) => string;
+  dates: Set<string>;
+}): void {
+  const beforeByKey = new Map(input.before.map((row) => [input.keyOf(row), row]));
+  const afterByKey = new Map(input.after.map((row) => [input.keyOf(row), row]));
+  for (const key of new Set([...beforeByKey.keys(), ...afterByKey.keys()])) {
+    const before = beforeByKey.get(key);
+    const after = afterByKey.get(key);
+    if (isDeepStrictEqual(before, after)) {
+      continue;
+    }
+    if (before) {
+      input.dates.add(input.dateOf(before));
+    }
+    if (after) {
+      input.dates.add(input.dateOf(after));
+    }
+  }
+}
+
+export function changedHealthRecordDates(
+  before: UserHealthRecords | undefined,
+  after: UserHealthRecords,
+): string[] {
+  const dates = new Set<string>();
+  addChangedDates({
+    before: before?.sleepSessions ?? [],
+    after: after.sleepSessions,
+    keyOf: (row) => row.sourceRecordId || row.id,
+    dateOf: (row) => row.civilEndDate,
+    dates,
+  });
+  addChangedDates({
+    before: before?.dailyHrv ?? [],
+    after: after.dailyHrv,
+    keyOf: (row) => row.date,
+    dateOf: (row) => row.date,
+    dates,
+  });
+  addChangedDates({
+    before: before?.dailyRhr ?? [],
+    after: after.dailyRhr,
+    keyOf: (row) => row.date,
+    dateOf: (row) => row.date,
+    dates,
+  });
+  addChangedDates({
+    before: before?.trainingDays ?? [],
+    after: after.trainingDays,
+    keyOf: (row) => row.date,
+    dateOf: (row) => row.date,
+    dates,
+  });
+  return [...dates].sort();
 }
 
 export function mergeHealthRecords(

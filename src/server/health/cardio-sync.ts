@@ -416,7 +416,10 @@ async function ingestTimeInZone(input: {
   userId: string;
   window: QueryWindow;
 }): Promise<string[]> {
-  const totals = new Map<string, { light: number; moderate: number; vigorous: number; peak: number; utcOffsetMinutes: number }>();
+  const totals = new Map<
+    string,
+    { light: number; moderate: number; vigorous: number; peak: number; utcOffsetMinutes: number; utcOffsets: Set<number> }
+  >();
   for await (const page of input.api.iterateReconciledDataPoints({
     accessToken: input.accessToken,
     dataType: 'time-in-heart-rate-zone',
@@ -430,7 +433,9 @@ async function ingestTimeInZone(input: {
         vigorous: 0,
         peak: 0,
         utcOffsetMinutes: interval.utcOffsetMinutes,
+        utcOffsets: new Set<number>(),
       };
+      current.utcOffsets.add(interval.utcOffsetMinutes);
       const minutes = (Date.parse(interval.endTime) - Date.parse(interval.startTime)) / 60_000;
       if (interval.heartRateZoneType === 'LIGHT') current.light += minutes;
       else if (interval.heartRateZoneType === 'MODERATE') current.moderate += minutes;
@@ -441,7 +446,7 @@ async function ingestTimeInZone(input: {
   }
   const affected: string[] = [];
   for (const [date, minutes] of totals) {
-    if (!localDayFullyInWindow(date, minutes.utcOffsetMinutes, input.window)) {
+    if (minutes.utcOffsets.size !== 1 || !localDayFullyInWindow(date, minutes.utcOffsetMinutes, input.window)) {
       continue;
     }
     await requireSyncable(input.store, input.userId);
@@ -682,17 +687,6 @@ export async function recomputeAffectedDays(
       }),
     );
   }
-}
-
-export function snapshotAffectedDates(records: UserHealthRecords): string[] {
-  return [
-    ...new Set([
-      ...records.sleepSessions.map((row) => row.civilEndDate),
-      ...records.dailyHrv.map((row) => row.date),
-      ...records.dailyRhr.map((row) => row.date),
-      ...records.trainingDays.map((row) => row.date),
-    ]),
-  ];
 }
 
 export async function syncCardioConnection(input: {

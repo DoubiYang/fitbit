@@ -6,7 +6,6 @@ import {
   isUnsyncableError,
   scheduleTypeFailure,
   SNAPSHOT_SYNC_TYPES,
-  snapshotAffectedDates,
   successCursor,
   syncCardioConnection,
   type LoadHealthRecords,
@@ -66,6 +65,7 @@ export async function syncUserConnection(input: {
     loadSnapshot,
   });
   let snapshotRecords: UserHealthRecords | undefined;
+  let snapshotAffectedDates: string[] = [];
   const dueSnapshotTypes: SnapshotRecordDataType[] = [];
   let hasIncompleteSnapshotBackfill = false;
   for (const dataType of SNAPSHOT_SYNC_TYPES) {
@@ -84,6 +84,7 @@ export async function syncUserConnection(input: {
         hasIncompleteSnapshotBackfill,
       );
       snapshotRecords = snapshot.records;
+      snapshotAffectedDates = snapshot.affectedDates;
       for (const dataType of snapshot.succeededDataTypes) {
         await input.store.healthMetrics.updateCursor({
           connectionId: connection.id,
@@ -144,10 +145,7 @@ export async function syncUserConnection(input: {
       }
       return (await loadSnapshot?.(userId))?.records ?? emptyUserHealthRecords();
     });
-  const previousSnapshot = snapshotRecords ? undefined : await loadSnapshot?.(connection.userId);
-  const lastSuccessfulSyncAt = snapshotRecords
-    ? latest.lastSuccessfulSyncAt ?? now
-    : previousSnapshot?.syncedAt ?? latest.lastSuccessfulSyncAt;
+  const lastSuccessfulSyncAt = latest.lastSuccessfulSyncAt;
   let cardio;
   try {
     cardio = await syncCardioConnection({
@@ -158,7 +156,7 @@ export async function syncUserConnection(input: {
       now,
       loadRecords,
       loadSnapshot,
-      extraDates: snapshotRecords ? snapshotAffectedDates(snapshotRecords) : [],
+      extraDates: snapshotAffectedDates,
       lastSuccessfulSyncAt,
     });
   } catch (error) {

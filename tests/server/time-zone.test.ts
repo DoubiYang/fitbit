@@ -192,6 +192,68 @@ test('first IANA write without minutes uses the epoch backfill anchor', async ()
   assert.equal(zone?.effectiveAt, TIME_ZONE_BACKFILL_EPOCH);
 });
 
+test('time-zone reindex keeps Recovery provisional until a complete snapshot sync is recorded', async () => {
+  const { store, tokenA } = await seedUsers();
+  const dates: string[] = [];
+  const cursor = new Date('2026-08-23T00:00:00.000Z');
+  for (let index = 0; index < 28; index += 1) {
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+    dates.push(cursor.toISOString().slice(0, 10));
+  }
+  const records = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [
+      ...dates.map((date, index) => ({
+        userId: userA,
+        source: 'google_health' as const,
+        sourceRecordId: `hrv-${date}`,
+        date,
+        valueMs: 40 + (index % 4),
+      })),
+      { userId: userA, source: 'google_health' as const, sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 55 },
+    ],
+    dailyRhr: [
+      ...dates.map((date, index) => ({
+        userId: userA,
+        source: 'google_health' as const,
+        sourceRecordId: `rhr-${date}`,
+        date,
+        valueBpm: 50 + (index % 4),
+      })),
+      { userId: userA, source: 'google_health' as const, sourceRecordId: 'rhr-23', date: '2026-08-23', valueBpm: 52 },
+    ],
+  };
+  await store.healthMetrics.upsertMinutes([
+    {
+      userId: userA,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-23T12:00:00.000Z',
+      civilDate: '2026-08-23',
+      utcOffsetMinutes: 0,
+      ianaTimeZone: null,
+      localMinuteOfDay: 720,
+      avgBpm: 70,
+      minBpm: 70,
+      maxBpm: 70,
+      sampleCount: 1,
+      coverageSeconds: 60,
+      activityLevel: 'SEDENTARY',
+    },
+  ]);
+
+  const response = await handlePutTimeZone(putRequest({ ianaTimeZone: 'UTC' }, tokenA), {
+    ...deps(store),
+    snapshotForUser: async () => ({ records, syncedAt: NOW }),
+  });
+  assert.equal(response.status, 200);
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId: userA,
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.equal(recovery?.quality, 'provisional');
+});
+
 test('later PUT of the same IANA does not insert a second history row', async () => {
   const { store, tokenA } = await seedUsers();
   const first = await handlePutTimeZone(putRequest({ ianaTimeZone: 'UTC' }, tokenA), deps(store));

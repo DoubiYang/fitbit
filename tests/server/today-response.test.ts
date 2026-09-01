@@ -162,6 +162,22 @@ test('oauth today view stays empty when no snapshot or metrics have been synced 
   assert.equal(view?.primaryAction.kind, 'data_state');
 });
 
+test('oauth today view stays stale until a complete snapshot sync is recorded', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+
+  const view = await buildTodayViewForUser({ mode: 'oauth', id: 'u1' }, '2026-08-24T12:00:00.000Z', {
+    config: oauthConfig(),
+    store,
+    snapshotForUser: async () => ({
+      syncedAt: new Date('2026-08-24T11:59:00.000Z'),
+      records: emptyUserHealthRecords(),
+    }),
+  });
+
+  assert.equal(view?.freshness, 'stale');
+});
+
 test('unauthenticated today is 401 and unconfigured is 503', async () => {
   const unauthenticated = await buildTodayResponse({ mode: 'unauthenticated' });
   const unconfigured = await buildTodayResponse({ mode: 'unconfigured' });
