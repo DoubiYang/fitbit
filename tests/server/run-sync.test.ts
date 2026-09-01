@@ -177,6 +177,81 @@ test('an aborted scheduled run stops before Health API reads or cursor writes', 
   assert.equal((await store.connections.findByUserId('u-abort'))?.lastSuccessfulSyncAt, undefined);
 });
 
+test('a deadline during the first cardio page stops later page reads, writes, and watermarks', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  await store.users.insert('u-midrun-abort');
+  await store.connections.insert({
+    ...liveConnection('u-midrun-abort', 'c-midrun-abort'),
+    nextSyncAt: now,
+    syncRetryCount: 0,
+  });
+  for (const dataType of ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate'] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId: 'c-midrun-abort',
+      dataType,
+      successfulWatermark: now,
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: new Date('2026-08-24T13:00:00.000Z'),
+    });
+  }
+  const [claimed] = await store.connections.claimDueSyncs({
+    now,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(claimed?.syncLeaseToken);
+  const controller = new AbortController();
+  let heartRateFetches = 0;
+  const api: HealthApiClient = {
+    async listDataPoints() {
+      throw new Error('later low-volume fetch must not run');
+    },
+    async *iterateReconciledDataPoints(input) {
+      if (input.dataType !== 'heart-rate') {
+        throw new Error(`later page type must not run: ${input.dataType}`);
+      }
+      heartRateFetches += 1;
+      queueMicrotask(() => controller.abort(new Error('test deadline')));
+      yield [{
+        heartRate: {
+          sampleTime: { physicalTime: '2026-08-24T11:59:00.000Z', utcOffset: '0s' },
+          beatsPerMinute: '110',
+        },
+      }];
+      heartRateFetches += 1;
+      yield [];
+    },
+  };
+
+  await assert.rejects(
+    () => syncUserConnection({
+      config: oauthConfig(),
+      store,
+      userId: 'u-midrun-abort',
+      now,
+      api,
+      scheduledRun: {
+        connectionId: claimed!.id,
+        userId: claimed!.userId,
+        leaseToken: claimed!.syncLeaseToken!,
+        leaseUntil: claimed!.syncLeaseUntil!,
+        now,
+        signal: controller.signal,
+      },
+    }),
+    /scheduled sync deadline exceeded/u,
+  );
+  assert.equal(heartRateFetches, 1);
+  assert.deepEqual(await store.healthMetrics.listMinutesInRange({
+    userId: 'u-midrun-abort',
+    fromUtc: '2026-08-24T00:00:00.000Z',
+  }), []);
+  assert.equal(await store.healthMetrics.readCursor({ connectionId: 'c-midrun-abort', dataType: 'heart-rate' }), undefined);
+  assert.deepEqual(await store.healthMetrics.listMetricResults({ userId: 'u-midrun-abort', civilDate: '2026-08-24' }), []);
+});
+
 function liveConnection(userId: string, connectionId: string): ConnectionRow {
   const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, keyBuffer, connectionId, userId);
   return connection({

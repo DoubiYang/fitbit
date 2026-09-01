@@ -39,6 +39,8 @@ export type ScheduledSyncLease = {
   leaseUntil: Date;
   /** The server-owned clock used to reject expired leases deterministically. */
   now: Date;
+  /** Cancels every external request and persistence step before the lease can expire. */
+  signal?: AbortSignal;
 };
 
 export type ScheduledSyncFinish = {

@@ -90,6 +90,92 @@ test('live provider maps Health API points and does not leak another user', asyn
   assert.ok((await store.connections.findByUserId('u1'))?.lastSuccessfulSyncAt);
 });
 
+test('scheduled provider passes its abort signal through token refresh and stops before Health API reads', async () => {
+  const config = loadConfig({
+    DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+    GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+    TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
+    APP_ORIGIN: 'http://localhost:3000',
+  });
+  assert.equal(config.kind, 'oauth');
+  if (config.kind !== 'oauth') return;
+
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const encrypted = encryptTokenEnvelope({ accessToken: 'expired-access', refreshToken: 'refresh' }, key, 'c-signal', 'u-signal');
+  await store.users.insert('u-signal');
+  await store.connections.insert({
+    id: 'c-signal',
+    userId: 'u-signal',
+    healthUserId: 'h-signal',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2026-08-24T11:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2026-08-31T12:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active',
+    lastErrorCode: undefined,
+    connectedAt: now,
+    updatedAt: now,
+    lastSuccessfulSyncAt: undefined,
+    nextSyncAt: now,
+    syncRetryCount: 0,
+  });
+  const [claimed] = await store.connections.claimDueSyncs({
+    now,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(claimed?.syncLeaseToken);
+  const controller = new AbortController();
+  let healthReads = 0;
+  const provider = new GoogleHealthProvider({
+    config,
+    store,
+    connection: claimed!,
+    now,
+    lease: {
+      connectionId: claimed!.id,
+      userId: claimed!.userId,
+      leaseToken: claimed!.syncLeaseToken!,
+      leaseUntil: claimed!.syncLeaseUntil!,
+      now,
+      signal: controller.signal,
+    },
+    signal: controller.signal,
+    api: {
+      async *iterateReconciledDataPoints() {},
+      async listDataPoints() {
+        healthReads += 1;
+        return [];
+      },
+    },
+    refresher: {
+      async refresh(_refreshToken, signal) {
+        assert.equal(signal, controller.signal);
+        controller.abort(new Error('test deadline'));
+        return {
+          accessToken: 'new-access',
+          refreshToken: undefined,
+          expiresAt: new Date('2026-08-24T13:00:00.000Z'),
+          refreshExpiresAt: undefined,
+        };
+      },
+    },
+  });
+
+  await assert.rejects(() => provider.listRecords('u-signal', range), /scheduled sync deadline exceeded/u);
+  assert.equal(healthReads, 0);
+  const current = await store.connections.findByUserId('u-signal');
+  assert.deepEqual(current?.tokenEnvelopeCiphertext, encrypted.ciphertext);
+  assert.equal(current?.lastSuccessfulSyncAt, undefined);
+});
+
 test('live provider fails closed when one core Health API filter fails', async () => {
   const config = loadConfig({
     DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',

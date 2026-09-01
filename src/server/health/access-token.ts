@@ -23,12 +23,12 @@ function envelopeFrom(row: ConnectionRow) {
 }
 
 export type TokenRefresher = {
-  refresh(refreshToken: string): Promise<Pick<GoogleTokenResponse, 'accessToken' | 'refreshToken' | 'expiresAt' | 'refreshExpiresAt'>>;
+  refresh(refreshToken: string, signal?: AbortSignal): Promise<Pick<GoogleTokenResponse, 'accessToken' | 'refreshToken' | 'expiresAt' | 'refreshExpiresAt'>>;
 };
 
 export function createGoogleTokenRefresher(config: OAuthConfig): TokenRefresher {
   return {
-    async refresh(refreshToken: string) {
+    async refresh(refreshToken: string, signal?: AbortSignal) {
       const response = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -38,6 +38,7 @@ export function createGoogleTokenRefresher(config: OAuthConfig): TokenRefresher 
           refresh_token: refreshToken,
           grant_type: 'refresh_token',
         }),
+        signal,
       });
       if (!response.ok) {
         throw new TokenRefreshError(response.status);
@@ -69,6 +70,12 @@ export async function resolveAccessToken(input: {
   now?: Date;
   lease?: ScheduledSyncLease;
 }): Promise<string> {
+  const throwIfAborted = () => {
+    if (input.lease?.signal?.aborted) {
+      throw new Error('scheduled sync deadline exceeded');
+    }
+  };
+  throwIfAborted();
   const now = input.now ?? new Date();
   const envelope = envelopeFrom(input.connection);
   if (!envelope) {
@@ -86,7 +93,8 @@ export async function resolveAccessToken(input: {
     return tokens.accessToken;
   }
 
-  const refreshed = await input.refresher.refresh(tokens.refreshToken);
+  const refreshed = await input.refresher.refresh(tokens.refreshToken, input.lease?.signal);
+  throwIfAborted();
   const refreshToken = refreshed.refreshToken ?? tokens.refreshToken;
   const encrypted = encryptTokenEnvelope(
     { accessToken: refreshed.accessToken, refreshToken },

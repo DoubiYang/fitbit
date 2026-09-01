@@ -93,7 +93,13 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
     result.claimed += 1;
     try {
       await syncConnection(connection, run);
+      if (run.signal.aborted) {
+        throw new Error('scheduled sync deadline exceeded');
+      }
       const cursors = await input.store.healthMetrics.listCursors({ connectionId: connection.id });
+      if (run.signal.aborted) {
+        throw new Error('scheduled sync deadline exceeded');
+      }
       const finished = await input.store.connections.finishScheduledSync({
         id: connection.id,
         userId: connection.userId,

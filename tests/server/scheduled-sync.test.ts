@@ -388,3 +388,28 @@ test('an aborted scheduled run only schedules a retry through its own lease toke
   assert.equal(current.syncLeaseUntil, undefined);
   assert.equal(current.nextSyncAt?.toISOString(), '2026-08-24T12:30:00.000Z');
 });
+
+test('a deadline that fires after sync work returns cannot be finalized as a success', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection('post-work-abort-user', now);
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+  const controller = new AbortController();
+
+  const result = await runDueSyncForUser({
+    config,
+    store,
+    userId: row.userId,
+    now,
+    signal: controller.signal,
+    syncConnection: async () => {
+      controller.abort(new Error('test deadline'));
+    },
+  });
+
+  assert.deepEqual(result, { claimed: 1, succeeded: 0, failed: 1 });
+  const current = (await store.connections.findByUserId(row.userId)) as ScheduledConnection;
+  assert.equal(current.nextSyncAt?.toISOString(), '2026-08-24T12:30:00.000Z');
+  assert.equal(current.lastErrorCode, 'sync_failed');
+});

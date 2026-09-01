@@ -164,3 +164,107 @@ test('reclaims an expired lease with a new token when the prior worker never fin
   assert.notEqual(second?.syncLeaseToken, first?.syncLeaseToken);
   assert.equal(second?.syncLeaseUntil?.toISOString(), '2026-08-24T12:31:00.000Z');
 });
+
+test('a taken-over token cannot enter the aggregate, cursor, or metric-result write scope', async () => {
+  const store = createMemoryStore();
+  const firstNow = new Date('2026-08-24T12:00:00.000Z');
+  const row = connection({ id: 'takeover', userId: 'takeover-user', status: 'active', nextSyncAt: firstNow });
+  await store.users.insert(row.userId);
+  await store.connections.insert(row);
+  const [first] = await store.connections.claimDueSyncs({
+    now: firstNow,
+    leaseUntil: new Date('2026-08-24T12:15:00.000Z'),
+    limit: 1,
+  });
+  const takeoverNow = new Date('2026-08-24T12:16:00.000Z');
+  const [second] = await store.connections.claimDueSyncs({
+    now: takeoverNow,
+    leaseUntil: new Date('2026-08-24T12:31:00.000Z'),
+    limit: 1,
+  });
+  assert.ok(first?.syncLeaseToken);
+  assert.ok(second?.syncLeaseToken);
+
+  let aggregateWrite = false;
+  let cursorWrite = false;
+  let metricResultWrite = false;
+  await assert.rejects(
+    () => store.withScheduledSyncLease({
+      connectionId: first!.id,
+      userId: first!.userId,
+      leaseToken: first!.syncLeaseToken!,
+      leaseUntil: first!.syncLeaseUntil!,
+      now: takeoverNow,
+    }, async (inner) => {
+      aggregateWrite = true;
+      await inner.healthMetrics.upsertMinutes([]);
+      cursorWrite = true;
+      await inner.healthMetrics.updateCursor({
+        connectionId: first!.id,
+        dataType: 'heart-rate',
+        successfulWatermark: takeoverNow,
+        lastErrorCode: undefined,
+        retryCount: 0,
+        nextAttemptAt: undefined,
+      });
+      metricResultWrite = true;
+    }),
+    /sync lease no longer held/u,
+  );
+  assert.equal(aggregateWrite, false);
+  assert.equal(cursorWrite, false);
+  assert.equal(metricResultWrite, false);
+
+  const refreshed = await store.connections.updateAccessTokenIfSyncable({
+    id: first!.id,
+    userId: first!.userId,
+    tokenEnvelopeCiphertext: Buffer.from('new-ciphertext'),
+    tokenEnvelopeIv: Buffer.alloc(12),
+    tokenEnvelopeAuthTag: Buffer.alloc(16),
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2026-08-24T13:00:00.000Z'),
+    refreshTokenExpiresAt: undefined,
+    updatedAt: takeoverNow,
+    lease: {
+      connectionId: first!.id,
+      userId: first!.userId,
+      leaseToken: first!.syncLeaseToken!,
+      leaseUntil: first!.syncLeaseUntil!,
+      now: takeoverNow,
+    },
+  });
+  const stamped = await store.connections.markLastSuccessfulSyncIfSyncable({
+    id: first!.id,
+    userId: first!.userId,
+    syncedAt: takeoverNow,
+    lease: {
+      connectionId: first!.id,
+      userId: first!.userId,
+      leaseToken: first!.syncLeaseToken!,
+      leaseUntil: first!.syncLeaseUntil!,
+      now: takeoverNow,
+    },
+  });
+  const finished = await store.connections.finishScheduledSync({
+    id: first!.id,
+    userId: first!.userId,
+    leaseUntil: first!.syncLeaseUntil!,
+    leaseToken: first!.syncLeaseToken!,
+    now: takeoverNow,
+    nextSyncAt: new Date('2026-08-24T13:16:00.000Z'),
+    syncRetryCount: 0,
+    lastErrorCode: undefined,
+  });
+  const failed = await store.connections.clearSyncLeaseIfHeld({
+    id: first!.id,
+    userId: first!.userId,
+    leaseUntil: first!.syncLeaseUntil!,
+    leaseToken: first!.syncLeaseToken!,
+    now: takeoverNow,
+  });
+  assert.equal(refreshed, false);
+  assert.equal(stamped, false);
+  assert.equal(finished, false);
+  assert.equal(failed, false);
+  assert.equal((await store.connections.findByUserId(row.userId))?.syncLeaseToken, second!.syncLeaseToken);
+});
