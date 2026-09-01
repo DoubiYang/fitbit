@@ -561,9 +561,15 @@ export async function recomputeAffectedDays(
     expanded.add(cascade.recoveryDate);
   }
   const ordered = [...expanded].sort();
-  const sleepSessions = records.sleepSessions.filter((session) => session.userId === input.userId);
-  const dailyHrv = records.dailyHrv.filter((row) => row.userId === input.userId);
-  const dailyRhr = records.dailyRhr.filter((row) => row.userId === input.userId);
+  const sleepSessions = records.sleepSessions.filter(
+    (session) => session.userId === input.userId && session.source === 'google_health',
+  );
+  const dailyHrv = records.dailyHrv.filter(
+    (row) => row.userId === input.userId && row.source === 'google_health',
+  );
+  const dailyRhr = records.dailyRhr.filter(
+    (row) => row.userId === input.userId && row.source === 'google_health',
+  );
 
   for (const date of ordered) {
     const range = dayQueryRange(date);

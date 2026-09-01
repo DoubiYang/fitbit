@@ -81,9 +81,9 @@ const STALE_SYNC_MS = 36 * 60 * 60 * 1_000;
 
 function scopedRecords(records: UserHealthRecords, userId: string): UserHealthRecords {
   return {
-    sleepSessions: records.sleepSessions.filter((record) => record.userId === userId),
-    dailyHrv: records.dailyHrv.filter((record) => record.userId === userId),
-    dailyRhr: records.dailyRhr.filter((record) => record.userId === userId),
+    sleepSessions: records.sleepSessions.filter((record) => record.userId === userId && record.source === 'google_health'),
+    dailyHrv: records.dailyHrv.filter((record) => record.userId === userId && record.source === 'google_health'),
+    dailyRhr: records.dailyRhr.filter((record) => record.userId === userId && record.source === 'google_health'),
     trainingDays: records.trainingDays.filter((record) => record.userId === userId),
   };
 }

@@ -61,6 +61,41 @@ test('returns a data state instead of a training instruction with insufficient r
   assertNoTrainingPermission(view.primaryAction.text);
 });
 
+test('raw dashboard metrics ignore manual HRV and RHR records', async () => {
+  const baselineDates = ['2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19', '2026-08-20', '2026-08-21', '2026-08-22'];
+  const provider: HealthProvider = {
+    capabilities: { mode: 'oauth', canSync: true },
+    async listRecords(): Promise<UserHealthRecords> {
+      return {
+        ...emptyUserHealthRecords(),
+        dailyHrv: [
+          ...baselineDates.map((date, index) => ({
+            userId: 'u1', source: 'manual' as const, sourceRecordId: `manual-hrv-${date}`, date, valueMs: 42 + index,
+          })),
+          { userId: 'u1', source: 'manual', sourceRecordId: 'manual-hrv-23', date: '2026-08-23', valueMs: 60 },
+        ],
+        dailyRhr: [
+          ...baselineDates.map((date, index) => ({
+            userId: 'u1', source: 'manual' as const, sourceRecordId: `manual-rhr-${date}`, date, valueBpm: 50 + (index % 3),
+          })),
+          { userId: 'u1', source: 'manual', sourceRecordId: 'manual-rhr-23', date: '2026-08-23', valueBpm: 52 },
+        ],
+      };
+    },
+  };
+
+  const view = await buildTodayView({
+    provider,
+    userId: 'u1',
+    now: '2026-08-23T12:00:00.000Z',
+    lastSuccessfulSyncAt: '2026-08-23T11:00:00.000Z',
+    timeZone: 'UTC',
+  });
+
+  assert.equal(view.metrics.recovery.score, null);
+  assert.equal(view.metrics.recovery.quality, 'unavailable');
+});
+
 test('demo today still uses the documented Asia/Shanghai fallback', async () => {
   const view = await buildTodayView({
     provider: {

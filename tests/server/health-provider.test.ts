@@ -7,7 +7,7 @@ import { createMemoryStore } from '../../src/server/db/memory-store';
 import { DemoHealthProvider } from '../../src/server/health/demo-provider';
 import { GoogleHealthProvider } from '../../src/server/health/google-health-provider';
 import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
-import { mergeHealthRecords } from '../../src/server/health/snapshot-store';
+import { changedHealthRecordDates, mergeHealthRecords } from '../../src/server/health/snapshot-store';
 import { getCurrentUser } from '../../src/server/session/current-user';
 
 const range = { from: '2026-07-24', to: '2026-08-22' };
@@ -453,6 +453,70 @@ test('mergeHealthRecords keeps 35 civil days of HRV and lets incoming records wi
       ['2026-08-24', 55],
     ],
   );
+});
+
+test('an authoritative Google refresh preserves same-day manual health records', () => {
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const sleep = {
+    userId: 'u1',
+    sourceRecordId: 'same-sleep-id',
+    id: 'same-sleep-id',
+    startTime: '2026-08-22T22:00:00.000Z',
+    endTime: '2026-08-23T06:00:00.000Z',
+    civilEndDate: '2026-08-23',
+    utcOffsetMinutes: 0,
+    minutesAsleep: 400,
+    timeInBedMinutes: 480,
+    awakeMinutes: 80,
+    isNap: false,
+    processed: true,
+  };
+  const existing: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    sleepSessions: [
+      { ...sleep, source: 'manual' },
+      { ...sleep, source: 'google_health', minutesAsleep: 380 },
+    ],
+    dailyHrv: [
+      { userId: 'u1', source: 'manual', sourceRecordId: 'manual-hrv', date: '2026-08-23', valueMs: 70 },
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'google-hrv', date: '2026-08-23', valueMs: 45 },
+    ],
+    dailyRhr: [
+      { userId: 'u1', source: 'manual', sourceRecordId: 'manual-rhr', date: '2026-08-23', valueBpm: 48 },
+      { userId: 'u1', source: 'google_health', sourceRecordId: 'google-rhr', date: '2026-08-23', valueBpm: 56 },
+    ],
+  };
+  const incoming: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    sleepSessions: [{ ...sleep, source: 'google_health', minutesAsleep: 420 }],
+    dailyHrv: [{ userId: 'u1', source: 'google_health', sourceRecordId: 'google-hrv', date: '2026-08-23', valueMs: 55 }],
+    dailyRhr: [{ userId: 'u1', source: 'google_health', sourceRecordId: 'google-rhr', date: '2026-08-23', valueBpm: 52 }],
+  };
+
+  const merged = mergeHealthRecords(existing, incoming, {
+    now,
+    authoritative: {
+      from: '2026-08-22',
+      untilExclusive: '2026-08-25',
+      sleepSessions: true,
+      dailyHrv: true,
+      dailyRhr: true,
+    },
+  });
+
+  assert.deepEqual(
+    merged.sleepSessions.map((row) => [row.source, row.minutesAsleep]).sort(),
+    [['google_health', 420], ['manual', 400]],
+  );
+  assert.deepEqual(
+    merged.dailyHrv.map((row) => [row.source, row.valueMs]).sort(),
+    [['google_health', 55], ['manual', 70]],
+  );
+  assert.deepEqual(
+    merged.dailyRhr.map((row) => [row.source, row.valueBpm]).sort(),
+    [['google_health', 52], ['manual', 48]],
+  );
+  assert.deepEqual(changedHealthRecordDates(existing, merged), ['2026-08-23']);
 });
 
 test('a successful 48-hour refresh removes absent in-window records but keeps older snapshot history', async () => {

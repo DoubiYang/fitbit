@@ -785,6 +785,52 @@ test('recomputeAffectedDays uses loadSnapshot sleep HRV and RHR when loadRecords
   assert.equal(recovery?.source.rhr, true);
 });
 
+test('recomputeAffectedDays uses Google Health inputs when same-day manual records coexist', async () => {
+  const store = await seedStore({ timeZone: 'UTC' });
+  const baselineDates = ['2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19', '2026-08-20', '2026-08-21', '2026-08-22'];
+  const records: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [
+      { userId, source: 'manual', sourceRecordId: 'manual-hrv-23', date: '2026-08-23', valueMs: 120 },
+      ...baselineDates.map((date, index) => parseDailyHrv({
+        userId,
+        source: 'google_health',
+        sourceRecordId: `google-hrv-${date}`,
+        date,
+        valueMs: 42 + index,
+      })),
+      parseDailyHrv({ userId, source: 'google_health', sourceRecordId: 'google-hrv-23', date: '2026-08-23', valueMs: 55 }),
+    ],
+    dailyRhr: [
+      { userId, source: 'manual', sourceRecordId: 'manual-rhr-23', date: '2026-08-23', valueBpm: 35 },
+      ...baselineDates.map((date, index) => parseDailyRhr({
+        userId,
+        source: 'google_health',
+        sourceRecordId: `google-rhr-${date}`,
+        date,
+        valueBpm: 50 + (index % 3),
+      })),
+      parseDailyRhr({ userId, source: 'google_health', sourceRecordId: 'google-rhr-23', date: '2026-08-23', valueBpm: 52 }),
+    ],
+  };
+
+  await recomputeAffectedDays(store, {
+    userId,
+    dates: ['2026-08-23'],
+    now: NOW,
+    loadRecords: async () => records,
+    lastSuccessfulSyncAt: NOW,
+  });
+
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.equal(recovery?.evidence.find((item) => item.label === 'HRV')?.value, 55);
+  assert.equal(recovery?.evidence.find((item) => item.label === '静息心率')?.value, 52);
+});
+
 test('incremental time-in-zone does not replace a partially covered civil day', async () => {
   const store = await seedStore();
   await store.healthMetrics.replaceTimeInZone({

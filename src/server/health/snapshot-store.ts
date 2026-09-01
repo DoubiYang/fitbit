@@ -40,6 +40,18 @@ function inAuthoritativeWindow(date: string, window: AuthoritativeHealthRecordWi
   return Boolean(window && date >= window.from && date < window.untilExclusive);
 }
 
+function sleepKey(row: SleepSession): string {
+  return `${row.source}:${row.sourceRecordId || row.id}`;
+}
+
+function dailyHrvKey(row: DailyHrv): string {
+  return `${row.source}:${row.date}`;
+}
+
+function dailyRhrKey(row: DailyRhr): string {
+  return `${row.source}:${row.date}`;
+}
+
 function addChangedDates<T>(input: {
   before: T[];
   after: T[];
@@ -72,21 +84,21 @@ export function changedHealthRecordDates(
   addChangedDates({
     before: before?.sleepSessions ?? [],
     after: after.sleepSessions,
-    keyOf: (row) => row.sourceRecordId || row.id,
+    keyOf: sleepKey,
     dateOf: (row) => row.civilEndDate,
     dates,
   });
   addChangedDates({
     before: before?.dailyHrv ?? [],
     after: after.dailyHrv,
-    keyOf: (row) => row.date,
+    keyOf: dailyHrvKey,
     dateOf: (row) => row.date,
     dates,
   });
   addChangedDates({
     before: before?.dailyRhr ?? [],
     after: after.dailyRhr,
-    keyOf: (row) => row.date,
+    keyOf: dailyRhrKey,
     dateOf: (row) => row.date,
     dates,
   });
@@ -115,7 +127,7 @@ export function mergeHealthRecords(
         !inAuthoritativeWindow(row.civilEndDate, options.authoritative),
     ),
     incoming.sleepSessions,
-    (row: SleepSession) => row.sourceRecordId || row.id,
+    sleepKey,
   );
   const dailyHrv = mergeByKey(
     (existing?.dailyHrv ?? []).filter(
@@ -125,7 +137,7 @@ export function mergeHealthRecords(
         !inAuthoritativeWindow(row.date, options.authoritative),
     ),
     incoming.dailyHrv,
-    (row: DailyHrv) => row.date,
+    dailyHrvKey,
   );
   const dailyRhr = mergeByKey(
     (existing?.dailyRhr ?? []).filter(
@@ -135,7 +147,7 @@ export function mergeHealthRecords(
         !inAuthoritativeWindow(row.date, options.authoritative),
     ),
     incoming.dailyRhr,
-    (row: DailyRhr) => row.date,
+    dailyRhrKey,
   );
   const trainingDays = mergeByKey(
     (existing?.trainingDays ?? []).filter(
@@ -155,13 +167,13 @@ export function mergeHealthRecords(
   return {
     sleepSessions: sleepSessions
       .filter((row) => row.civilEndDate >= cutoff)
-      .sort((left, right) => left.civilEndDate.localeCompare(right.civilEndDate) || left.id.localeCompare(right.id)),
+      .sort((left, right) => left.civilEndDate.localeCompare(right.civilEndDate) || left.source.localeCompare(right.source) || left.id.localeCompare(right.id)),
     dailyHrv: dailyHrv
       .filter((row) => row.date >= cutoff)
-      .sort((left, right) => left.date.localeCompare(right.date)),
+      .sort((left, right) => left.date.localeCompare(right.date) || left.source.localeCompare(right.source)),
     dailyRhr: dailyRhr
       .filter((row) => row.date >= cutoff)
-      .sort((left, right) => left.date.localeCompare(right.date)),
+      .sort((left, right) => left.date.localeCompare(right.date) || left.source.localeCompare(right.source)),
     trainingDays: trainingDays
       .filter((row) => row.date >= cutoff)
       .sort((left, right) => left.date.localeCompare(right.date)),
