@@ -22,7 +22,7 @@ The public `HealthMetricsStore` interface and the in-memory test store stay unch
 
 For Postgres only:
 
-- minute aggregate upserts validate all rows, fold duplicate `(userId, sourceFamily, minuteStartUtc)` inputs in arrival order using the existing merge rule, read matching stored rows in one set operation, retain that merge rule in TypeScript, then issue one set-based upsert per page;
+- minute aggregate upserts validate all rows, read matching stored rows in one set operation, then use each stored row (when present) as the accumulator and apply duplicate `(userId, sourceFamily, minuteStartUtc)` inputs strictly in arrival order using the existing merge rule before issuing one set-based upsert per page;
 - activity-level interval upserts validate all rows and issue one set-based upsert per page;
 - activity ingestion marks conservative affected civil dates from each interval's UTC start/end envelope. It no longer queries stored minutes once per interval merely to find dates already covered by that envelope.
 
@@ -49,7 +49,7 @@ Add failing tests before implementation for:
 
 1. high-volume default and explicit page size for `time-in-heart-rate-zone`;
 2. one activity-level page uses a bounded number of store range reads while preserving all potentially affected local dates;
-3. Postgres page-sized minute/activity writes use a JSON CTE and issue set-based operations instead of per-row read/write pairs, including a 10,000-row page without parameter overflow;
+3. Postgres page-sized minute/activity writes use a JSON CTE and issue set-based operations instead of per-row read/write pairs, including a 10,000-row page without parameter overflow and repeated-minute offset changes that preserve the existing sequential merge semantics;
 4. an old run that is aborted or whose lease token is superseded cannot write a page, cursor, result, or completion state after a new run claims the connection;
 5. the server deadline provides cleanup headroom below the lease and the worker deadline is longer than the server deadline.
 
