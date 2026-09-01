@@ -13,7 +13,7 @@ import {
   type CardioSyncState,
 } from '../../src/server/health/cardio-sync';
 import type { HealthSyncDataType } from '../../src/server/health/cardio-store';
-import { HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from '../../src/server/health/filters';
+import { HEALTH_HIGH_VOLUME_PAGE_SIZE } from '../../src/server/health/filters';
 import type { HealthApiClient } from '../../src/server/health/health-api';
 import type { GoogleDataPoint } from '../../src/server/health/map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
@@ -272,8 +272,9 @@ test('initial raw HR and activity-level windows are now minus 37 days through no
   assert.equal(heartRate.from, INITIAL_HR_FROM);
   assert.equal(heartRate.untilExclusive, NOW.toISOString());
   assert.deepEqual(activity, heartRate);
-  assert.equal(requestFor(api.requests, 'heart-rate').pageSize, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE);
-  assert.equal(requestFor(api.requests, 'activity-level').pageSize, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE);
+  assert.equal(requestFor(api.requests, 'heart-rate').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
+  assert.equal(requestFor(api.requests, 'activity-level').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
+  assert.equal(requestFor(api.requests, 'time-in-heart-rate-zone').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
 });
 
 test('initial daily zone window is UTC date minus 36 days to plus 1 day exclusive, not Asia/Shanghai', async () => {

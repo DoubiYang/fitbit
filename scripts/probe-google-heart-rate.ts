@@ -67,7 +67,9 @@ export type HeartRateProbeApi = {
 };
 
 async function collectProbePoints(api: HeartRateProbeApi, input: HeartRateProbeRequest): Promise<HeartRateProbePoint[]> {
-  const highVolume = input.dataType === 'heart-rate' || input.dataType === 'activity-level';
+  const highVolume = input.dataType === 'heart-rate'
+    || input.dataType === 'activity-level'
+    || input.dataType === 'time-in-heart-rate-zone';
   if (highVolume && api.iterateReconciledDataPoints) {
     const collected: HeartRateProbePoint[] = [];
     for await (const page of api.iterateReconciledDataPoints(input)) {

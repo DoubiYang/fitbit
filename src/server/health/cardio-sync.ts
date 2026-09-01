@@ -28,7 +28,7 @@ import {
   mapTimeInZoneIntervals,
 } from './cardio-map';
 import type { HealthSyncCursor, HealthSyncDataType, HealthTimeZoneHistory } from './cardio-store';
-import { dataPointFilter, HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from './filters';
+import { dataPointFilter, HEALTH_HIGH_VOLUME_PAGE_SIZE } from './filters';
 import type { HealthApiClient } from './health-api';
 import type { GoogleDataPoint } from './map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from './provider';
@@ -336,7 +336,7 @@ async function ingestHeartRate(input: {
     accessToken: input.accessToken,
     dataType: 'heart-rate',
     filter: dataPointFilter('heart-rate', input.window.from, input.window.untilExclusive),
-    pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+    pageSize: HEALTH_HIGH_VOLUME_PAGE_SIZE,
     signal: input.signal,
   })) {
     throwIfAborted(input.signal);
@@ -386,7 +386,7 @@ async function ingestActivityLevel(input: {
     accessToken: input.accessToken,
     dataType: 'activity-level',
     filter: dataPointFilter('activity-level', input.window.from, input.window.untilExclusive),
-    pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+    pageSize: HEALTH_HIGH_VOLUME_PAGE_SIZE,
     signal: input.signal,
   })) {
     throwIfAborted(input.signal);
@@ -464,6 +464,7 @@ async function ingestTimeInZone(input: {
     accessToken: input.accessToken,
     dataType: 'time-in-heart-rate-zone',
     filter: dataPointFilter('time-in-heart-rate-zone', input.window.from, input.window.untilExclusive),
+    pageSize: HEALTH_HIGH_VOLUME_PAGE_SIZE,
     signal: input.signal,
   })) {
     throwIfAborted(input.signal);

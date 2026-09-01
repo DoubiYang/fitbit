@@ -1,4 +1,6 @@
-export const HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE = 10_000;
+export const HEALTH_HIGH_VOLUME_PAGE_SIZE = 10_000;
+
+export const HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE = HEALTH_HIGH_VOLUME_PAGE_SIZE;
 
 export function exclusiveEnd(date: string): string {
   const next = new Date(`${date}T00:00:00.000Z`);

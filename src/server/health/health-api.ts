@@ -1,4 +1,4 @@
-import { HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from './filters';
+import { HEALTH_HIGH_VOLUME_PAGE_SIZE } from './filters';
 import type { GoogleDataPoint } from './map-records';
 
 const API_ROOT = 'https://health.googleapis.com/v4';
@@ -18,14 +18,14 @@ export type HealthApiClient = {
 };
 
 function isHighVolumeDataType(dataType: string): boolean {
-  return dataType === 'heart-rate' || dataType === 'activity-level';
+  return dataType === 'heart-rate' || dataType === 'activity-level' || dataType === 'time-in-heart-rate-zone';
 }
 
 function reconcilePageSize(input: ReconcileDataPointsInput): number {
   if (input.pageSize !== undefined) {
     return input.pageSize;
   }
-  return isHighVolumeDataType(input.dataType) ? HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE : DEFAULT_PAGE_SIZE;
+  return isHighVolumeDataType(input.dataType) ? HEALTH_HIGH_VOLUME_PAGE_SIZE : DEFAULT_PAGE_SIZE;
 }
 
 async function fetchPage(url: string, accessToken: string, signal?: AbortSignal): Promise<{ dataPoints?: GoogleDataPoint[]; nextPageToken?: string }> {

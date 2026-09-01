@@ -206,6 +206,32 @@ test('capability probe reconciles google-wearables with snake_case filters', asy
   assert.equal(allFilters.includes('physicalTime'), false);
 });
 
+test('capability probe streams time-in-zone as a high-volume minute feed when supported', async () => {
+  const streamed: Array<{ dataType: string; pageSize?: number }> = [];
+  const listed: string[] = [];
+  await probeGoogleHeartRateCapabilities({
+    accessToken: ACCESS_TOKEN,
+    now: NOW,
+    api: {
+      async listDataPoints(input) {
+        listed.push(input.dataType);
+        return [];
+      },
+      async *iterateReconciledDataPoints(input) {
+        streamed.push({ dataType: input.dataType, pageSize: input.pageSize });
+        yield [];
+      },
+    },
+  });
+
+  assert.deepEqual(
+    streamed.map((request) => request.dataType).sort(),
+    ['activity-level', 'heart-rate', 'time-in-heart-rate-zone'],
+  );
+  assert.equal(streamed.find((request) => request.dataType === 'time-in-heart-rate-zone')?.pageSize, 1000);
+  assert.deepEqual(listed, ['daily-heart-rate-zones']);
+});
+
 function zonesWithOneBpmGap() {
   return [
     { heartRateZoneType: 'LIGHT', minBeatsPerMinute: '97', maxBeatsPerMinute: '116' },

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE } from '../../src/server/health/filters';
+import { HEALTH_HIGH_VOLUME_PAGE_SIZE } from '../../src/server/health/filters';
 import { createHealthApiClient } from '../../src/server/health/health-api';
 
 async function withMockedFetch<T>(
@@ -71,7 +71,7 @@ test('listDataPoints keeps the low-volume default page size of 25', async () => 
   assert.equal(new URL(urls[0] ?? '').searchParams.get('pageSize'), '25');
 });
 
-test('listDataPoints rejects high-volume heart-rate and activity-level instead of collecting pages', async () => {
+test('listDataPoints rejects every high-volume minute feed instead of collecting pages', async () => {
   const { urls } = await withMockedFetch(
     async () => Response.json({ dataPoints: [{ name: 'should-not-fetch' }] }),
     async () => {
@@ -93,6 +93,15 @@ test('listDataPoints rejects high-volume heart-rate and activity-level instead o
             filter: 'activity_level.interval.start_time >= "2026-08-30T00:00:00.000Z"',
           }),
         /activity-level must use iterateReconciledDataPoints/,
+      );
+      await assert.rejects(
+        () =>
+          client.listDataPoints({
+            accessToken: 'access',
+            dataType: 'time-in-heart-rate-zone',
+            filter: 'time_in_heart_rate_zone.interval.start_time >= "2026-08-30T00:00:00.000Z"',
+          }),
+        /time-in-heart-rate-zone must use iterateReconciledDataPoints/,
       );
     },
   );
@@ -143,7 +152,7 @@ test('iterateReconciledDataPoints yields one google-wearables reconcile page at 
       accessToken: 'access',
       dataType: 'heart-rate',
       filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
-      pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+      pageSize: HEALTH_HIGH_VOLUME_PAGE_SIZE,
     });
     const first = await iterator.next();
 
@@ -184,7 +193,7 @@ test('iterateReconciledDataPoints does not prefetch later pages when the consume
       accessToken: 'access',
       dataType: 'heart-rate',
       filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
-      pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+      pageSize: HEALTH_HIGH_VOLUME_PAGE_SIZE,
     });
     const first = await iterator.next();
     assert.equal(first.value?.[0]?.name, 'page-1');
@@ -196,7 +205,7 @@ test('iterateReconciledDataPoints does not prefetch later pages when the consume
   assert.equal(urls.length, 1);
 });
 
-test('iterateReconciledDataPoints defaults heart-rate and activity-level pageSize to 10000', async () => {
+test('iterateReconciledDataPoints defaults every high-volume minute feed to pageSize 10000', async () => {
   const { urls } = await withMockedFetch(
     async () => Response.json({ dataPoints: [] }),
     async () => {
@@ -211,6 +220,13 @@ test('iterateReconciledDataPoints defaults heart-rate and activity-level pageSiz
       await client
         .iterateReconciledDataPoints({
           accessToken: 'access',
+          dataType: 'time-in-heart-rate-zone',
+          filter: 'time_in_heart_rate_zone.interval.start_time >= "2026-08-30T00:00:00.000Z"',
+        })
+        .next();
+      await client
+        .iterateReconciledDataPoints({
+          accessToken: 'access',
           dataType: 'activity-level',
           filter: 'activity_level.interval.start_time >= "2026-08-30T00:00:00.000Z"',
         })
@@ -220,7 +236,8 @@ test('iterateReconciledDataPoints defaults heart-rate and activity-level pageSiz
 
   assert.equal(new URL(urls[0] ?? '').searchParams.get('pageSize'), '10000');
   assert.equal(new URL(urls[1] ?? '').searchParams.get('pageSize'), '10000');
-  assert.equal(HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE, 10_000);
+  assert.equal(new URL(urls[2] ?? '').searchParams.get('pageSize'), '10000');
+  assert.equal(HEALTH_HIGH_VOLUME_PAGE_SIZE, 10_000);
 });
 
 test('explicit iterate pageSize still wins over the high-volume default', async () => {
@@ -230,8 +247,8 @@ test('explicit iterate pageSize still wins over the high-volume default', async 
       createHealthApiClient()
         .iterateReconciledDataPoints({
           accessToken: 'access',
-          dataType: 'heart-rate',
-          filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
+          dataType: 'time-in-heart-rate-zone',
+          filter: 'time_in_heart_rate_zone.interval.start_time >= "2026-08-30T00:00:00.000Z"',
           pageSize: 50,
         })
         .next(),
@@ -251,7 +268,7 @@ test('iterateReconciledDataPoints does not fall back to list after a 429', async
               accessToken: 'access',
               dataType: 'heart-rate',
               filter: 'heart_rate.sample_time.physical_time >= "2026-08-30T00:00:00.000Z"',
-              pageSize: HEART_RATE_ACTIVITY_LEVEL_PAGE_SIZE,
+              pageSize: HEALTH_HIGH_VOLUME_PAGE_SIZE,
             })
             .next(),
         /health api 429/,
