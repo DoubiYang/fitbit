@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { parseDailyCardio, parseMetricResult } from '../../src/domain/cardio-records';
+import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { createPostgresStoreForTesting, type PostgresQueryable } from '../../src/server/db/postgres-store';
 import * as snapshots from '../../src/server/health/snapshot-store';
 import { emptyUserHealthRecords } from '../../src/server/health/provider';
@@ -42,8 +44,30 @@ class DeadlineRaceQueryable implements PostgresQueryable {
   async query(text: string, values?: unknown[]) {
     this.queries.push({ text, values });
     const failureFinish = text.includes('UPDATE google_health_connections') && values?.[6] === 'sync_failed';
-    const hasDeadlinePredicate = /now\(\) < \$\d+/u.test(text) && values?.includes(this.expiredDeadlineAt);
+    const hasDeadlinePredicate = /(?:now|clock_timestamp)\(\) < \$\d+/u.test(text) && values?.includes(this.expiredDeadlineAt);
     return { rows: [], rowCount: failureFinish || !hasDeadlinePredicate ? 1 : 0 };
+  }
+}
+
+class DeadlineTransactionPool implements PostgresQueryable {
+  readonly queries: Query[] = [];
+  private guardChecks = 0;
+  readonly client = {
+    query: async (text: string, values?: unknown[]) => this.query(text, values),
+    release: () => undefined,
+  };
+
+  async connect() {
+    return this.client;
+  }
+
+  async query(text: string, values?: unknown[]) {
+    this.queries.push({ text, values });
+    if (text.includes('FROM google_health_connections') && text.includes('FOR UPDATE')) {
+      this.guardChecks += 1;
+      return { rows: [], rowCount: this.guardChecks === 1 ? 1 : 0 };
+    }
+    return { rows: [], rowCount: 1 };
   }
 }
 
@@ -194,4 +218,73 @@ test('a database deadline atomically rejects scheduled success writes but not th
     deadlineAt,
   } as never);
   assert.equal(failure, true);
+});
+
+test('a scheduled transaction rolls back writes when its post-write real-time deadline guard fails', async () => {
+  const deadlineAt = new Date('2026-08-24T12:13:00.000Z');
+  const lease = { connectionId, userId, leaseToken: oldLeaseToken, leaseUntil, now, deadlineAt };
+  const pool = new DeadlineTransactionPool();
+  const store = createPostgresStoreForTesting(pool);
+
+  await assert.rejects(
+    () => store.withScheduledSyncLease(lease, async (inner) => {
+      await inner.healthMetrics.upsertDailyCardio(parseDailyCardio({
+        userId,
+        date: '2026-08-24',
+        status: 'provisional',
+        strain: 3,
+        dose: 10,
+        zoneMinutes: { light: 10, moderate: 0, vigorous: 0, peak: 0 },
+        knownContextMinutes: 10,
+        rawCoverageMinutes: 10,
+        attributedMinutes: 10,
+        metricVersion: WHOOP_STYLE_METRIC_VERSION,
+      }));
+      await inner.healthMetrics.upsertMetricResult(parseMetricResult({
+        userId,
+        civilDate: '2026-08-24',
+        metricName: 'strain',
+        metricVersion: WHOOP_STYLE_METRIC_VERSION,
+        score: 3,
+        status: 'provisional',
+        quality: null,
+        reason: null,
+        evidence: [],
+        source: {
+          heartRateZones: false,
+          activityLevel: false,
+          exercise: false,
+          sleep: false,
+          hrv: false,
+          rhr: false,
+          sleepGoal: false,
+          timeZone: 'missing',
+        },
+        coverage: {
+          knownContextMinutes: 0,
+          rawHeartRateMinutes: 0,
+          attributedMinutes: 0,
+          lastKnownContextAt: null,
+        },
+      }));
+      await inner.healthMetrics.updateCursor({
+        connectionId,
+        dataType: 'heart-rate',
+        successfulWatermark: now,
+        lastErrorCode: undefined,
+        retryCount: 0,
+        nextAttemptAt: new Date('2026-08-24T13:00:00.000Z'),
+      });
+    }),
+    /sync lease no longer held/u,
+  );
+
+  const guards = pool.queries.filter((query) => query.text.includes('FROM google_health_connections') && query.text.includes('FOR UPDATE'));
+  assert.equal(guards.length, 2);
+  assert.ok(guards.every((query) => query.text.includes('clock_timestamp()')));
+  assert.equal(pool.queries.some((query) => query.text.includes('INSERT INTO daily_cardio')), true);
+  assert.equal(pool.queries.some((query) => query.text.includes('INSERT INTO metric_results')), true);
+  assert.equal(pool.queries.some((query) => query.text.includes('INSERT INTO health_sync_cursors')), true);
+  assert.equal(pool.queries.at(-1)?.text, 'ROLLBACK');
+  assert.equal(pool.queries.some((query) => query.text === 'COMMIT'), false);
 });

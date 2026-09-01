@@ -1836,6 +1836,26 @@ function storeFor(queryable: Queryable): AuthStore {
     },
   };
 
+  async function assertScheduledSyncLease(
+    lease: ScheduledSyncLease,
+    options: { allowPastDeadline?: boolean } | undefined,
+  ): Promise<void> {
+    const held = await queryable.query(
+      `SELECT id
+       FROM google_health_connections
+       WHERE id = $1 AND user_id = $2
+         AND sync_lease_token = $3::uuid
+         AND sync_lease_until = $4
+         AND sync_lease_until > clock_timestamp()
+         AND ($6::boolean OR clock_timestamp() < $5)
+       FOR UPDATE`,
+      [lease.connectionId, lease.userId, lease.leaseToken, lease.leaseUntil, lease.deadlineAt, options?.allowPastDeadline ?? false],
+    );
+    if (held.rowCount !== 1) {
+      throw new Error('sync lease no longer held');
+    }
+  }
+
   store = {
     async withTransaction<T>(fn: (inner: AuthStore) => Promise<T>): Promise<T> {
       const pool = canStartTransaction(queryable) ? queryable : undefined;
@@ -1859,21 +1879,10 @@ function storeFor(queryable: Queryable): AuthStore {
       if (canStartTransaction(queryable)) {
         return store.withTransaction((inner) => inner.withScheduledSyncLease(lease, fn, options));
       }
-      const held = await queryable.query(
-        `SELECT id
-         FROM google_health_connections
-         WHERE id = $1 AND user_id = $2
-           AND sync_lease_token = $3::uuid
-           AND sync_lease_until = $4
-           AND sync_lease_until > now()
-           AND ($6::boolean OR now() < $5)
-         FOR UPDATE`,
-        [lease.connectionId, lease.userId, lease.leaseToken, lease.leaseUntil, lease.deadlineAt, options?.allowPastDeadline ?? false],
-      );
-      if (held.rowCount !== 1) {
-        throw new Error('sync lease no longer held');
-      }
-      return fn(store);
+      await assertScheduledSyncLease(lease, options);
+      const result = await fn(store);
+      await assertScheduledSyncLease(lease, options);
+      return result;
     },
     users: {
       async insert(id: string): Promise<void> {
