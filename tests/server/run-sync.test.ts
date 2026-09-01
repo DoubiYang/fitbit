@@ -319,8 +319,9 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
     ],
   });
   const originalList = api.listDataPoints.bind(api);
+  let rhrRateLimited = true;
   api.listDataPoints = async (input) => {
-    if (input.dataType === 'daily-resting-heart-rate') {
+    if (input.dataType === 'daily-resting-heart-rate' && rhrRateLimited) {
       throw new Error('health api 429');
     }
     return originalList(input);
@@ -365,6 +366,43 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
   assert.equal(rhr?.nextAttemptAt?.toISOString(), '2026-08-24T12:30:00.000Z');
   const scheduled = await store.connections.findByUserId('u1');
   assert.equal(scheduled?.nextSyncAt?.toISOString(), '2026-08-24T12:30:00.000Z');
+
+  rhrRateLimited = false;
+  api.requests.length = 0;
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:30:00.000Z'),
+    api,
+    persistSnapshot: async (_userId, records) => {
+      persisted = records;
+    },
+    loadSnapshot: async () => ({ records: previous, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    loadRecords: async () => persisted ?? previous,
+    refresher: {
+      async refresh() {
+        throw new Error('should not refresh');
+      },
+    },
+  });
+
+  assert.deepEqual(
+    api.requests
+      .filter((request) =>
+        ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate', 'exercise'].includes(request.dataType),
+      )
+      .map((request) => request.dataType),
+    ['daily-resting-heart-rate'],
+  );
+  const retriedSleep = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'sleep' });
+  const retriedHrv = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'daily-heart-rate-variability' });
+  const retriedRhr = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'daily-resting-heart-rate' });
+  assert.equal(retriedSleep?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
+  assert.equal(retriedSleep?.nextAttemptAt?.toISOString(), '2026-08-24T13:00:00.000Z');
+  assert.equal(retriedHrv?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
+  assert.equal(retriedHrv?.nextAttemptAt?.toISOString(), '2026-08-24T13:00:00.000Z');
+  assert.equal(retriedRhr?.successfulWatermark?.toISOString(), '2026-08-24T12:30:00.000Z');
 });
 
 test('a later snapshot sleep recomputes historical strain without another HR backfill', async () => {
@@ -466,7 +504,10 @@ test('a later snapshot sleep recomputes historical strain without another HR bac
   assert.ok((before?.attributedMinutes ?? 0) > 0);
 
   snapshotFailed = false;
-  await syncUserConnection(syncOpts);
+  await syncUserConnection({
+    ...syncOpts,
+    now: new Date('2026-08-24T12:30:00.000Z'),
+  });
   const after = await store.healthMetrics.getDailyCardio({ userId: 'u1', civilDate: '2026-08-22' });
   assert.equal(after?.dose, 0);
   assert.equal(after?.attributedMinutes, 0);

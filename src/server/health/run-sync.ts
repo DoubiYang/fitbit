@@ -12,7 +12,7 @@ import {
   type LoadHealthRecords,
 } from './cardio-sync';
 import { createHealthApiClient, type HealthApiClient } from './health-api';
-import { GoogleHealthProvider } from './google-health-provider';
+import { GoogleHealthProvider, type SnapshotRecordDataType } from './google-health-provider';
 import { emptyUserHealthRecords, type HealthDateRange, type UserHealthRecords } from './provider';
 import { loadHealthSnapshot, saveHealthSnapshot, type HealthSnapshot } from './snapshot-store';
 
@@ -66,27 +66,36 @@ export async function syncUserConnection(input: {
     loadSnapshot,
   });
   let snapshotRecords: UserHealthRecords | undefined;
-  try {
-    const snapshot = await provider.syncRecords(connection.userId, { from, to });
-    snapshotRecords = snapshot.records;
-    for (const dataType of snapshot.succeededDataTypes) {
-      await input.store.healthMetrics.updateCursor({
-        connectionId: connection.id,
-        dataType,
-        ...successCursor(now),
-      });
+  const dueSnapshotTypes: SnapshotRecordDataType[] = [];
+  for (const dataType of SNAPSHOT_SYNC_TYPES) {
+    const cursor = await input.store.healthMetrics.readCursor({ connectionId: connection.id, dataType });
+    if (!cursor?.nextAttemptAt || cursor.nextAttemptAt.getTime() <= now.getTime()) {
+      dueSnapshotTypes.push(dataType);
     }
-    for (const failure of snapshot.failures) {
-      if (!SNAPSHOT_SYNC_TYPES.includes(failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number])) {
-        continue;
+  }
+  try {
+    if (dueSnapshotTypes.length > 0) {
+      const snapshot = await provider.syncRecords(connection.userId, { from, to }, dueSnapshotTypes);
+      snapshotRecords = snapshot.records;
+      for (const dataType of snapshot.succeededDataTypes) {
+        await input.store.healthMetrics.updateCursor({
+          connectionId: connection.id,
+          dataType,
+          ...successCursor(now),
+        });
       }
-      await scheduleTypeFailure({
-        store: input.store,
-        connectionId: connection.id,
-        dataType: failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number],
-        now,
-        error: failure.error,
-      });
+      for (const failure of snapshot.failures) {
+        if (!SNAPSHOT_SYNC_TYPES.includes(failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number])) {
+          continue;
+        }
+        await scheduleTypeFailure({
+          store: input.store,
+          connectionId: connection.id,
+          dataType: failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number],
+          now,
+          error: failure.error,
+        });
+      }
     }
   } catch (error) {
     const current = await input.store.connections.findByUserId(connection.userId);
@@ -99,7 +108,7 @@ export async function syncUserConnection(input: {
     if (error instanceof Error && /connection no longer syncable/i.test(error.message)) {
       return false;
     }
-    for (const dataType of SNAPSHOT_SYNC_TYPES) {
+    for (const dataType of dueSnapshotTypes) {
       await scheduleTypeFailure({
         store: input.store,
         connectionId: connection.id,

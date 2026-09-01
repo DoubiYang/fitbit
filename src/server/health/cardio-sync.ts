@@ -57,11 +57,11 @@ export type CardioSyncState = {
 export type LoadHealthRecords = (userId: string) => Promise<UserHealthRecords>;
 export type LoadHealthSnapshot = (userId: string) => Promise<HealthSnapshot | undefined>;
 
-export const SNAPSHOT_SYNC_TYPES: HealthSyncDataType[] = [
+export const SNAPSHOT_SYNC_TYPES = [
   'sleep',
   'daily-heart-rate-variability',
   'daily-resting-heart-rate',
-];
+] as const satisfies readonly HealthSyncDataType[];
 
 function recordsLoader(input: {
   loadRecords?: LoadHealthRecords;
