@@ -72,6 +72,7 @@ export class GoogleHealthProvider implements HealthProvider {
     userId: string,
     range: HealthDateRange,
     requestedDataTypes: SnapshotRecordDataType[] = SNAPSHOT_RECORD_TYPES,
+    useInitialBackfillRange = false,
   ): Promise<{
     records: UserHealthRecords;
     hasSuccessfulQuery: boolean;
@@ -98,7 +99,7 @@ export class GoogleHealthProvider implements HealthProvider {
     const api = this.input.api ?? createHealthApiClient();
     const syncedAt = this.input.now ?? new Date();
     const previous = this.input.loadSnapshot ? await this.input.loadSnapshot(userId) : undefined;
-    const queryRange = previous ? fortyEightHourRange(syncedAt) : range;
+    const queryRange = previous && !useInitialBackfillRange ? fortyEightHourRange(syncedAt) : range;
     const until = exclusiveEnd(queryRange.to);
     const includeExercise = SNAPSHOT_RECORD_TYPES.every((dataType) => requestedDataTypes.includes(dataType));
     const queries: Array<{ dataType: SnapshotQueryDataType; request: () => Promise<GoogleDataPoint[]> }> = [
@@ -222,8 +223,9 @@ export class GoogleHealthProvider implements HealthProvider {
     userId: string,
     range: HealthDateRange,
     requestedDataTypes: SnapshotRecordDataType[] = SNAPSHOT_RECORD_TYPES,
+    useInitialBackfillRange = false,
   ): Promise<SnapshotRecordSyncResult> {
-    const collected = await this.collectRecords(userId, range, requestedDataTypes);
+    const collected = await this.collectRecords(userId, range, requestedDataTypes, useInitialBackfillRange);
     if (collected.hasSuccessfulQuery) {
       await this.persistRecords(
         userId,

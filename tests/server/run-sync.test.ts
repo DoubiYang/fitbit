@@ -9,6 +9,7 @@ import type { HealthApiClient } from '../../src/server/health/health-api';
 import type { GoogleDataPoint } from '../../src/server/health/map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
 import { syncUserConnection } from '../../src/server/health/run-sync';
+import type { HealthSnapshot } from '../../src/server/health/snapshot-store';
 
 const key = Buffer.alloc(32, 3).toString('base64');
 const keyBuffer = Buffer.alloc(32, 3);
@@ -47,7 +48,7 @@ function connection(overrides: Partial<ConnectionRow> & Pick<ConnectionRow, 'id'
   };
 }
 
-test('initial sync only reads the selected active user for the recent 35-day UTC range', async () => {
+test('initial sync only reads the selected active user for the UTC-wide 35-day backfill range', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.users.insert('u2');
@@ -68,10 +69,10 @@ test('initial sync only reads the selected active user for the recent 35-day UTC
   });
 
   assert.equal(result, true);
-  assert.deepEqual(seen, ['u1:2026-07-21:2026-08-24']);
+  assert.deepEqual(seen, ['u1:2026-07-19:2026-08-24']);
 });
 
-test('35-day snapshot window uses UTC civil dates, not Asia/Shanghai', async () => {
+test('35-day snapshot window uses a UTC-wide range, not Asia/Shanghai', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.connections.insert(connection({ id: 'c1', userId: 'u1', healthUserId: 'h1' }));
@@ -87,8 +88,27 @@ test('35-day snapshot window uses UTC civil dates, not Asia/Shanghai', async () 
     },
   });
 
-  assert.deepEqual(seen, ['u1:2026-07-20:2026-08-23']);
-  assert.notEqual(seen[0], 'u1:2026-07-21:2026-08-24');
+  assert.deepEqual(seen, ['u1:2026-07-18:2026-08-23']);
+  assert.notEqual(seen[0], 'u1:2026-07-20:2026-08-23');
+});
+
+test('initial UTC-wide backfill covers a UTC-8 user local day at a UTC date boundary', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+
+  const seen: string[] = [];
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T00:30:00.000Z'),
+    syncOne: async (row, range) => {
+      seen.push(`${row.userId}:${range.from}:${range.to}`);
+    },
+  });
+
+  assert.deepEqual(seen, ['u1:2026-07-19:2026-08-24']);
 });
 
 test('initial sync does not read an expired or disconnected connection', async () => {
@@ -403,6 +423,47 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
   assert.equal(retriedHrv?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
   assert.equal(retriedHrv?.nextAttemptAt?.toISOString(), '2026-08-24T13:00:00.000Z');
   assert.equal(retriedRhr?.successfulWatermark?.toISOString(), '2026-08-24T12:30:00.000Z');
+});
+
+test('an initial RHR retry retains the 35-day backfill window without refetching successful snapshot types', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const api = createFakeApi({});
+  const originalList = api.listDataPoints.bind(api);
+  let rhrRateLimited = true;
+  api.listDataPoints = async (input) => {
+    if (input.dataType === 'daily-resting-heart-rate' && rhrRateLimited) {
+      throw new Error('health api 429');
+    }
+    return originalList(input);
+  };
+  let persisted: HealthSnapshot | undefined;
+  const sync = async (now: Date) =>
+    syncUserConnection({
+      config: oauthConfig(),
+      store,
+      userId: 'u1',
+      now,
+      api,
+      persistSnapshot: async (_userId, records, syncedAt) => {
+        persisted = { records, syncedAt };
+      },
+      loadSnapshot: async () => persisted,
+      loadRecords: async () => persisted?.records ?? emptyUserHealthRecords(),
+      refresher: { async refresh() { throw new Error('should not refresh'); } },
+    });
+
+  await sync(new Date('2026-08-24T12:00:00.000Z'));
+  rhrRateLimited = false;
+  api.requests.length = 0;
+  await sync(new Date('2026-08-24T12:30:00.000Z'));
+
+  const snapshotRequests = api.requests.filter((request) =>
+    ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate', 'exercise'].includes(request.dataType),
+  );
+  assert.deepEqual(snapshotRequests.map((request) => request.dataType), ['daily-resting-heart-rate']);
+  assert.match(snapshotRequests[0]?.filter ?? '', /daily_resting_heart_rate\.date >= "2026-07-19"/);
 });
 
 test('a later snapshot sleep recomputes historical strain without another HR backfill', async () => {

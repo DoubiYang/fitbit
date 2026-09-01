@@ -1,8 +1,8 @@
 import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow } from '../auth/types';
-import { civilDateRange } from '../time/civil-date';
 import { createGoogleTokenRefresher, resolveAccessToken, TokenRefreshError, type TokenRefresher } from './access-token';
 import {
+  initialCivilBackfillRange,
   isUnsyncableError,
   scheduleTypeFailure,
   SNAPSHOT_SYNC_TYPES,
@@ -31,7 +31,7 @@ export async function syncUserConnection(input: {
 }): Promise<boolean> {
   const now = input.now ?? new Date();
   const rangeDays = input.rangeDays ?? 35;
-  const { from, to } = civilDateRange(now, rangeDays, 'UTC');
+  const { from, to } = initialCivilBackfillRange(now, rangeDays);
   const persistSnapshot =
     input.persistSnapshot ??
     ((userId, records, syncedAt) =>
@@ -67,15 +67,22 @@ export async function syncUserConnection(input: {
   });
   let snapshotRecords: UserHealthRecords | undefined;
   const dueSnapshotTypes: SnapshotRecordDataType[] = [];
+  let hasIncompleteSnapshotBackfill = false;
   for (const dataType of SNAPSHOT_SYNC_TYPES) {
     const cursor = await input.store.healthMetrics.readCursor({ connectionId: connection.id, dataType });
     if (!cursor?.nextAttemptAt || cursor.nextAttemptAt.getTime() <= now.getTime()) {
       dueSnapshotTypes.push(dataType);
+      hasIncompleteSnapshotBackfill ||= !cursor?.successfulWatermark;
     }
   }
   try {
     if (dueSnapshotTypes.length > 0) {
-      const snapshot = await provider.syncRecords(connection.userId, { from, to }, dueSnapshotTypes);
+      const snapshot = await provider.syncRecords(
+        connection.userId,
+        { from, to },
+        dueSnapshotTypes,
+        hasIncompleteSnapshotBackfill,
+      );
       snapshotRecords = snapshot.records;
       for (const dataType of snapshot.succeededDataTypes) {
         await input.store.healthMetrics.updateCursor({

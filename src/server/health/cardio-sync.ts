@@ -111,6 +111,11 @@ function utcDate(instant: Date): string {
   return instant.toISOString().slice(0, 10);
 }
 
+export function initialCivilBackfillRange(now: Date, rangeDays = 35): { from: string; to: string } {
+  const to = utcDate(now);
+  return { from: addCivilDays(to, -(rangeDays + 1)), to };
+}
+
 function cursorErrorCode(error: unknown): string {
   return error instanceof Error && /health api 429/i.test(error.message) ? 'rate_limited' : 'sync_failed';
 }
@@ -140,8 +145,8 @@ function physicalWindow(now: Date, watermark: Date | undefined, overlapMs: numbe
 }
 
 function utcWideWindow(now: Date): QueryWindow {
-  const today = utcDate(now);
-  return { from: addCivilDays(today, -36), untilExclusive: addCivilDays(today, 1) };
+  const range = initialCivilBackfillRange(now);
+  return { from: range.from, untilExclusive: addCivilDays(range.to, 1) };
 }
 
 function fortyEightHourCivilWindow(now: Date): QueryWindow {
