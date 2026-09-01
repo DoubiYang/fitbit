@@ -596,7 +596,7 @@ test('activity-level pages use the conservative four-date recompute envelope wit
   assert.ok(state.affectedDates.includes('2026-08-21'));
   assert.ok(state.affectedDates.includes('2026-08-22'));
   assert.ok(state.affectedDates.includes('2026-08-23'));
-  assert.ok(minuteRangeReads < 12, `expected no per-interval minute lookup, got ${minuteRangeReads}`);
+  assert.equal(minuteRangeReads, 0, `expected no per-interval minute lookup, got ${minuteRangeReads}`);
 });
 
 test('exercise arriving before or after heart-rate yields the same attributed dose', async () => {
