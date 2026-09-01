@@ -30,15 +30,17 @@
 - Test: `tests/server/sync-schedule-store.test.ts`
 - Test: `tests/server/run-sync.test.ts`
 - Test: `tests/server/health-provider.test.ts`
+- Test: `tests/server/postgres-scheduled-sync-fencing.test.ts`
+- Test: `tests/server/access-token.test.ts`
 - Test: `tests/worker/sync-loop.test.ts`
 
 - [ ] **Step 1: Write the failing lease-fencing tests**
 
-Cover a claim receiving a nonempty token, a finish/expire/clear call with the wrong token being rejected, and a stale first run being unable to write page aggregates, snapshot, refreshed token envelope, success watermark, cursor, metric result, completion, or failure state after a second run has claimed the same connection. Use an abortable fake iterator and fake clock to prove that the server deadline stops later Google-page fetches and writes, advances no watermark, and schedules/releases only its own token.
+Cover a claim receiving a nonempty token, a finish/expire/clear call with the wrong token being rejected, and a stale first run being unable to write page aggregates, snapshot, refreshed token envelope, success watermark, cursor, metric result, completion, or failure state after a second run has claimed the same connection. Add dedicated Postgres-query mock coverage for snapshot persistence and refreshed token-envelope updates: each write must include `connectionId`, `userId`, the old run token, and an unexpired lease in its single atomic SQL statement, and an old token must produce `rowCount = 0`. Use an abortable fake iterator and fake clock to prove that the server deadline stops later Google-page fetches and writes, advances no watermark, and schedules/releases only its own token.
 
 - [ ] **Step 2: Run the focused scheduled-sync tests to verify RED**
 
-Run: `npm test -- tests/server/scheduled-sync.test.ts tests/server/sync-schedule-store.test.ts`
+Run: `npm test -- tests/server/scheduled-sync.test.ts tests/server/sync-schedule-store.test.ts tests/server/postgres-scheduled-sync-fencing.test.ts tests/server/access-token.test.ts`
 
 Expected: FAIL because no token is stored or matched.
 
@@ -52,14 +54,14 @@ Create a run context containing `connectionId`, `userId`, `leaseToken`, `leaseUn
 
 - [ ] **Step 5: Align the worker deadline and run GREEN tests**
 
-Set the worker HTTP deadline longer than the server-owned deadline, while still finite. Run: `npm test -- tests/server/scheduled-sync.test.ts tests/server/sync-schedule-store.test.ts tests/server/run-sync.test.ts tests/server/health-provider.test.ts tests/worker/sync-loop.test.ts`
+Set the worker HTTP deadline longer than the server-owned deadline, while still finite. Run: `npm test -- tests/server/scheduled-sync.test.ts tests/server/sync-schedule-store.test.ts tests/server/run-sync.test.ts tests/server/health-provider.test.ts tests/server/postgres-scheduled-sync-fencing.test.ts tests/server/access-token.test.ts tests/worker/sync-loop.test.ts`
 
 Expected: PASS; no stale run can persist after takeover and no cursor advances on abort.
 
 - [ ] **Step 6: Commit Task 1**
 
 ```bash
-git add db/migrations/011_sync_lease_fencing.sql src/server/auth/types.ts src/server/db/memory-store.ts src/server/db/postgres-store.ts src/server/health/scheduled-sync.ts src/server/health/run-sync.ts src/server/health/google-health-provider.ts src/server/health/cardio-sync.ts src/server/health/health-api.ts src/server/health/cardio-store.ts worker/sync-loop.mjs tests/server/scheduled-sync.test.ts tests/server/sync-schedule-store.test.ts tests/server/run-sync.test.ts tests/server/health-provider.test.ts tests/worker/sync-loop.test.ts
+git add db/migrations/011_sync_lease_fencing.sql src/server/auth/types.ts src/server/db/memory-store.ts src/server/db/postgres-store.ts src/server/health/scheduled-sync.ts src/server/health/run-sync.ts src/server/health/google-health-provider.ts src/server/health/cardio-sync.ts src/server/health/health-api.ts src/server/health/cardio-store.ts src/server/health/snapshot-store.ts src/server/health/access-token.ts worker/sync-loop.mjs tests/server/scheduled-sync.test.ts tests/server/sync-schedule-store.test.ts tests/server/run-sync.test.ts tests/server/health-provider.test.ts tests/server/postgres-scheduled-sync-fencing.test.ts tests/server/access-token.test.ts tests/worker/sync-loop.test.ts
 git commit -m "fix: fence scheduled health sync runs"
 ```
 
