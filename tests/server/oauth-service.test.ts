@@ -215,6 +215,7 @@ test('reauthorize does not clear a live sync lease', async () => {
     ...current!,
     nextSyncAt: now,
     syncLeaseUntil: leaseUntil,
+    syncLeaseToken: 'live-lease-token',
     lastSyncAttemptAt: now,
   });
 
@@ -222,6 +223,7 @@ test('reauthorize does not clear a live sync lease', async () => {
   assert.equal(reauth.authError, undefined);
   const updated = await store.connections.findByUserId(userId!);
   assert.equal(updated?.syncLeaseUntil?.toISOString(), leaseUntil.toISOString());
+  assert.equal(updated?.syncLeaseToken, 'live-lease-token');
 
   const result = await runDueSyncForUser({
     config: oauthConfig(),
@@ -233,6 +235,26 @@ test('reauthorize does not clear a live sync lease', async () => {
     },
   });
   assert.deepEqual(result, { claimed: 0, succeeded: 0, failed: 0 });
+});
+
+test('reauthorize clears a stale sync lease token after the lease expires', async () => {
+  const store = createMemoryStore();
+  const first = await startAndCallback({ store, google: googleClient() });
+  const userId = await readSessionUserId(store, first.sessionToken, now);
+  const current = await store.connections.findByUserId(userId!);
+  await store.connections.update({
+    ...current!,
+    syncLeaseUntil: new Date(now.getTime() - 1),
+    syncLeaseToken: 'stale-lease-token',
+    lastSyncAttemptAt: now,
+  });
+
+  const reauth = await startAndCallback({ store, google: googleClient(), sessionUserId: userId });
+  assert.equal(reauth.authError, undefined);
+  const updated = await store.connections.findByUserId(userId!);
+  assert.equal(updated?.syncLeaseUntil, undefined);
+  assert.equal(updated?.syncLeaseToken, undefined);
+  assert.equal(updated?.lastSyncAttemptAt, undefined);
 });
 
 test('logged-in callback cannot attach another user identity', async () => {
@@ -349,6 +371,8 @@ test('disconnect still clears local credentials when Google revoke fails', async
   const store = createMemoryStore();
   const first = await startAndCallback({ store, google: googleClient() });
   const userId = await readSessionUserId(store, first.sessionToken, now);
+  const current = await store.connections.findByUserId(userId!);
+  await store.connections.update({ ...current!, syncLeaseToken: 'stale-lease-token' });
   const failing = googleClient({
     async revoke() {
       throw new Error('google down');
@@ -356,6 +380,8 @@ test('disconnect still clears local credentials when Google revoke fails', async
   });
   const result = await disconnectUser({ store, google: failing, config: oauthConfig(), userId: userId!, now });
   assert.equal(result.googleRevokeFailed, true);
-  assert.equal((await store.connections.findByUserId(userId!))?.status, 'disconnected');
+  const disconnected = await store.connections.findByUserId(userId!);
+  assert.equal(disconnected?.status, 'disconnected');
+  assert.equal(disconnected?.syncLeaseToken, undefined);
   assert.equal(await readSessionUserId(store, first.sessionToken, now), undefined);
 });

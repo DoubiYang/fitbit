@@ -14,6 +14,6 @@ export async function handleInternalSync(request: Request, deps: HttpDeps): Prom
   if (!hasValidSyncBearerToken(request.headers.get('Authorization') ?? undefined, deps.config.syncSecret)) {
     return Response.json({ error: 'unauthorized' }, { status: 401, headers: noStore });
   }
-  const result = await runDueSyncs({ config: deps.config, store: deps.store });
+  const result = await runDueSyncs({ config: deps.config, store: deps.store, limit: 1 });
   return Response.json(result, { headers: noStore });
 }

@@ -94,6 +94,7 @@ function applyTokens(
     nextSyncAt: now,
     syncRetryCount: 0,
     syncLeaseUntil: liveLease,
+    syncLeaseToken: liveLease ? row.syncLeaseToken : undefined,
     lastSyncAttemptAt: liveLease ? row.lastSyncAttemptAt : undefined,
   };
 }
@@ -114,6 +115,7 @@ function clearTokens(row: ConnectionRow, now: Date): ConnectionRow {
     nextSyncAt: undefined,
     syncRetryCount: 0,
     syncLeaseUntil: undefined,
+    syncLeaseToken: undefined,
     lastSyncAttemptAt: undefined,
   };
 }
