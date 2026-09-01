@@ -22,21 +22,25 @@ The public `HealthMetricsStore` interface and the in-memory test store stay unch
 
 For Postgres only:
 
-- minute aggregate upserts validate all rows, read matching existing rows in one set operation, retain the established merge rule in TypeScript, then issue one set-based upsert per page;
+- minute aggregate upserts validate all rows, fold duplicate `(userId, sourceFamily, minuteStartUtc)` inputs in arrival order using the existing merge rule, read matching stored rows in one set operation, retain that merge rule in TypeScript, then issue one set-based upsert per page;
 - activity-level interval upserts validate all rows and issue one set-based upsert per page;
 - activity ingestion marks conservative affected civil dates from each interval's UTC start/end envelope. It no longer queries stored minutes once per interval merely to find dates already covered by that envelope.
 
 The envelope includes the UTC day before the start and the day after the end, so it covers every possible local date for offsets from UTC-14 through UTC+14. Recompute remains the single place that assigns an activity level to stored minutes.
 
-### 3. Align worker request lifetime with the sync lease
+Both Postgres operations use a single JSON parameter decoded through `jsonb_to_recordset` in an input CTE, rather than a parameterized `VALUES` list. This keeps a 10,000-row page below the PostgreSQL extended-protocol parameter limit. The matching-existing read and the final upsert are each one set operation; the JSON payload is not logged.
 
-The worker request deadline becomes shorter than, but close to, the 15-minute connection lease. This avoids a false four-minute failure while a bounded first backfill is still working. A genuinely stalled request will release or naturally expire its lease and follow the existing retry schedule; success watermarks are still written only after the full cardio transaction completes.
+### 3. Fence each scheduled run with lease ownership
+
+Claiming a scheduled sync generates an opaque lease token as well as an expiry. The token travels through snapshot persistence, cardio ingestion, recompute, cursor updates, and scheduled completion. Every write is fenced in the database by the connection id, user id, token, and an unexpired lease; a stale run therefore cannot write pages, results, cursors, or completion state after a newer run has claimed the connection.
+
+The server creates its own abort deadline with at least one minute of cleanup headroom before the 15-minute lease expires. It propagates that signal into Google fetches and checks it between streamed pages and before writes. The worker HTTP timeout is longer than the server deadline. An aborted run uses the existing failure schedule and clears its matching lease token; it never advances success watermarks. Lease expiry alone is not treated as proof that the prior server request stopped.
 
 ## Data and failure guarantees
 
-- A canceled, failed, or unsyncable run never advances a cardio cursor or produces a completed score.
+- A canceled, failed, stale-token, or unsyncable run never advances a cardio cursor or produces a completed score.
 - Existing heart-rate minute merge behavior, per-type cursors, overlap windows, source isolation, and time-zone/DST safeguards do not change.
-- If a worker request outlives its deadline, a future run cannot claim the connection until its lease has been released or expired; it does not overlap the active run.
+- A future run may claim only after the prior token has been released or expired, and every pending write from the old token is then rejected by its database fence.
 - The dashboard continues to show unavailable/provisional state until stored metric results are committed.
 
 ## Tests and live validation
@@ -45,7 +49,8 @@ Add failing tests before implementation for:
 
 1. high-volume default and explicit page size for `time-in-heart-rate-zone`;
 2. one activity-level page uses a bounded number of store range reads while preserving all potentially affected local dates;
-3. Postgres page-sized minute/activity writes issue set-based operations instead of per-row read/write pairs;
-4. the worker deadline remains below the lease duration.
+3. Postgres page-sized minute/activity writes use a JSON CTE and issue set-based operations instead of per-row read/write pairs, including a 10,000-row page without parameter overflow;
+4. an old run that is aborted or whose lease token is superseded cannot write a page, cursor, result, or completion state after a new run claims the connection;
+5. the server deadline provides cleanup headroom below the lease and the worker deadline is longer than the server deadline.
 
 Then run focused tests, the full suite, lint, and production build. Rebuild the local Docker services, wait for the abandoned pre-fix lease to become claimable (or safely expire it using the existing state transition), and validate only anonymous row counts, cursor state, result count, and freshness/quality labels from the authorized account.
