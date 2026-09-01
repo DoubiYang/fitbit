@@ -282,6 +282,7 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
   const previous = {
     ...emptyUserHealthRecords(),
     dailyHrv: [{ userId: 'u1', source: 'google_health' as const, sourceRecordId: 'hrv-keep', date: '2026-08-04', valueMs: 44 }],
+    dailyRhr: [{ userId: 'u1', source: 'google_health' as const, sourceRecordId: 'rhr-keep', date: '2026-08-04', valueBpm: 52 }],
   };
   const api = createFakeApi({
     sleep: [
@@ -373,8 +374,10 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
   assert.equal(heartRate?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
   assert.equal(persisted?.sleepSessions.length, 1);
   assert.deepEqual(persisted?.dailyHrv.map((row) => [row.date, row.valueMs]), [
-    ['2026-08-04', 44],
     ['2026-08-22', 52],
+  ]);
+  assert.deepEqual(persisted?.dailyRhr.map((row) => [row.date, row.valueBpm]), [
+    ['2026-08-04', 52],
   ]);
   const sleep = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'sleep' });
   assert.equal(sleep?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
@@ -615,6 +618,43 @@ test('a snapshot-only HRV revision recomputes Recovery when cardio pages are emp
   });
   assert.ok(recovery);
   assert.equal(recovery.source.hrv, true);
+});
+
+test('a successful empty snapshot refresh recomputes Recovery without deleted HRV or RHR', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.connections.insert(liveConnection('u1', 'c1'));
+  const previous: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyHrv: [{ userId: 'u1', source: 'google_health', sourceRecordId: 'hrv-23', date: '2026-08-23', valueMs: 61 }],
+    dailyRhr: [{ userId: 'u1', source: 'google_health', sourceRecordId: 'rhr-23', date: '2026-08-23', valueBpm: 52 }],
+  };
+  let persisted: UserHealthRecords | undefined;
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    api: createFakeApi({}),
+    persistSnapshot: async (_userId, records) => {
+      persisted = records;
+    },
+    loadSnapshot: async () => ({ records: previous, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    loadRecords: async () => persisted ?? previous,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  assert.equal(persisted?.dailyHrv.some((row) => row.date === '2026-08-23'), false);
+  assert.equal(persisted?.dailyRhr.some((row) => row.date === '2026-08-23'), false);
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId: 'u1',
+    civilDate: '2026-08-23',
+    metricName: 'recovery',
+  });
+  assert.ok(recovery);
+  assert.equal(recovery.source.hrv, false);
+  assert.equal(recovery.source.rhr, false);
 });
 
 test('does not ingest cardio after the connection is no longer syncable', async () => {
@@ -974,7 +1014,7 @@ test('an incremental snapshot merge recomputes only dates changed in its 48-hour
 
   assert.equal((await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'sleep' }))?.lastErrorCode, undefined);
   assert.ok(persisted);
-  assert.equal(persisted.dailyHrv.length, 35);
+  assert.equal(persisted.dailyHrv.length, 32);
   assert.ok(await store.healthMetrics.getMetricResult({
     userId: 'u1',
     civilDate: '2026-08-24',

@@ -455,7 +455,7 @@ test('mergeHealthRecords keeps 35 civil days of HRV and lets incoming records wi
   );
 });
 
-test('a 48-hour refresh does not drop a 20-day-old HRV snapshot', async () => {
+test('a successful 48-hour refresh removes absent in-window records but keeps older snapshot history', async () => {
   const config = loadConfig({
     DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
@@ -492,7 +492,43 @@ test('a 48-hour refresh does not drop a 20-day-old HRV snapshot', async () => {
   await store.connections.insert(connection);
   const existing: UserHealthRecords = {
     ...emptyUserHealthRecords(),
-    dailyHrv: [{ userId: 'u7', source: 'google_health', sourceRecordId: 'hrv-20d', date: '2026-08-04', valueMs: 48 }],
+    sleepSessions: [
+      {
+        userId: 'u7',
+        source: 'google_health',
+        sourceRecordId: 'sleep-in-window',
+        id: 'sleep-in-window',
+        startTime: '2026-08-21T22:00:00.000Z',
+        endTime: '2026-08-22T06:00:00.000Z',
+        civilEndDate: '2026-08-22',
+        utcOffsetMinutes: 0,
+        minutesAsleep: 400,
+        timeInBedMinutes: 480,
+        awakeMinutes: 80,
+        isNap: false,
+        processed: true,
+      },
+      {
+        userId: 'u7',
+        source: 'google_health',
+        sourceRecordId: 'sleep-before-window',
+        id: 'sleep-before-window',
+        startTime: '2026-08-20T22:00:00.000Z',
+        endTime: '2026-08-21T06:00:00.000Z',
+        civilEndDate: '2026-08-21',
+        utcOffsetMinutes: 0,
+        minutesAsleep: 390,
+        timeInBedMinutes: 480,
+        awakeMinutes: 90,
+        isNap: false,
+        processed: true,
+      },
+    ],
+    dailyHrv: [
+      { userId: 'u7', source: 'google_health', sourceRecordId: 'hrv-20d', date: '2026-08-04', valueMs: 48 },
+      { userId: 'u7', source: 'google_health', sourceRecordId: 'hrv-in-window', date: '2026-08-23', valueMs: 46 },
+    ],
+    dailyRhr: [{ userId: 'u7', source: 'google_health', sourceRecordId: 'rhr-in-window', date: '2026-08-23', valueBpm: 52 }],
   };
   const filters: string[] = [];
   let persisted: UserHealthRecords | undefined;
@@ -531,10 +567,19 @@ test('a 48-hour refresh does not drop a 20-day-old HRV snapshot', async () => {
     },
   });
 
-  const records = await provider.listRecords('u7', range);
+  const result = await provider.syncRecords('u7', range);
+  const records = result.records;
+  assert.ok(records);
   assert.equal(records.dailyHrv.some((row) => row.date === '2026-08-04' && row.valueMs === 48), true);
   assert.equal(records.dailyHrv.some((row) => row.date === '2026-08-24' && row.valueMs === 52), true);
+  assert.equal(records.dailyHrv.some((row) => row.date === '2026-08-23'), false);
+  assert.equal(records.dailyRhr.some((row) => row.date === '2026-08-23'), false);
+  assert.equal(records.sleepSessions.some((row) => row.sourceRecordId === 'sleep-in-window'), false);
+  assert.equal(records.sleepSessions.some((row) => row.sourceRecordId === 'sleep-before-window'), true);
   assert.equal(persisted?.dailyHrv.some((row) => row.date === '2026-08-04'), true);
+  assert.equal(persisted?.dailyHrv.some((row) => row.date === '2026-08-23'), false);
+  assert.equal(result.affectedDates.includes('2026-08-22'), true);
+  assert.equal(result.affectedDates.includes('2026-08-23'), true);
   assert.equal(
     filters.some((filter) => filter.startsWith('daily-heart-rate-variability:') && filter.includes('2026-08-22')),
     true,
@@ -658,7 +703,7 @@ test('mergeHealthRecords keeps a sleep session by sourceRecordId and lets the sa
   );
 });
 
-test('a 48-hour sleep refresh keeps an older session and replaces the same sourceRecordId', async () => {
+test('a 48-hour sleep refresh removes absent in-window sessions and keeps returned sessions', async () => {
   const config = loadConfig({
     DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
     GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
@@ -755,9 +800,6 @@ test('a 48-hour sleep refresh keeps an older session and replaces the same sourc
   const records = await provider.listRecords('u8', range);
   assert.deepEqual(
     records.sleepSessions.map((row) => [row.sourceRecordId, row.minutesAsleep]),
-    [
-      ['sleep-a', 300],
-      ['sleep-b', 410],
-    ],
+    [['sleep-b', 410]],
   );
 });

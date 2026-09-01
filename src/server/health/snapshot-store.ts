@@ -10,6 +10,15 @@ export type HealthSnapshot = {
 
 export const HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS = 35;
 
+export type AuthoritativeHealthRecordWindow = {
+  from: string;
+  untilExclusive: string;
+  sleepSessions?: boolean;
+  dailyHrv?: boolean;
+  dailyRhr?: boolean;
+  trainingDays?: boolean;
+};
+
 function addCivilDays(date: string, days: number): string {
   const next = new Date(`${date}T00:00:00.000Z`);
   next.setUTCDate(next.getUTCDate() + days);
@@ -25,6 +34,10 @@ function mergeByKey<T>(existing: T[], incoming: T[], keyOf: (row: T) => string):
     merged.set(keyOf(row), row);
   }
   return [...merged.values()];
+}
+
+function inAuthoritativeWindow(date: string, window: AuthoritativeHealthRecordWindow | undefined): boolean {
+  return Boolean(window && date >= window.from && date < window.untilExclusive);
 }
 
 function addChangedDates<T>(input: {
@@ -90,19 +103,44 @@ export function changedHealthRecordDates(
 export function mergeHealthRecords(
   existing: UserHealthRecords | undefined,
   incoming: UserHealthRecords,
-  options: { retainCivilDays?: number; now: Date },
+  options: { retainCivilDays?: number; now: Date; authoritative?: AuthoritativeHealthRecordWindow },
 ): UserHealthRecords {
   const retain = options.retainCivilDays ?? HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS;
   const nowCivil = options.now.toISOString().slice(0, 10);
   const sleepSessions = mergeByKey(
-    existing?.sleepSessions ?? [],
+    (existing?.sleepSessions ?? []).filter(
+      (row) =>
+        !options.authoritative?.sleepSessions ||
+        row.source !== 'google_health' ||
+        !inAuthoritativeWindow(row.civilEndDate, options.authoritative),
+    ),
     incoming.sleepSessions,
     (row: SleepSession) => row.sourceRecordId || row.id,
   );
-  const dailyHrv = mergeByKey(existing?.dailyHrv ?? [], incoming.dailyHrv, (row: DailyHrv) => row.date);
-  const dailyRhr = mergeByKey(existing?.dailyRhr ?? [], incoming.dailyRhr, (row: DailyRhr) => row.date);
+  const dailyHrv = mergeByKey(
+    (existing?.dailyHrv ?? []).filter(
+      (row) =>
+        !options.authoritative?.dailyHrv ||
+        row.source !== 'google_health' ||
+        !inAuthoritativeWindow(row.date, options.authoritative),
+    ),
+    incoming.dailyHrv,
+    (row: DailyHrv) => row.date,
+  );
+  const dailyRhr = mergeByKey(
+    (existing?.dailyRhr ?? []).filter(
+      (row) =>
+        !options.authoritative?.dailyRhr ||
+        row.source !== 'google_health' ||
+        !inAuthoritativeWindow(row.date, options.authoritative),
+    ),
+    incoming.dailyRhr,
+    (row: DailyRhr) => row.date,
+  );
   const trainingDays = mergeByKey(
-    existing?.trainingDays ?? [],
+    (existing?.trainingDays ?? []).filter(
+      (row) => !options.authoritative?.trainingDays || !inAuthoritativeWindow(row.date, options.authoritative),
+    ),
     incoming.trainingDays,
     (row: TrainingDay) => row.date,
   );

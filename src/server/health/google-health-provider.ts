@@ -179,7 +179,18 @@ export class GoogleHealthProvider implements HealthProvider {
         ? mapTrainingDays(exercisePoints, userId, inclusiveDates(queryRange.from, queryRange.to))
         : [],
     };
-    const records = mergeHealthRecords(previous?.records, incoming, { retainCivilDays: 35, now: syncedAt });
+    const records = mergeHealthRecords(previous?.records, incoming, {
+      retainCivilDays: 35,
+      now: syncedAt,
+      authoritative: {
+        from: queryRange.from,
+        untilExclusive: until,
+        sleepSessions: pointsByType.has('sleep'),
+        dailyHrv: pointsByType.has('daily-heart-rate-variability'),
+        dailyRhr: pointsByType.has('daily-resting-heart-rate'),
+        trainingDays: pointsByType.has('exercise'),
+      },
+    });
     const succeededDataTypes = requestedDataTypes.filter((dataType) =>
       pointsByType.has(dataType),
     );
