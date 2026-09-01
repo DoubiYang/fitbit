@@ -67,12 +67,25 @@ export async function syncUserConnection(input: {
   });
   let snapshotRecords: UserHealthRecords | undefined;
   try {
-    snapshotRecords = await provider.listRecords(connection.userId, { from, to });
-    for (const dataType of SNAPSHOT_SYNC_TYPES) {
+    const snapshot = await provider.syncRecords(connection.userId, { from, to });
+    snapshotRecords = snapshot.records;
+    for (const dataType of snapshot.succeededDataTypes) {
       await input.store.healthMetrics.updateCursor({
         connectionId: connection.id,
         dataType,
         ...successCursor(now),
+      });
+    }
+    for (const failure of snapshot.failures) {
+      if (!SNAPSHOT_SYNC_TYPES.includes(failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number])) {
+        continue;
+      }
+      await scheduleTypeFailure({
+        store: input.store,
+        connectionId: connection.id,
+        dataType: failure.dataType as (typeof SNAPSHOT_SYNC_TYPES)[number],
+        now,
+        error: failure.error,
       });
     }
   } catch (error) {

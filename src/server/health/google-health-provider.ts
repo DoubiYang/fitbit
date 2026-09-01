@@ -27,6 +27,15 @@ type LiveProviderInput = {
   loadSnapshot?: (userId: string) => Promise<HealthSnapshot | undefined>;
 };
 
+export type SnapshotRecordDataType = 'sleep' | 'daily-heart-rate-variability' | 'daily-resting-heart-rate';
+type SnapshotQueryDataType = SnapshotRecordDataType | 'exercise';
+
+export type SnapshotRecordSyncResult = {
+  records?: UserHealthRecords;
+  succeededDataTypes: SnapshotRecordDataType[];
+  failures: Array<{ dataType: SnapshotQueryDataType; error: unknown }>;
+};
+
 function isSyncable(connection: ConnectionRow | undefined): connection is ConnectionRow {
   return connection?.status === 'active' || connection?.status === 'partial';
 }
@@ -54,9 +63,21 @@ export class GoogleHealthProvider implements HealthProvider {
 
   constructor(private readonly input: LiveProviderInput) {}
 
-  async listRecords(userId: string, range: HealthDateRange): Promise<UserHealthRecords> {
+  private async collectRecords(userId: string, range: HealthDateRange): Promise<{
+    records: UserHealthRecords;
+    hasSuccessfulQuery: boolean;
+    succeededDataTypes: SnapshotRecordDataType[];
+    failures: Array<{ dataType: SnapshotQueryDataType; error: unknown }>;
+    syncedAt: Date;
+  }> {
     if (userId !== this.input.connection.userId) {
-      return emptyUserHealthRecords();
+      return {
+        records: emptyUserHealthRecords(),
+        hasSuccessfulQuery: false,
+        succeededDataTypes: [],
+        failures: [],
+        syncedAt: this.input.now ?? new Date(),
+      };
     }
     const accessToken = await resolveAccessToken({
       config: this.input.config,
@@ -70,30 +91,57 @@ export class GoogleHealthProvider implements HealthProvider {
     const previous = this.input.loadSnapshot ? await this.input.loadSnapshot(userId) : undefined;
     const queryRange = previous ? fortyEightHourRange(syncedAt) : range;
     const until = exclusiveEnd(queryRange.to);
-    const [sleepPoints, hrvPoints, rhrPoints, exercisePoints] = await Promise.all([
-      api.listDataPoints({
-        accessToken,
+    const queries: Array<{ dataType: SnapshotQueryDataType; request: Promise<import('./map-records').GoogleDataPoint[]> }> = [
+      {
         dataType: 'sleep',
-        filter: dataPointFilter('sleep', queryRange.from, until),
-        pageSize: 25,
-      }),
-      api.listDataPoints({
-        accessToken,
+        request: api.listDataPoints({
+          accessToken,
+          dataType: 'sleep',
+          filter: dataPointFilter('sleep', queryRange.from, until),
+          pageSize: 25,
+        }),
+      },
+      {
         dataType: 'daily-heart-rate-variability',
-        filter: dataPointFilter('daily-heart-rate-variability', queryRange.from, until),
-      }),
-      api.listDataPoints({
-        accessToken,
+        request: api.listDataPoints({
+          accessToken,
+          dataType: 'daily-heart-rate-variability',
+          filter: dataPointFilter('daily-heart-rate-variability', queryRange.from, until),
+        }),
+      },
+      {
         dataType: 'daily-resting-heart-rate',
-        filter: dataPointFilter('daily-resting-heart-rate', queryRange.from, until),
-      }),
-      api.listDataPoints({
-        accessToken,
+        request: api.listDataPoints({
+          accessToken,
+          dataType: 'daily-resting-heart-rate',
+          filter: dataPointFilter('daily-resting-heart-rate', queryRange.from, until),
+        }),
+      },
+      {
         dataType: 'exercise',
-        filter: dataPointFilter('exercise', queryRange.from, until),
-        pageSize: 25,
-      }),
-    ]);
+        request: api.listDataPoints({
+          accessToken,
+          dataType: 'exercise',
+          filter: dataPointFilter('exercise', queryRange.from, until),
+          pageSize: 25,
+        }),
+      },
+    ];
+    const settled = await Promise.allSettled(queries.map((query) => query.request));
+    const pointsByType = new Map<SnapshotQueryDataType, import('./map-records').GoogleDataPoint[]>();
+    const failures: SnapshotRecordSyncResult['failures'] = [];
+    for (const [index, result] of settled.entries()) {
+      const query = queries[index]!;
+      if (result.status === 'fulfilled') {
+        pointsByType.set(query.dataType, result.value);
+      } else {
+        failures.push({ dataType: query.dataType, error: result.reason });
+      }
+    }
+    const sleepPoints = pointsByType.get('sleep') ?? [];
+    const hrvPoints = pointsByType.get('daily-heart-rate-variability') ?? [];
+    const rhrPoints = pointsByType.get('daily-resting-heart-rate') ?? [];
+    const exercisePoints = pointsByType.get('exercise') ?? [];
 
     const incoming: UserHealthRecords = {
       sleepSessions: sleepPoints.flatMap((point) => {
@@ -108,9 +156,29 @@ export class GoogleHealthProvider implements HealthProvider {
         const mapped = mapDailyRhr(point, userId);
         return mapped ? [mapped] : [];
       }),
-      trainingDays: mapTrainingDays(exercisePoints, userId, inclusiveDates(queryRange.from, queryRange.to)),
+      trainingDays: pointsByType.has('exercise')
+        ? mapTrainingDays(exercisePoints, userId, inclusiveDates(queryRange.from, queryRange.to))
+        : [],
     };
     const records = mergeHealthRecords(previous?.records, incoming, { retainCivilDays: 35, now: syncedAt });
+    const succeededDataTypes = (['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate'] as const).filter((dataType) =>
+      pointsByType.has(dataType),
+    );
+    return {
+      records,
+      hasSuccessfulQuery: pointsByType.size > 0,
+      succeededDataTypes,
+      failures,
+      syncedAt,
+    };
+  }
+
+  private async persistRecords(
+    userId: string,
+    records: UserHealthRecords,
+    syncedAt: Date,
+    markSnapshotSuccessful: boolean,
+  ): Promise<void> {
     const beforePersist = await this.input.store.connections.findByUserId(userId);
     if (!isSyncable(beforePersist)) {
       throw new Error('connection no longer syncable');
@@ -122,6 +190,9 @@ export class GoogleHealthProvider implements HealthProvider {
     if (!isSyncable(latest)) {
       throw new Error('connection no longer syncable');
     }
+    if (!markSnapshotSuccessful) {
+      return;
+    }
     const stamped = await this.input.store.connections.markLastSuccessfulSyncIfSyncable({
       id: latest.id,
       userId: latest.userId,
@@ -130,7 +201,35 @@ export class GoogleHealthProvider implements HealthProvider {
     if (!stamped) {
       throw new Error('connection no longer syncable');
     }
-    return records;
+  }
+
+  async syncRecords(userId: string, range: HealthDateRange): Promise<SnapshotRecordSyncResult> {
+    const collected = await this.collectRecords(userId, range);
+    if (collected.hasSuccessfulQuery) {
+      await this.persistRecords(
+        userId,
+        collected.records,
+        collected.syncedAt,
+        collected.succeededDataTypes.length === 3,
+      );
+    }
+    return {
+      records: collected.hasSuccessfulQuery ? collected.records : undefined,
+      succeededDataTypes: collected.succeededDataTypes,
+      failures: collected.failures,
+    };
+  }
+
+  async listRecords(userId: string, range: HealthDateRange): Promise<UserHealthRecords> {
+    const collected = await this.collectRecords(userId, range);
+    const firstFailure = collected.failures[0];
+    if (firstFailure) {
+      throw firstFailure.error;
+    }
+    if (collected.hasSuccessfulQuery) {
+      await this.persistRecords(userId, collected.records, collected.syncedAt, true);
+    }
+    return collected.records;
   }
 }
 

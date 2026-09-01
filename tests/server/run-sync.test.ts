@@ -255,7 +255,7 @@ test('live sync applies snapshot sleep before cardio recompute and sets hourly n
   assert.ok(api.requests.some((request) => request.dataType === 'heart-rate'));
 });
 
-test('a snapshot 429 still ingests heart-rate and retries the snapshot sooner than hourly', async () => {
+test('a daily RHR 429 persists successful snapshot types and retries only RHR sooner than hourly', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.connections.insert(liveConnection('u1', 'c1'));
@@ -264,6 +264,34 @@ test('a snapshot 429 still ingests heart-rate and retries the snapshot sooner th
     dailyHrv: [{ userId: 'u1', source: 'google_health' as const, sourceRecordId: 'hrv-keep', date: '2026-08-04', valueMs: 44 }],
   };
   const api = createFakeApi({
+    sleep: [
+      [
+        {
+          name: 'sleep-22',
+          sleep: {
+            type: 'STAGES',
+            interval: {
+              startTime: '2026-08-22T03:00:00.000Z',
+              endTime: '2026-08-22T11:00:00.000Z',
+              endUtcOffset: '0s',
+              civilEndTime: { date: { year: 2026, month: 8, day: 22 } },
+            },
+            summary: { minutesAsleep: '420', minutesInSleepPeriod: '480', minutesAwake: '60' },
+          },
+        },
+      ],
+    ],
+    'daily-heart-rate-variability': [
+      [
+        {
+          name: 'hrv-22',
+          dailyHeartRateVariability: {
+            date: { year: 2026, month: 8, day: 22 },
+            averageHeartRateVariabilityMilliseconds: 52,
+          },
+        },
+      ],
+    ],
     'heart-rate': [
       [
         {
@@ -292,11 +320,12 @@ test('a snapshot 429 still ingests heart-rate and retries the snapshot sooner th
   });
   const originalList = api.listDataPoints.bind(api);
   api.listDataPoints = async (input) => {
-    if (input.dataType === 'daily-heart-rate-variability') {
+    if (input.dataType === 'daily-resting-heart-rate') {
       throw new Error('health api 429');
     }
     return originalList(input);
   };
+  let persisted: UserHealthRecords | undefined;
 
   const result = await syncUserConnection({
     config: oauthConfig(),
@@ -304,10 +333,11 @@ test('a snapshot 429 still ingests heart-rate and retries the snapshot sooner th
     userId: 'u1',
     now: new Date('2026-08-24T12:00:00.000Z'),
     api,
-    persistSnapshot: async () => {
-      throw new Error('must not persist a failed snapshot');
+    persistSnapshot: async (_userId, records) => {
+      persisted = records;
     },
     loadSnapshot: async () => ({ records: previous, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    loadRecords: async () => persisted ?? previous,
     refresher: {
       async refresh() {
         throw new Error('should not refresh');
@@ -320,9 +350,19 @@ test('a snapshot 429 still ingests heart-rate and retries the snapshot sooner th
   assert.ok(minutes.length > 0);
   const heartRate = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'heart-rate' });
   assert.equal(heartRate?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
+  assert.equal(persisted?.sleepSessions.length, 1);
+  assert.deepEqual(persisted?.dailyHrv.map((row) => [row.date, row.valueMs]), [
+    ['2026-08-04', 44],
+    ['2026-08-22', 52],
+  ]);
+  const sleep = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'sleep' });
+  assert.equal(sleep?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
   const hrv = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'daily-heart-rate-variability' });
-  assert.equal(hrv?.successfulWatermark, undefined);
-  assert.equal(hrv?.lastErrorCode, 'rate_limited');
+  assert.equal(hrv?.successfulWatermark?.toISOString(), '2026-08-24T12:00:00.000Z');
+  const rhr = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'daily-resting-heart-rate' });
+  assert.equal(rhr?.successfulWatermark, undefined);
+  assert.equal(rhr?.lastErrorCode, 'rate_limited');
+  assert.equal(rhr?.nextAttemptAt?.toISOString(), '2026-08-24T12:30:00.000Z');
   const scheduled = await store.connections.findByUserId('u1');
   assert.equal(scheduled?.nextSyncAt?.toISOString(), '2026-08-24T12:30:00.000Z');
 });
@@ -689,4 +729,3 @@ test('a failed snapshot keeps Recovery provisional from the previous snapshot sy
   assert.ok(recovery);
   assert.equal(recovery.quality, 'provisional');
 });
-

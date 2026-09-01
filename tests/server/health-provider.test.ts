@@ -545,6 +545,73 @@ test('a 48-hour refresh does not drop a 20-day-old HRV snapshot', async () => {
   );
 });
 
+test('an exercise fetch failure retains existing training days while successful snapshot types merge', async () => {
+  const config = loadConfig({
+    DATABASE_URL: 'postgresql://rhythm:x@db:5432/rhythm',
+    GOOGLE_HEALTH_CLIENT_ID: 'client.apps.googleusercontent.com',
+    GOOGLE_HEALTH_CLIENT_SECRET: 'secret',
+    TOKEN_ENCRYPTION_KEY: key.toString('base64'),
+    SYNC_SECRET: 'test-sync-secret',
+    APP_ORIGIN: 'http://localhost:3000',
+  });
+  assert.equal(config.kind, 'oauth');
+  if (config.kind !== 'oauth') {
+    return;
+  }
+  const store = createMemoryStore();
+  const encrypted = encryptTokenEnvelope({ accessToken: 'access', refreshToken: 'refresh' }, key, 'c-exercise', 'u-exercise');
+  const connection = {
+    id: 'c-exercise',
+    userId: 'u-exercise',
+    healthUserId: 'h-exercise',
+    legacyUserId: undefined,
+    tokenEnvelopeCiphertext: encrypted.ciphertext,
+    tokenEnvelopeIv: encrypted.iv,
+    tokenEnvelopeAuthTag: encrypted.authTag,
+    encryptionKeyVersion: 1,
+    accessTokenExpiresAt: new Date('2099-01-01T00:00:00.000Z'),
+    refreshTokenExpiresAt: new Date('2099-01-08T00:00:00.000Z'),
+    grantedScopes: [],
+    status: 'active' as const,
+    lastErrorCode: undefined,
+    connectedAt: new Date('2026-08-24T00:00:00.000Z'),
+    updatedAt: new Date('2026-08-24T00:00:00.000Z'),
+    lastSuccessfulSyncAt: new Date('2026-08-23T12:00:00.000Z'),
+  };
+  await store.users.insert(connection.userId);
+  await store.connections.insert(connection);
+  const existing: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    trainingDays: [{ userId: connection.userId, date: '2026-08-23', completeness: 'complete', load: 17 }],
+  };
+  let persisted: UserHealthRecords | undefined;
+  const provider = new GoogleHealthProvider({
+    config,
+    store,
+    connection,
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    loadSnapshot: async () => ({ records: existing, syncedAt: new Date('2026-08-23T12:00:00.000Z') }),
+    persistSnapshot: async (records) => {
+      persisted = records;
+    },
+    api: {
+      async *iterateReconciledDataPoints() {},
+      async listDataPoints(input) {
+        if (input.dataType === 'exercise') {
+          throw new Error('health api 429');
+        }
+        return [];
+      },
+    },
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  const result = await provider.syncRecords(connection.userId, range);
+
+  assert.deepEqual(result.failures.map((failure) => failure.dataType), ['exercise']);
+  assert.deepEqual(persisted?.trainingDays, existing.trainingDays);
+});
+
 test('mergeHealthRecords keeps a sleep session by sourceRecordId and lets the same id replace minutesAsleep', () => {
   const now = new Date('2026-08-24T12:00:00.000Z');
   const sessionA = {
