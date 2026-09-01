@@ -22,6 +22,8 @@
 - Modify: `src/server/health/google-health-provider.ts:propagate signal and fence snapshot persistence/success stamps`
 - Modify: `src/server/health/cardio-sync.ts:check abort/fenced lease before page writes, recompute, cursor changes`
 - Modify: `src/server/health/health-api.ts:forward AbortSignal to every Google page fetch`
+- Modify: `src/server/health/snapshot-store.ts:token-fenced snapshot save`
+- Modify: `src/server/health/access-token.ts:token-fenced refresh-envelope update`
 - Modify: `src/server/health/cardio-store.ts:lease-bound write contract/helper types`
 - Modify: `worker/sync-loop.mjs:deadline longer than server cleanup deadline`
 - Test: `tests/server/scheduled-sync.test.ts`
@@ -32,7 +34,7 @@
 
 - [ ] **Step 1: Write the failing lease-fencing tests**
 
-Cover a claim receiving a nonempty token, a finish/expire/clear call with the wrong token being rejected, and a stale first run being unable to write its cursor/result after a second run has claimed the same connection.
+Cover a claim receiving a nonempty token, a finish/expire/clear call with the wrong token being rejected, and a stale first run being unable to write page aggregates, snapshot, refreshed token envelope, success watermark, cursor, metric result, completion, or failure state after a second run has claimed the same connection. Use an abortable fake iterator and fake clock to prove that the server deadline stops later Google-page fetches and writes, advances no watermark, and schedules/releases only its own token.
 
 - [ ] **Step 2: Run the focused scheduled-sync tests to verify RED**
 
@@ -42,11 +44,11 @@ Expected: FAIL because no token is stored or matched.
 
 - [ ] **Step 3: Add the migration and store contracts**
 
-Add nullable `sync_lease_token UUID` to `google_health_connections`. Generate a UUID per `claimDueSyncs` call, return it on `ConnectionRow`, and require the exact token as well as the existing id/user/lease expiration in all scheduled finishing and lease-clearing operations. Add a short transaction-scoped lease assertion usable by scheduled metric writes; its PostgreSQL check must hold the matching unexpired token while the write runs.
+Add nullable `sync_lease_token UUID` to `google_health_connections`. Generate a UUID per `claimDueSyncs` call, return it on `ConnectionRow`, and require the exact token as well as the existing id/user/lease expiration in all scheduled finishing and lease-clearing operations. Add a short transaction-scoped lease assertion usable by scheduled metric writes; its PostgreSQL check must hold the matching unexpired token while the write runs. Add the same predicate atomically to snapshot persistence and refresh-token-envelope updates, rather than asserting only before or after those independent SQL writes.
 
 - [ ] **Step 4: Propagate the run context and server deadline**
 
-Create a run context containing `connectionId`, `userId`, `leaseToken`, `leaseUntil`, and an abort signal that fires with at least one minute before the 15-minute lease expires. Pass it from `runDueSyncs` through `syncUserConnection`, the provider, and cardio ingestion. Every Google page fetch receives the signal; every loop checks it between pages; every scheduled write/snapshot persistence/success watermark/cursor update uses the lease assertion or a token-fenced SQL CTE. Abort schedules the existing per-user retry and only clears the matching token.
+Create a run context containing `connectionId`, `userId`, `leaseToken`, `leaseUntil`, and an abort signal that fires with at least one minute before the 15-minute lease expires. Pass it from `runDueSyncs` through token refresh, `syncUserConnection`, snapshot persistence, the provider, and cardio ingestion. Every Google page fetch receives the signal; every loop checks it between pages; every scheduled aggregate/snapshot/token-envelope/watermark/cursor/result/completion/failure write uses the lease assertion or a token-fenced SQL CTE. Abort schedules the existing per-user retry and only clears the matching token.
 
 - [ ] **Step 5: Align the worker deadline and run GREEN tests**
 
@@ -109,7 +111,7 @@ git commit -m "fix: stream high-volume time in zone pages"
 
 - [ ] **Step 1: Write failing batch-persistence tests**
 
-Add a 10,000-row minute page test that expects JSON-CTE input rather than a parameter-per-column `VALUES` list. Include one repeated key whose offset changes `0 → +60 → 0`: when the stored row has `IANA=UTC`, the final result must match repeated calls to `mergeHeartRateMinuteUpsert` and must not restore `UTC`. Add a multi-interval activity page test showing no per-interval `listMinutesInRange` call while its conservative four-date envelope still reaches recompute.
+Add a 10,000-row minute page test that expects exactly one matching-existing read plus exactly one batch upsert, each with a single JSON parameter decoded via `jsonb_to_recordset`, and no parameter-expanded `VALUES` list. Include one repeated key whose offset changes `0 → +60 → 0`: when the stored row has `IANA=UTC`, the final result must match repeated calls to `mergeHeartRateMinuteUpsert` and must not restore `UTC`. Add an activity page test that expects exactly one JSON-CTE batch upsert and no per-interval `listMinutesInRange` call while its conservative four-date envelope still reaches recompute.
 
 - [ ] **Step 2: Run focused batch tests to verify RED**
 
