@@ -66,8 +66,15 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
     const abort = new AbortController();
     const deadlineMs = Math.min(input.deadlineMs ?? SERVER_SYNC_DEADLINE_MS, LEASE_MS - 60 * 1_000);
     const deadline = setTimeout(() => abort.abort(new Error('scheduled sync deadline exceeded')), deadlineMs);
-    const abortFromInput = () => abort.abort(input.signal?.reason);
+    const abortFromInput = () => {
+      if (!abort.signal.aborted) {
+        abort.abort(input.signal?.reason);
+      }
+    };
     input.signal?.addEventListener('abort', abortFromInput, { once: true });
+    if (input.signal?.aborted) {
+      abortFromInput();
+    }
     const run: ScheduledSyncRun = {
       connectionId: connection.id,
       userId: connection.userId,
@@ -92,6 +99,9 @@ export async function runDueSyncs(input: ScheduledSyncInput): Promise<ScheduledS
       });
     result.claimed += 1;
     try {
+      if (run.signal.aborted) {
+        throw run.signal.reason ?? new Error('scheduled sync deadline exceeded');
+      }
       await syncConnection(connection, run);
       if (run.signal.aborted) {
         throw new Error('scheduled sync deadline exceeded');
