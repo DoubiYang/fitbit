@@ -71,6 +71,29 @@ class DeadlineTransactionPool implements PostgresQueryable {
   }
 }
 
+/** Mirrors pg.Client: it can query and has a connect method, but it is already checked out. */
+class PoolWithConnectedClient implements PostgresQueryable {
+  readonly queries: Query[] = [];
+  clientConnectAttempts = 0;
+  readonly client = {
+    query: async (text: string, values?: unknown[]) => this.query(text, values),
+    connect: async () => {
+      this.clientConnectAttempts += 1;
+      throw new Error('Client has already been connected. You cannot reuse a client.');
+    },
+    release: () => undefined,
+  };
+
+  async connect() {
+    return this.client;
+  }
+
+  async query(text: string, values?: unknown[]) {
+    this.queries.push({ text, values });
+    return { rows: [], rowCount: 1 };
+  }
+}
+
 const connectionId = '11111111-1111-4111-8111-111111111111';
 const userId = '22222222-2222-4222-8222-222222222222';
 const oldLeaseToken = '44444444-4444-4444-8444-444444444444';
@@ -333,4 +356,27 @@ test('a scheduled transaction rolls back writes when its post-write real-time de
   assert.equal(pool.queries.some((query) => query.text.includes('INSERT INTO health_sync_cursors')), true);
   assert.equal(pool.queries.at(-1)?.text, 'ROLLBACK');
   assert.equal(pool.queries.some((query) => query.text === 'COMMIT'), false);
+});
+
+test('a scheduled lease uses an already checked-out PostgreSQL client without reconnecting it', async () => {
+  const lease = {
+    connectionId,
+    userId,
+    leaseToken: oldLeaseToken,
+    leaseUntil,
+    now,
+    deadlineAt: new Date('2026-08-24T12:13:00.000Z'),
+  };
+  const pool = new PoolWithConnectedClient();
+  const store = createPostgresStoreForTesting(pool);
+  let bodyRan = false;
+
+  await store.withScheduledSyncLease(lease, async () => {
+    bodyRan = true;
+  });
+
+  assert.equal(bodyRan, true);
+  assert.equal(pool.clientConnectAttempts, 0);
+  assert.equal(pool.queries[0]?.text, 'BEGIN');
+  assert.equal(pool.queries.at(-1)?.text, 'COMMIT');
 });

@@ -62,7 +62,8 @@ type TransactionClient = PostgresQueryable & { release(): void };
 type TransactionStarter = PostgresQueryable & { connect(): Promise<TransactionClient> };
 
 function canStartTransaction(queryable: Queryable): queryable is TransactionStarter {
-  return typeof (queryable as { connect?: unknown }).connect === 'function';
+  return typeof (queryable as { connect?: unknown }).connect === 'function'
+    && typeof (queryable as { release?: unknown }).release !== 'function';
 }
 
 function asBuffer(value: unknown): Buffer | undefined {
