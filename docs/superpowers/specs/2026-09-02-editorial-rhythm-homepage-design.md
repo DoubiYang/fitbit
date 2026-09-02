@@ -10,9 +10,10 @@
 
 1. 今天恢复相对个人常态的状态；
 2. 截至当前已观测到的全天心肺负荷；
-3. 一个明确、非医疗性的下一步，以及记录餐食入口。
+3. 一个明确、非医疗性的下一步，以及记录餐食入口；
+4. 在条件满足时，查看独立定义的“身体年龄”心肺参考等价值。
 
-本次只改首页及其必要的服务端显示投影、投影来源标识、测试和共享样式。餐食工作流、账户页、OAuth、同步调度、Google 写回、健康指标公式、数据库表的业务实体及 AI Coach 契约均不改变。为确保只显示与保存分数同一输入集的时间线，可以给既有 `daily_cardio` / `metric_results` 增加只读 provenance 与质量 flag 列；不新增表、不改变指标公式。现有首页的“全天心肺负荷”不是训练安全许可；新界面不得把它或 Recovery 表达成“可以/不可以训练”。
+本次重做首页及其必要的服务端显示投影、投影来源标识、测试和共享样式。餐食工作流、OAuth、Google 写回及 AI Coach 契约均不改变。唯一新增指标是由独立规格 [`2026-09-02-body-age-v1-design.md`](2026-09-02-body-age-v1-design.md) 定义的 `body-age-v1`；其资料填写和日汇总存储属于该规格，首页只消费已净化的显示投影。为确保只显示与保存分数同一输入集的时间线，可以给既有 `daily_cardio` / `metric_results` 增加只读 provenance 与质量 flag 列；不改变既有 Strain/Recovery/Sleep 公式。现有首页的“全天心肺负荷”不是训练安全许可；新界面不得把它、Recovery 或身体年龄表达成“可以/不可以训练”。
 
 手机是主目标（390 × 844），桌面是同一页面的响应式适配，而不是把手机窄栏置于大片空白中。
 
@@ -46,9 +47,10 @@
 2. **数据质量提示：** 当任一主指标为 provisional/incomplete/unavailable，或 `freshness === 'stale'` 时，只出现一次简短的 `数据仍在积累` / `数据待同步` 文字按钮。展开后才展示对应的质量、覆盖和来源；该入口不显示 raw BPM、心率阈值或 OAuth 信息。
 3. **恢复状态：** 左侧环形进度或半环、整数分数及状态文字（例如“恢复中”）。它表示相对个人近期常态；无分数时显示 `—` 和已有的真实缺失原因，绝不造分。
 4. **全天心肺负荷：** 标题、截至当前的 `x.x / 21` 和 `当前负荷` 标签。下面是一条从早到晚的**日内观测强度**时间线，以实际已观测、可归因的聚合分钟构成；当前时刻后不画预测线，数据缺口显示为空白/低对比段。它是与 Strain 并列的观测视图，不能声称是分数 `x.x / 21` 的逐点累计曲线，也不显示分钟 BPM，更不替代 Strain 计算。
-5. **一句建议：** 只沿用 `TodayView.primaryAction` 的事实性文案。仅在 `freshness === 'fresh'` 且 Recovery 为 high/medium 时可说明“相对近期常态”；连接/数据为 stale、临时或缺失时，只说明该数据限制与可用的下一步，不能给高强度训练建议。
-6. **记录一餐：** 现有 `/rhythm/meals/new` 链接，作为唯一的实心深绿色大按钮。
-7. **底部导航：** 延续 今日 / 餐食 / 账户，安全区、触达面积和焦点行为保持现有 AppShell 约束。
+5. **身体年龄：** 紧凑的编辑式参考卡，标题右侧有 `?`。只有 `body-age-v1` 的净化投影可用时显示年龄和初步/稳定标签；否则显示真实的积累/资料/过期原因。问号打开来源、公式、输入覆盖与局限说明，具体约束以独立身体年龄规格为准；它不显示逐日 VO₂max，也不成为训练建议。
+6. **一句建议：** 只沿用 `TodayView.primaryAction` 的事实性文案。仅在 `freshness === 'fresh'` 且 Recovery 为 high/medium 时可说明“相对近期常态”；连接/数据为 stale、临时或缺失时，只说明该数据限制与可用的下一步，不能给高强度训练建议。
+7. **记录一餐：** 现有 `/rhythm/meals/new` 链接，作为唯一的实心深绿色大按钮。
+8. **底部导航：** 延续 今日 / 餐食 / 账户，安全区、触达面积和焦点行为保持现有 AppShell 约束。
 
 睡眠表现不再与核心指标争夺首屏。当 Sleep Performance 不可用且可通过设置解决时，把“设置睡眠目标”放入展开的数据质量区；它不是第二个主 CTA。
 
@@ -87,7 +89,9 @@ type StrainTimeline = {
 
 仅把满足**当前 Strain 函数**归因资格的分钟映射为低/中/高/峰强度。现有逻辑的 exercise overlap 优先级高于 sleep overlap；本次时间线必须完整复用这一优先级，不能以视觉层擅自把 exercise+sleep 重叠分钟排除，也不能改变 `whoop-style-v2`。`observedHeartRateMinutes > knownContextMinutes` 表示有心率但未知上下文，`knownContextMinutes > attributedMinutes` 表示已知但未归因，`attributedMinutes > knownContextMinutes` 在 exercise 归因中允许出现；这些状态以连续 15 分钟位置分别呈现。每个 bucket 均以 UTC instant 排序；23/25 小时 DST 日分别产生 92/100 个 bucket，重复本地小时在 label 中带 offset，绝不压缩、合并或按固定 `0–1440` 分钟重排。未来 bucket 不渲染强度。
 
-时间线应标注“已观测至 HH:MM”，并且只在 Strain 分数非空、数据新鲜、区间/睡眠/分钟输入均齐全且 provenance 一致时显示。为此，Strain 重算必须把输入分钟、区间、活动 interval、exercise interval、睡眠 interval、IANA 时区和 metric version 的确定性 SHA-256 canonical fingerprint 同时写入 `daily_cardio` 和 Strain `metric_results` 的新增 `input_fingerprint` 字段。读取页用相同 canonicalization 重新计算 fingerprint；只有两行保存值相等，且均等于读取时的值，才允许返回 timeline。任一项不同、缺失、无分数或过期就省略。它因此永远不是 `x.x / 21` 的逐点累计曲线，而是与该分数已验证为同一输入集的日内观测强度。
+时间线应标注“已观测至 HH:MM”，并且只在 Strain 分数非空、数据新鲜、区间/睡眠/分钟输入均齐全且 provenance 一致时显示。为此，Strain 重算必须把输入分钟、区间、活动 interval、exercise interval、睡眠 interval、IANA 时区和 metric version 的确定性 SHA-256 canonical fingerprint 同时写入 `daily_cardio` 和 Strain `metric_results` 的新增 `input_fingerprint` 字段。
+
+这个 fingerprint 还必须纳入一份随分数持久化的、不可变的 `calculation_context`：`as_of_utc`（当日实际采用的 cutoff）、`is_current_day`、由完整时区历史解析出的 `time_zone_unambiguous`、该 civil day 的 `local_day_length_minutes`、时区历史的 canonical fingerprint，以及 metric version。它们是现有 Strain 计算的输入，不能在读首页时重新以“现在”的时间或当下时区历史推断。重算时将相同的 context 和 fingerprint 写入两张表；读取页必须以保存的 `as_of_utc` 过滤并 canonicalize 同一批只读输入，再验证「保存于 daily_cardio 的 fingerprint = 保存于 Strain metric result 的 fingerprint = 读取结果的 fingerprint」且两份 `calculation_context` 相同。不能复现、context 缺失、任一值不同、无分数或过期时一律省略 timeline。它因此永远不是 `x.x / 21` 的逐点累计曲线，而是与该分数已验证为同一输入集的日内观测强度。
 
 当时区不明确、没有区间、没有分钟数据、快照睡眠数据不可用、provenance 不一致或上述一致性前提不成立时，整个时间线省略，指标的既有 unavailable/incomplete 文案仍然生效。
 
@@ -120,7 +124,7 @@ type StrainTimeline = {
 ## 7. 验收与验证
 
 1. `/rhythm` 的 390px 首屏能在不向下滚动指标列表的情况下看到恢复、全天心肺负荷、数据状态入口和记录餐食动作；320/390/768/1440px 无横向溢出、无大面积无意义空白。
-2. `strainTimeline` 只在所需数据及 SHA-256 input fingerprint 三方一致（`daily_cardio`、Strain metric result、当前只读输入）时出现；已观测空档、无归因分钟、未知覆盖、exercise-without-context 和未来时段视觉上可区分；没有一段被当作预测或 0 Strain。没有读到相应睡眠快照时，时间线必须省略。
+2. `strainTimeline` 只在所需数据及 SHA-256 input fingerprint 三方一致（`daily_cardio`、Strain metric result、以保存的 `as_of_utc` 和不可变 `calculation_context` 重放的当前只读输入）时出现；测试覆盖当前日 cutoff 变化、未来样本、时区历史变化及 23/25 小时 DST 日，任一项使 context 或 fingerprint 不一致就必须省略。已观测空档、无归因分钟、未知覆盖、exercise-without-context 和未来时段视觉上可区分；没有一段被当作预测或 0 Strain。没有读到相应睡眠快照时，时间线必须省略。
 3. bucket 的强度/归因与现有 Strain pure calculation 对同一夹具一致，特别断言 exercise priority over sleep；投影不能改写保存的指标结果或让任何分数从 `null` 变成数字。fingerprint 不同、缺失或输入不同步时，projection 为 undefined。为 23 小时春季切换日与 25 小时秋季切换日分别测试 UTC 顺序、bucket 数、重复小时 label/offset 与截至时间。
 4. 暂时、完整、缺失、时区不明和同步过期的页面均只显示一次显著数据质量入口；同步过期时 `primaryAction` 为数据状态而非相对常态建议；sleep-history-incomplete 有持久化的 allowlisted 质量 flag；不存在首页大卡嵌套或重复的质量段落，首页不显示 raw evidence/BPM。添加 API serialization 测试，断言 JSON 没有 `MetricEvidence.value`、区间阈值、dose、zone minutes 或其他未 allowlist 字段。
 5. 保留 `/rhythm/meals/new`、设置、底部三个导航路径；首页改版不产生 Google 写回或健康数据写入。
@@ -129,7 +133,7 @@ type StrainTimeline = {
 
 ## 8. 非目标
 
-- 不新增 WHOOP/Google Health 指标、历史图表页、训练记录页或新的导航项。
+- 不新增除独立定义的 `body-age-v1` 以外的 WHOOP/Google Health 指标、历史图表页、训练记录页或新的导航项。
 - 不将 Health Connect/Google 计算的 Readiness、Sleep 或 Cardio Load 当作可用 API 字段。
 - 不修改数据保留政策、不保存 raw health payload，也不把分钟聚合、BPM 或凭证发送给 AI。
 - 不以该首页替代医疗、训练教练或营养建议。
