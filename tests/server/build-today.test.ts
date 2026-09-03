@@ -10,7 +10,7 @@ import { BODY_AGE_ALGORITHM_VERSION, BODY_AGE_WINDOW_DAYS, recomputeBodyAge } fr
 import { bodyAgeFingerprintContext, bodyAgeInputFingerprint } from '../../src/server/health/body-age-fingerprint';
 import { emptyUserHealthRecords, type HealthProvider, type UserHealthRecords } from '../../src/server/health/provider';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import { buildTodayView, type BodyAgeMetricView, type TodayView } from '../../src/server/dashboard/build-today';
+import { buildHomepageTodayView, buildTodayView, type BodyAgeMetricView, type TodayView } from '../../src/server/dashboard/build-today';
 
 function requiredBodyAge(view: TodayView): BodyAgeMetricView {
   const bodyAge = view.metrics.bodyAge;
@@ -531,6 +531,45 @@ test('stored incomplete sleep history keeps homepage recovery explicitly provisi
   });
   assert.equal(view.metrics.recovery.quality, 'provisional');
   assert.match(view.metrics.recovery.detail, /数据质量为临时/);
+});
+
+test('stale homepage data never presents a personal-baseline recommendation or timeline', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const source = {
+    heartRateZones: false, activityLevel: false, exercise: false, sleep: true,
+    hrv: true, rhr: true, sleepGoal: true, timeZone: 'unambiguous' as const,
+  };
+  const coverage = { knownContextMinutes: 0, rawHeartRateMinutes: 0, attributedMinutes: 0, lastKnownContextAt: null };
+  await store.healthMetrics.upsertMetricResult(parseMetricResult({
+    userId: 'u1', civilDate: '2026-08-22', metricName: 'recovery',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION, score: 81, status: null, quality: 'high', reason: null,
+    evidence: [], source, coverage,
+  }));
+
+  let recordReads = 0;
+  const view = await buildHomepageTodayView({
+    provider: {
+      capabilities: { mode: 'oauth', canSync: true },
+      async listRecords() {
+        recordReads += 1;
+        return emptyUserHealthRecords();
+      },
+    },
+    userId: 'u1', now: '2026-08-22T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-20T23:59:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  assert.equal(view.freshness, 'stale');
+  assert.equal(view.primaryAction.kind, 'data_state');
+  assert.doesNotMatch(view.primaryAction.text, /个人常态/);
+  assert.equal(view.metrics.recovery.score, null);
+  assert.equal(view.metrics.recovery.quality, 'unavailable');
+  assert.doesNotMatch(view.metrics.recovery.detail, /个人常态/);
+  assert.equal(view.metrics.strain.score, null);
+  assert.equal(view.metrics.strain.status, 'unavailable');
+  assert.equal(view.metrics.strain.timeline, undefined);
+  assert.equal(recordReads, 1);
 });
 
 function recordsForOtherUser(sleepSession: SleepSession): HealthProvider {

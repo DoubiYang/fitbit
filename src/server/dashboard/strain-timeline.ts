@@ -27,6 +27,8 @@ export type StrainTimelineBucket = {
 
 export type StrainTimeline = {
   observedThrough: string;
+  /** Server-formatted against the verified, saved IANA time zone. */
+  observedThroughLabel: string;
   buckets: StrainTimelineBucket[];
 };
 
@@ -213,5 +215,9 @@ export async function buildVerifiedStrainTimeline(input: {
     });
   }
 
-  return { observedThrough: context.as_of_utc, buckets };
+  return {
+    observedThrough: context.as_of_utc,
+    observedThroughLabel: localLabel(new Date(context.as_of_utc), timeZone),
+    buckets,
+  };
 }

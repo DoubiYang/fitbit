@@ -1,5 +1,5 @@
 import { loadConfig } from '../src/server/config/env';
-import { buildTodayViewForUser } from '../src/server/dashboard/today-response';
+import { buildHomepageTodayViewForUser } from '../src/server/dashboard/today-response';
 import { createRequestDeps, requestCookieHeader } from '../src/server/auth/runtime';
 import { getCurrentUser } from '../src/server/session/current-user';
 import { TodayDashboard } from '../src/ui/dashboard/today-dashboard';
@@ -19,7 +19,7 @@ export default async function Home() {
           store: deps.store,
           cookieHeader: await requestCookieHeader(),
         });
-  const view = await buildTodayViewForUser(user, new Date().toISOString(), deps);
+  const view = await buildHomepageTodayViewForUser(user, new Date().toISOString(), deps);
 
   if (user.mode === 'unconfigured') {
     return (
@@ -61,7 +61,7 @@ export default async function Home() {
     return (
       <>
         <DashboardTimeZoneBootstrap />
-        <TodayDashboard view={view} variant="oauth" bootstrapTimeZone={false} />
+        <TodayDashboard view={view} variant="oauth" />
       </>
     );
   }

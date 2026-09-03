@@ -116,6 +116,8 @@ export type HomepageTodayView = {
 
 export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline): HomepageTodayView {
   const bodyAge = view.metrics.bodyAge;
+  const staleDetail = '同步数据已超过 36 小时，请等待下一次同步或重新同步后再查看趋势。';
+  const isStale = view.freshness === 'stale';
   return {
     localDate: view.localDate,
     freshness: view.freshness,
@@ -126,16 +128,16 @@ export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline):
     metrics: {
       strain: {
         label: view.metrics.strain.label,
-        score: view.metrics.strain.score,
-        status: view.metrics.strain.status,
-        detail: view.metrics.strain.detail,
-        ...(timeline ? { timeline } : {}),
+        score: isStale ? null : view.metrics.strain.score,
+        status: isStale ? 'unavailable' : view.metrics.strain.status,
+        detail: isStale ? staleDetail : view.metrics.strain.detail,
+        ...(!isStale && timeline ? { timeline } : {}),
       },
       recovery: {
         label: view.metrics.recovery.label,
-        score: view.metrics.recovery.score,
-        quality: view.metrics.recovery.quality,
-        detail: view.metrics.recovery.detail,
+        score: isStale ? null : view.metrics.recovery.score,
+        quality: isStale ? 'unavailable' : view.metrics.recovery.quality,
+        detail: isStale ? staleDetail : view.metrics.recovery.detail,
       },
       sleepPerformance: {
         label: view.metrics.sleepPerformance.label,
@@ -223,8 +225,16 @@ function primaryAction(input: {
   score: number | null;
   quality: RecoveryQuality;
   evidence: MetricEvidence[];
+  freshness: 'fresh' | 'stale';
 }): TodayAction {
   const evidence = input.evidence.slice(0, 3);
+  if (input.freshness === 'stale') {
+    return {
+      kind: 'data_state',
+      text: '同步数据已超过 36 小时，请等待下一次同步或重新同步后再查看趋势。',
+      evidence,
+    };
+  }
   if (input.score !== null && input.quality === 'high') {
     return {
       kind: 'recommendation',
@@ -482,15 +492,17 @@ export async function buildTodayView(input: BuildTodayInput): Promise<TodayView>
         input.lastSuccessfulSyncAt,
       );
 
+  const freshness = freshnessOf(input.now, input.lastSuccessfulSyncAt);
   return {
     userId: input.userId,
     generatedAt: input.now,
     localDate,
-    freshness: freshnessOf(input.now, input.lastSuccessfulSyncAt),
+    freshness,
     primaryAction: primaryAction({
       score: metrics.recovery.score,
       quality: metrics.recovery.quality,
       evidence: metrics.recovery.evidence ?? [],
+      freshness,
     }),
     metrics,
   };
@@ -503,7 +515,7 @@ export async function buildTodayView(input: BuildTodayInput): Promise<TodayView>
  */
 export async function buildHomepageTodayView(input: BuildTodayInput): Promise<HomepageTodayView> {
   const view = await buildTodayView(input);
-  if (!input.healthMetrics) return toHomepageTodayView(view);
+  if (!input.healthMetrics || view.freshness !== 'fresh') return toHomepageTodayView(view);
 
   try {
     const records = scopedRecords(

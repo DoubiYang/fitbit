@@ -335,6 +335,14 @@ test('unauthenticated today is 401 and unconfigured is 503', async () => {
 test('high recovery produces a factual trend explanation rather than permission to train', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
+  await store.connections.insert({
+    id: 'connection-u1', userId: 'u1', healthUserId: 'health-u1', legacyUserId: undefined,
+    tokenEnvelopeCiphertext: undefined, tokenEnvelopeIv: undefined, tokenEnvelopeAuthTag: undefined,
+    encryptionKeyVersion: undefined, accessTokenExpiresAt: undefined, refreshTokenExpiresAt: undefined,
+    grantedScopes: [], status: 'active', lastErrorCode: undefined,
+    connectedAt: new Date('2026-08-24T00:00:00.000Z'), updatedAt: new Date('2026-08-24T06:00:00.000Z'),
+    lastSuccessfulSyncAt: new Date('2026-08-24T06:00:00.000Z'),
+  });
   await store.healthMetrics.insertTimeZoneHistory({
     userId: 'u1',
     ianaTimeZone: 'UTC',

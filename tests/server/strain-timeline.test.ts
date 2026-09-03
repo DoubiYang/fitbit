@@ -211,6 +211,7 @@ test('keeps future current-day buckets empty and exposes only the saved observed
   });
   assert.ok(timeline);
   assert.equal(timeline.observedThrough, observedThrough);
+  assert.equal((timeline as typeof timeline & { observedThroughLabel?: string }).observedThroughLabel, 'UTC-4 10:00');
   assert.equal(timeline.buckets.find((bucket) => bucket.start === observedThrough)?.intensity, 2);
   assert.equal(
     timeline.buckets.filter((bucket) => Date.parse(bucket.start) > Date.parse(observedThrough)).every((bucket) => bucket.intensity === null),

@@ -98,11 +98,21 @@ export function bodyAgeCardContent(metric: BodyAgeMetricView): BodyAgeCardConten
   };
 }
 
-export function BodyAgeCard({ metric }: { metric: BodyAgeMetricView }) {
+export function BodyAgeCard({
+  metric,
+  variant = 'standard',
+}: {
+  metric: BodyAgeMetricView;
+  variant?: 'standard' | 'inline';
+}) {
   const content = bodyAgeCardContent(metric);
 
   return (
-    <section className="body-age-card" data-status={metric.status} aria-labelledby="body-age-heading">
+    <section
+      className={['body-age-card', variant === 'inline' ? 'body-age-card--inline' : ''].filter(Boolean).join(' ')}
+      data-status={metric.status}
+      aria-labelledby="body-age-heading"
+    >
       <div className="body-age-card__topline">
         <div>
           <p className="section-kicker">身体状态</p>
