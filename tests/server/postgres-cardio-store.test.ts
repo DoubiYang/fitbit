@@ -148,6 +148,22 @@ test('migration 013 preserves legacy rows while constraining version 1 homepage 
   assert.doesNotMatch(provenanceMigration, /metric_version.*provenance_version|provenance_version.*metric_version/u);
 });
 
+test('migration 013 rejects NULL-version provenance with partial fields for both storage tables', () => {
+  for (const constraint of [
+    'daily_cardio_homepage_strain_provenance_check',
+    'metric_results_homepage_strain_provenance_check',
+  ]) {
+    const start = provenanceMigration.indexOf(`ADD CONSTRAINT ${constraint}`);
+    const end = provenanceMigration.indexOf(');', start);
+    const sql = provenanceMigration.slice(start, end + 2);
+
+    assert.ok(start >= 0, `${constraint} must exist`);
+    assert.match(sql, /CHECK \(\s*COALESCE\(/u);
+    assert.match(sql, /provenance_version IS NULL[\s\S]*?input_fingerprint IS NULL[\s\S]*?calculation_context IS NULL/u);
+    assert.match(sql, /,\s*false\s*\)\s*\)/u);
+  }
+});
+
 test('postgres health metrics persistence maps legacy null provenance and parameterizes verified provenance writes', async () => {
   const fingerprint = `sha256:${'a'.repeat(64)}`;
   const provenance = {
