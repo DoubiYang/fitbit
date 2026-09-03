@@ -36,6 +36,12 @@ import type { GoogleDataPoint } from './map-records';
 import { mapDailyVo2 } from './map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from './provider';
 import type { HealthSnapshot } from './snapshot-store';
+import {
+  STRAIN_PROVENANCE_VERSION,
+  stableStrainLocalDayBounds,
+  strainCalculationContext,
+  strainInputFingerprint,
+} from './strain-provenance';
 
 export const HOURLY_SYNC_MS = 60 * 60 * 1_000;
 const TWO_HOURS_MS = 2 * HOURLY_SYNC_MS;
@@ -733,6 +739,34 @@ export async function recomputeAffectedDays(
       await store.healthMetrics.upsertMinutes(minutes);
       throwIfAborted(input.signal);
     }
+    const stableLocalDayBounds = stableStrainLocalDayBounds({
+      civilDate: date,
+      minutes,
+      timeZoneHistory: history,
+    });
+    const timeZoneIsUnambiguous = Boolean(stableLocalDayBounds) && timezoneUnambiguous(minutes, history);
+    const calculationContext = strainCalculationContext({
+      civilDate: date,
+      isCurrentDay: date === today,
+      now: input.now.toISOString(),
+      timeZoneHistory: history,
+      timeZoneUnambiguous: timeZoneIsUnambiguous,
+      localDayLengthMinutes: stableLocalDayBounds?.localDayLengthMinutes,
+    });
+    const inputFingerprint = strainInputFingerprint({
+      userId: input.userId,
+      context: calculationContext,
+      minutes,
+      zones,
+      sleepSessions,
+      exerciseIntervals,
+      activityLevelIntervals,
+    });
+    const provenance = {
+      provenanceVersion: STRAIN_PROVENANCE_VERSION,
+      inputFingerprint,
+      calculationContext,
+    };
     const strain = computeStrain({
       userId: input.userId,
       date,
@@ -741,9 +775,10 @@ export async function recomputeAffectedDays(
       sleepSessions,
       exerciseIntervals,
       activityLevelIntervals,
-      timezoneUnambiguous: timezoneUnambiguous(minutes, history),
+      timezoneUnambiguous: timeZoneIsUnambiguous,
       isCurrentDay: date === today,
       now: input.now.toISOString(),
+      localDayLengthMinutes: calculationContext.local_day_length_minutes,
     });
     throwIfAborted(input.signal);
     await store.healthMetrics.upsertDailyCardio(
@@ -758,6 +793,7 @@ export async function recomputeAffectedDays(
         rawCoverageMinutes: strain.coverage.rawHeartRateMinutes,
         attributedMinutes: strain.coverage.attributedMinutes,
         metricVersion: WHOOP_STYLE_METRIC_VERSION,
+        provenance,
       }),
     );
     throwIfAborted(input.signal);
@@ -774,6 +810,7 @@ export async function recomputeAffectedDays(
         evidence: strain.evidence,
         source: strain.source,
         coverage: strain.coverage,
+        provenance,
       }),
     );
     throwIfAborted(input.signal);
@@ -805,6 +842,7 @@ export async function recomputeAffectedDays(
         evidence: sleep.evidence,
         source: sleep.source,
         coverage: sleep.coverage,
+        qualityFlags: sleep.sleepHistoryIncomplete ? ['sleep_history_incomplete'] : [],
       }),
     );
     throwIfAborted(input.signal);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseDailyCardio, parseDailyHeartRateZones, parseDailyTimeInZone } from '../../src/domain/cardio-records';
+import { parseDailyCardio, parseDailyHeartRateZones, parseDailyTimeInZone, parseMetricResult } from '../../src/domain/cardio-records';
 import { BODY_AGE_REFERENCE_VERSION } from '../../src/domain/body-age';
 import { parseSleepSession, type SleepSession } from '../../src/domain/health-records';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
@@ -503,6 +503,34 @@ test('store-backed today view passes Google zone thresholds and all-day zone tim
   assert.equal(view.metrics.strain.timeInZone?.light, 400);
   assert.equal(view.metrics.strain.activityZoneMinutes?.light, 10);
   assert.equal(view.metrics.strain.dose, 18.5);
+});
+
+test('stored incomplete sleep history keeps homepage recovery explicitly provisional', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  const source = {
+    heartRateZones: false, activityLevel: false, exercise: false, sleep: true,
+    hrv: true, rhr: true, sleepGoal: true, timeZone: 'unambiguous' as const,
+  };
+  const coverage = { knownContextMinutes: 0, rawHeartRateMinutes: 0, attributedMinutes: 0, lastKnownContextAt: null };
+  await store.healthMetrics.upsertMetricResult(parseMetricResult({
+    userId: 'u1', civilDate: '2026-08-22', metricName: 'sleep_performance',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION, score: 88, status: null, quality: null, reason: null,
+    evidence: [], source, coverage, qualityFlags: ['sleep_history_incomplete'],
+  }));
+  await store.healthMetrics.upsertMetricResult(parseMetricResult({
+    userId: 'u1', civilDate: '2026-08-22', metricName: 'recovery',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION, score: 77, status: null, quality: 'high', reason: null,
+    evidence: [], source, coverage,
+  }));
+
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-22T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-22T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+  assert.equal(view.metrics.recovery.quality, 'provisional');
+  assert.match(view.metrics.recovery.detail, /数据质量为临时/);
 });
 
 function recordsForOtherUser(sleepSession: SleepSession): HealthProvider {

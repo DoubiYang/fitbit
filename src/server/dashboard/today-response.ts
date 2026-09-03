@@ -2,7 +2,7 @@ import type { HttpDeps } from '../auth/http';
 import { DemoHealthProvider } from '../health/demo-provider';
 import { emptyUserHealthRecords } from '../health/provider';
 import { loadHealthSnapshot } from '../health/snapshot-store';
-import { buildTodayView, toHomepageTodayView, type TodayView } from './build-today';
+import { buildHomepageTodayView, buildTodayView, type HomepageTodayView, type TodayView } from './build-today';
 import type { CurrentUser } from '../session/current-user';
 
 async function oauthSnapshot(userId: string, deps: HttpDeps) {
@@ -52,6 +52,43 @@ export async function buildTodayViewForUser(
   return undefined;
 }
 
+export async function buildHomepageTodayViewForUser(
+  user: CurrentUser,
+  now = new Date().toISOString(),
+  deps?: HttpDeps,
+): Promise<HomepageTodayView | undefined> {
+  if (user.mode === 'demo') {
+    return buildHomepageTodayView({
+      provider: new DemoHealthProvider(),
+      userId: user.id,
+      now,
+      lastSuccessfulSyncAt: now,
+      allowDefaultTimeZone: true,
+    });
+  }
+  if (user.mode === 'oauth') {
+    const snapshot = deps ? await oauthSnapshot(user.id, deps) : undefined;
+    const [connection, zone] = deps?.store
+      ? await Promise.all([
+          deps.store.connections.findByUserId(user.id),
+          deps.store.healthMetrics.lookupTimeZoneHistory({ userId: user.id, at: now }),
+        ])
+      : [undefined, undefined];
+    return buildHomepageTodayView({
+      provider: {
+        capabilities: { mode: 'oauth', canSync: Boolean(snapshot) },
+        listRecords: async () => snapshot?.records ?? emptyUserHealthRecords(),
+      },
+      userId: user.id,
+      now,
+      lastSuccessfulSyncAt: connection?.lastSuccessfulSyncAt?.toISOString(),
+      timeZone: zone?.ianaTimeZone,
+      healthMetrics: deps?.store?.healthMetrics,
+    });
+  }
+  return undefined;
+}
+
 export async function buildTodayResponse(
   user: CurrentUser,
   now = new Date().toISOString(),
@@ -63,6 +100,6 @@ export async function buildTodayResponse(
   if (user.mode === 'unauthenticated') {
     return Response.json({ error: 'unauthenticated' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
   }
-  const view = await buildTodayViewForUser(user, now, deps);
-  return Response.json(toHomepageTodayView(view!), { headers: { 'Cache-Control': 'no-store' } });
+  const view = await buildHomepageTodayViewForUser(user, now, deps);
+  return Response.json(view!, { headers: { 'Cache-Control': 'no-store' } });
 }

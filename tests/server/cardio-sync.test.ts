@@ -755,6 +755,13 @@ test('Strain(D) recompute writes Sleep Performance and Recovery for D+1 using co
   assert.equal(sleep.score !== null, true);
   assert.equal(sleep.evidence.find((item) => item.label === 'Strain补偿')?.value, 30);
   assert.equal(sleep.evidence.find((item) => item.label === '动态需求')?.value, 570);
+  assert.deepEqual(sleep.qualityFlags, ['sleep_history_incomplete']);
+  assert.ok(cardio?.provenance, 'recompute must persist a daily-cardio provenance record');
+  assert.ok(strain?.provenance, 'recompute must persist a strain-result provenance record');
+  assert.equal(cardio?.provenance?.provenanceVersion, 1);
+  assert.equal(cardio?.provenance?.inputFingerprint, strain?.provenance?.inputFingerprint);
+  assert.deepEqual(cardio?.provenance?.calculationContext, strain?.provenance?.calculationContext);
+  assert.equal((cardio?.provenance?.calculationContext as { local_day_length_minutes?: unknown })?.local_day_length_minutes, 1_440);
 });
 
 test('a 429 on one type schedules only that cursor while another type advances', async () => {

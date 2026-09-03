@@ -14,6 +14,7 @@ import type { HealthMetricsStore } from '../health/cardio-store';
 import { BODY_AGE_ALGORITHM_VERSION, BODY_AGE_WINDOW_DAYS } from '../health/body-age-recompute';
 import { bodyAgeFingerprintContext, bodyAgeInputFingerprint } from '../health/body-age-fingerprint';
 import type { HealthProvider } from '../health/provider';
+import { buildVerifiedStrainTimeline, type StrainTimeline } from './strain-timeline';
 import { civilDateDaysAgo, resolveDashboardCivilDate } from '../time/civil-date';
 
 type BuildTodayInput = {
@@ -106,14 +107,14 @@ export type HomepageTodayView = {
     text: string;
   };
   metrics: {
-    strain: Pick<StrainMetricView, 'label' | 'score' | 'status' | 'detail'>;
+    strain: Pick<StrainMetricView, 'label' | 'score' | 'status' | 'detail'> & { timeline?: StrainTimeline };
     recovery: Pick<RecoveryMetricView, 'label' | 'score' | 'quality' | 'detail'>;
     sleepPerformance: Pick<SleepPerformanceMetricView, 'label' | 'score' | 'detail'>;
     bodyAge?: BodyAgeMetricView;
   };
 };
 
-export function toHomepageTodayView(view: TodayView): HomepageTodayView {
+export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline): HomepageTodayView {
   const bodyAge = view.metrics.bodyAge;
   return {
     localDate: view.localDate,
@@ -128,6 +129,7 @@ export function toHomepageTodayView(view: TodayView): HomepageTodayView {
         score: view.metrics.strain.score,
         status: view.metrics.strain.status,
         detail: view.metrics.strain.detail,
+        ...(timeline ? { timeline } : {}),
       },
       recovery: {
         label: view.metrics.recovery.label,
@@ -389,6 +391,15 @@ async function metricsFromStore(
     store.getDailyCardio({ userId, civilDate: localDate }),
     bodyAgeFromStore({ store, userId, now, records }),
   ]);
+  const storedRecovery = recoveryFromResult(recovery);
+  const sleepHistoryIncomplete = sleepPerformance?.qualityFlags.includes('sleep_history_incomplete') === true;
+  const recoveryView = sleepHistoryIncomplete && storedRecovery.score !== null
+    ? {
+        ...storedRecovery,
+        quality: 'provisional' as const,
+        detail: recoveryDetail('provisional'),
+      }
+    : storedRecovery;
   return {
     strain: {
       ...strainFromResult(strain),
@@ -396,7 +407,7 @@ async function metricsFromStore(
       ...(timeInZone ? { timeInZone: timeInZone.minutes } : {}),
       ...(dailyCardio ? { activityZoneMinutes: dailyCardio.zoneMinutes, dose: dailyCardio.dose } : {}),
     },
-    recovery: recoveryFromResult(recovery),
+    recovery: recoveryView,
     sleepPerformance: sleepFromResult(sleepPerformance),
     bodyAge,
   };
@@ -483,4 +494,34 @@ export async function buildTodayView(input: BuildTodayInput): Promise<TodayView>
     }),
     metrics,
   };
+}
+
+/**
+ * Homepage-only projection. The timeline is intentionally constructed after
+ * the wide, server-side view and is omitted unless persisted Strain inputs can
+ * be replayed exactly. No raw health records cross this boundary.
+ */
+export async function buildHomepageTodayView(input: BuildTodayInput): Promise<HomepageTodayView> {
+  const view = await buildTodayView(input);
+  if (!input.healthMetrics) return toHomepageTodayView(view);
+
+  try {
+    const records = scopedRecords(
+      await input.provider.listRecords(input.userId, {
+        from: civilDateDaysAgo(view.localDate, 90),
+        to: view.localDate,
+      }),
+      input.userId,
+    );
+    const timeline = await buildVerifiedStrainTimeline({
+      store: input.healthMetrics,
+      userId: input.userId,
+      civilDate: view.localDate,
+      now: input.now,
+      sleepSessions: records.sleepSessions,
+    });
+    return toHomepageTodayView(view, timeline);
+  } catch {
+    return toHomepageTodayView(view);
+  }
 }

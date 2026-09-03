@@ -428,6 +428,57 @@ export function isStrainAttributedMinute(input: {
   return input.activeOverlapSeconds >= ELIGIBLE_COVERAGE_SECONDS;
 }
 
+export type StrainMinuteContribution = {
+  attributed: boolean;
+  intensity: 0 | 1 | 2 | 3 | null;
+  usedExercise: boolean;
+  zone: HeartRateZoneId | null;
+};
+
+/**
+ * The single minute-level attribution rule shared by the persisted Strain score
+ * and the homepage timeline.  It deliberately returns a coarse intensity only:
+ * callers must never derive or expose a raw heart-rate measurement from it.
+ */
+export function strainMinuteContribution(input: {
+  minute: HeartRateMinuteAggregate;
+  zones: DailyHeartRateZones | undefined;
+  sleepSessions: SleepSession[];
+  exerciseIntervals: ExerciseInterval[];
+  activityLevelIntervals: ActivityLevelInterval[];
+}): StrainMinuteContribution {
+  if (!isEligibleMinute(input.minute)) {
+    return { attributed: false, intensity: null, usedExercise: false, zone: null };
+  }
+  const sleepOverlapSeconds = intervalOverlapSeconds(input.minute.minuteStartUtc, input.sleepSessions);
+  const exerciseOverlapSeconds = intervalOverlapSeconds(input.minute.minuteStartUtc, input.exerciseIntervals);
+  const activeOverlapSeconds = intervalOverlapSeconds(input.minute.minuteStartUtc, input.activityLevelIntervals);
+  const usedExercise = exerciseOverlapSeconds >= EXERCISE_ATTRIBUTION_SECONDS;
+  const attributed = isStrainAttributedMinute({
+    activityLevel: input.minute.activityLevel,
+    sleepOverlapSeconds,
+    exerciseOverlapSeconds,
+    activeOverlapSeconds,
+  });
+  if (input.minute.activityLevel === 'unknown' && !usedExercise) {
+    return { attributed, intensity: null, usedExercise, zone: null };
+  }
+  if (!input.zones) {
+    return { attributed, intensity: null, usedExercise, zone: null };
+  }
+  const zone = attributed ? classifyHeartRateZone(input.minute.avgBpm, input.zones) : null;
+  const intensity = !attributed
+    ? 0
+    : zone === 'light'
+      ? 1
+      : zone === 'moderate'
+        ? 2
+        : zone === 'vigorous' || zone === 'peak'
+          ? 3
+          : null;
+  return { attributed, intensity, usedExercise, zone };
+}
+
 function intervalOverlapSeconds(minuteStartUtc: string, intervals: Array<{ startTime: string; endTime: string }>): number {
   const startMs = Date.parse(minuteStartUtc);
   const endMs = startMs + MINUTE_MS;
@@ -503,29 +554,22 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
   const activeIntervals = (input.activityLevelIntervals ?? []).filter((interval) => ACTIVE_LEVELS.has(interval.activityLevelType));
 
   for (const minute of eligible) {
-    const sleepOverlapSeconds = intervalOverlapSeconds(minute.minuteStartUtc, input.sleepSessions);
-    const exerciseOverlapSeconds = intervalOverlapSeconds(minute.minuteStartUtc, input.exerciseIntervals);
-    const activeOverlapSeconds = intervalOverlapSeconds(minute.minuteStartUtc, activeIntervals);
-    if (exerciseOverlapSeconds >= EXERCISE_ATTRIBUTION_SECONDS) {
+    const contribution = strainMinuteContribution({
+      minute,
+      zones: input.zones,
+      sleepSessions: input.sleepSessions,
+      exerciseIntervals: input.exerciseIntervals,
+      activityLevelIntervals: activeIntervals,
+    });
+    if (contribution.usedExercise) {
       usedExercise = true;
     }
-    if (
-      !isStrainAttributedMinute({
-        activityLevel: minute.activityLevel,
-        sleepOverlapSeconds,
-        exerciseOverlapSeconds,
-        activeOverlapSeconds,
-      })
-    ) {
+    if (!contribution.attributed) {
       continue;
     }
     attributedMinutes += 1;
-    if (!input.zones) {
-      continue;
-    }
-    const zone = classifyHeartRateZone(minute.avgBpm, input.zones);
-    if (zone) {
-      incrementZone(zoneMinutes, zone);
+    if (contribution.zone) {
+      incrementZone(zoneMinutes, contribution.zone);
     }
   }
 
