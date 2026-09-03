@@ -20,6 +20,13 @@ export type GoogleDataPoint = {
     date?: { year?: number; month?: number; day?: number };
     beatsPerMinute?: string | number;
   };
+  dailyVo2Max?: {
+    date?: { year?: number; month?: number; day?: number };
+    vo2Max?: number;
+    estimated?: boolean;
+    cardioFitnessLevel?: unknown;
+    covariance?: unknown;
+  };
   exercise?: {
     interval?: {
       startTime?: string;
@@ -154,6 +161,16 @@ export function mapDailyRhr(point: GoogleDataPoint, userId: string) {
   } catch {
     return undefined;
   }
+}
+
+/** Maps only the display-independent Air daily VO2 fields needed by body-age v1. */
+export function mapDailyVo2(point: GoogleDataPoint): { civilDate: string; vo2Max: number; estimated: boolean } | undefined {
+  const dailyVo2 = point.dailyVo2Max;
+  const civilDate = civilDateFrom(dailyVo2?.date);
+  if (!civilDate || typeof dailyVo2?.vo2Max !== 'number' || !Number.isFinite(dailyVo2.vo2Max) || dailyVo2.vo2Max <= 0) {
+    return undefined;
+  }
+  return { civilDate, vo2Max: dailyVo2.vo2Max, estimated: dailyVo2.estimated === true };
 }
 
 function zoneMinutes(durations: NonNullable<NonNullable<GoogleDataPoint['exercise']>['metricsSummary']>['heartRateZoneDurations']) {

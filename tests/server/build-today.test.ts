@@ -2,12 +2,52 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { parseDailyCardio, parseDailyHeartRateZones, parseDailyTimeInZone } from '../../src/domain/cardio-records';
+import { BODY_AGE_REFERENCE_VERSION } from '../../src/domain/body-age';
 import { parseSleepSession, type SleepSession } from '../../src/domain/health-records';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { DemoHealthProvider } from '../../src/server/health/demo-provider';
+import { BODY_AGE_ALGORITHM_VERSION, BODY_AGE_WINDOW_DAYS, recomputeBodyAge } from '../../src/server/health/body-age-recompute';
+import { bodyAgeFingerprintContext, bodyAgeInputFingerprint } from '../../src/server/health/body-age-fingerprint';
 import { emptyUserHealthRecords, type HealthProvider, type UserHealthRecords } from '../../src/server/health/provider';
 import { createMemoryStore } from '../../src/server/db/memory-store';
-import { buildTodayView } from '../../src/server/dashboard/build-today';
+import { buildTodayView, type BodyAgeMetricView, type TodayView } from '../../src/server/dashboard/build-today';
+
+function requiredBodyAge(view: TodayView): BodyAgeMetricView {
+  const bodyAge = view.metrics.bodyAge;
+  assert.ok(bodyAge, 'buildTodayView must always emit bodyAge');
+  return bodyAge;
+}
+
+async function currentBodyAgeFingerprint(
+  store: ReturnType<typeof createMemoryStore>,
+  records = emptyUserHealthRecords(),
+  now = new Date('2026-08-24T12:00:00.000Z'),
+): Promise<string> {
+  const profile = await store.healthMetrics.getBodyAgeProfile({ userId: 'u1' });
+  assert.ok(profile, 'test fixture requires a profile');
+  const timeZoneHistory = await store.healthMetrics.listTimeZoneHistory('u1');
+  const context = bodyAgeFingerprintContext({ timeZoneHistory, now, windowDays: BODY_AGE_WINDOW_DAYS });
+  const dailyVo2 = await store.healthMetrics.listDailyVo2({
+    userId: 'u1', fromCivilDate: context.fromCivilDate, toCivilDate: context.asOfCivilDate,
+  });
+  return bodyAgeInputFingerprint({
+    algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+    windowDays: BODY_AGE_WINDOW_DAYS,
+    userId: 'u1',
+    profile,
+    timeZoneHistory,
+    now,
+    dailyVo2,
+    records,
+  });
+}
+
+function dailyVo2(civilDate: string, vo2Max = 80) {
+  return {
+    userId: 'u1', civilDate, vo2Max, sourceFamily: 'google-wearables' as const,
+    receivedAt: '2026-08-24T12:00:00.000Z', revision: 0, estimated: false,
+  };
+}
 
 function assertNoTrainingPermission(text: string): void {
   assert.doesNotMatch(text, /可按原计划/);
@@ -141,6 +181,246 @@ test('oauth today without IANA does not fall back to Asia/Shanghai', async () =>
     lastSuccessfulSyncAt: '2026-08-23T22:00:00.000Z',
   });
   assert.equal(view.localDate, '2026-08-23');
+});
+
+test('today body age hides a result whose profile revision no longer matches', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'male' });
+  await store.healthMetrics.writeBodyAgeResult({
+    userId: 'u1',
+    algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+    estimate: {
+      age: 42,
+      coverageDays: 21,
+      latestInputCivilDate: '2026-08-22',
+      route: 'daily_vo2',
+      status: 'daily_vo2_stable',
+      referenceVersion: BODY_AGE_REFERENCE_VERSION,
+      disclaimer: 'non_medical_non_calibrated_estimate',
+      dataGaps: { dailyVo2DaysNeeded: 0, rhrDaysNeeded: 0, observedHrPeakRequired: false },
+    },
+    lastCalculatedCivilDate: '2026-08-22',
+    referenceHash: 'sha256:reference',
+    inputFingerprint: 'sha256:inputs',
+    profileRevision: 1,
+    chronologicalAgeDeltaYears: -2,
+    windowDays: 28,
+    exclusionCounts: {
+      invalidDailyVo2: 0, futureDailyVo2: 0, untrustedDailyVo2: 0,
+      invalidDailyRhr: 0, futureDailyRhr: 0, untrustedDailyRhr: 0,
+    },
+    computedAt: '2026-08-22T12:00:00.000Z',
+  });
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'female' });
+
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  assert.deepEqual(requiredBodyAge(view), {
+    label: '身体年龄', age: null, edge: null, status: 'data_updating', route: null,
+    coverageDays: 0, latestInputCivilDate: null, lastCalculatedCivilDate: null,
+    referenceVersion: BODY_AGE_REFERENCE_VERSION, chronologicalAgeDeltaYears: null,
+    dataGaps: { dailyVo2DaysNeeded: 7, rhrDaysNeeded: 7, observedHrPeakRequired: true },
+    disclaimer: 'non_medical_non_calibrated_estimate',
+  });
+});
+
+test('today body age hides a result when the current input fingerprint no longer matches', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'male' });
+  await store.healthMetrics.upsertDailyVo2(Array.from({ length: 7 }, (_, offset) => dailyVo2(
+    `2026-08-${String(24 - offset).padStart(2, '0')}`,
+    26.7,
+  )));
+  const records: UserHealthRecords = {
+    ...emptyUserHealthRecords(),
+    dailyRhr: [{
+      userId: 'u1', source: 'google_health', sourceRecordId: 'rhr-2026-08-24', date: '2026-08-24', valueBpm: 60,
+    }],
+  };
+  await recomputeBodyAge({
+    store: store.healthMetrics,
+    userId: 'u1',
+    now: new Date('2026-08-24T12:00:00.000Z'),
+    records,
+  });
+  const provider: HealthProvider = {
+    capabilities: { mode: 'oauth', canSync: true },
+    async listRecords() { return records; },
+  };
+  const beforeChange = await buildTodayView({
+    provider,
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+  assert.equal(requiredBodyAge(beforeChange).status, 'daily_vo2_provisional');
+  await store.healthMetrics.upsertDailyVo2([{
+    ...dailyVo2('2026-08-24', 27), receivedAt: '2026-08-24T13:00:00.000Z', revision: 1,
+  }]);
+
+  const view = await buildTodayView({
+    provider,
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  const bodyAge = requiredBodyAge(view);
+  assert.equal(bodyAge.status, 'data_updating');
+  assert.equal(bodyAge.age, null);
+  assert.equal(bodyAge.edge, null);
+  assert.equal(bodyAge.route, null);
+  assert.equal(bodyAge.chronologicalAgeDeltaYears, null);
+});
+
+test('today body age never exposes a stored estimate while profile fields are incomplete', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.writeBodyAgeResult({
+    userId: 'u1', algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+    estimate: {
+      age: 42, coverageDays: 21, latestInputCivilDate: '2026-08-22', route: 'daily_vo2',
+      status: 'daily_vo2_stable', referenceVersion: BODY_AGE_REFERENCE_VERSION,
+      disclaimer: 'non_medical_non_calibrated_estimate',
+      dataGaps: { dailyVo2DaysNeeded: 0, rhrDaysNeeded: 0, observedHrPeakRequired: false },
+    },
+    lastCalculatedCivilDate: '2026-08-22', referenceHash: 'sha256:reference', inputFingerprint: 'sha256:inputs',
+    profileRevision: 0, chronologicalAgeDeltaYears: -2, windowDays: 28,
+    exclusionCounts: {
+      invalidDailyVo2: 0, futureDailyVo2: 0, untrustedDailyVo2: 0,
+      invalidDailyRhr: 0, futureDailyRhr: 0, untrustedDailyRhr: 0,
+    },
+    computedAt: '2026-08-22T12:00:00.000Z',
+  });
+
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  const bodyAge = requiredBodyAge(view);
+  assert.equal(bodyAge.status, 'profile_missing');
+  assert.equal(bodyAge.age, null);
+  assert.equal(bodyAge.edge, null);
+  assert.equal(bodyAge.route, null);
+  assert.equal(bodyAge.chronologicalAgeDeltaYears, null);
+});
+
+test('today body age uses a generic accumulating state until the first current result exists', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'male' });
+
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  const bodyAge = requiredBodyAge(view);
+  assert.equal(bodyAge.status, 'data_accumulating');
+  assert.equal(bodyAge.age, null);
+  assert.equal(bodyAge.route, null);
+  assert.deepEqual(bodyAge.dataGaps, {
+    dailyVo2DaysNeeded: 7, rhrDaysNeeded: 7, observedHrPeakRequired: true,
+  });
+});
+
+test('today body age sends an allowlisted view and never gives a boundary a chronological delta', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'male' });
+  await store.healthMetrics.upsertDailyVo2(Array.from({ length: 7 }, (_, offset) => dailyVo2(`2026-08-${String(24 - offset).padStart(2, '0')}`)));
+  const inputFingerprint = await currentBodyAgeFingerprint(store);
+  await store.healthMetrics.writeBodyAgeResult({
+    userId: 'u1',
+    algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+    estimate: {
+      age: 'below_reference_min', coverageDays: 28, latestInputCivilDate: '2026-08-22', route: 'daily_vo2',
+      status: 'daily_vo2_stable', referenceVersion: BODY_AGE_REFERENCE_VERSION,
+      disclaimer: 'non_medical_non_calibrated_estimate',
+      dataGaps: { dailyVo2DaysNeeded: 0, rhrDaysNeeded: 0, observedHrPeakRequired: false },
+    },
+    lastCalculatedCivilDate: '2026-08-22', referenceHash: 'sha256:reference', inputFingerprint,
+    profileRevision: 1, chronologicalAgeDeltaYears: null, windowDays: 28,
+    exclusionCounts: {
+      invalidDailyVo2: 0, futureDailyVo2: 0, untrustedDailyVo2: 0,
+      invalidDailyRhr: 0, futureDailyRhr: 0, untrustedDailyRhr: 0,
+    },
+    computedAt: '2026-08-22T12:00:00.000Z',
+  });
+
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  const bodyAge = requiredBodyAge(view);
+  assert.equal(bodyAge.age, null);
+  assert.equal(bodyAge.edge, 'below_reference_min');
+  assert.equal(bodyAge.chronologicalAgeDeltaYears, null);
+  assert.equal(bodyAge.route, 'daily_vo2');
+  assert.equal(bodyAge.status, 'daily_vo2_stable');
+  assert.deepEqual(Object.keys(bodyAge).sort(), [
+    'age', 'chronologicalAgeDeltaYears', 'coverageDays', 'dataGaps', 'disclaimer', 'edge',
+    'label', 'lastCalculatedCivilDate', 'latestInputCivilDate', 'referenceVersion', 'route', 'status',
+  ]);
+});
+
+test('today body age preserves a stale result without upgrading it to a fresh number', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'male' });
+  await store.healthMetrics.upsertDailyVo2(Array.from({ length: 7 }, (_, offset) => dailyVo2(`2026-08-${String(10 - offset).padStart(2, '0')}`, 26.7)));
+  const inputFingerprint = await currentBodyAgeFingerprint(store);
+  await store.healthMetrics.writeBodyAgeResult({
+    userId: 'u1', algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+    estimate: {
+      age: null, coverageDays: 7, latestInputCivilDate: '2026-08-10', route: 'daily_vo2', status: 'stale',
+      referenceVersion: BODY_AGE_REFERENCE_VERSION, disclaimer: 'non_medical_non_calibrated_estimate',
+      dataGaps: { dailyVo2DaysNeeded: 0, rhrDaysNeeded: 0, observedHrPeakRequired: false },
+    },
+    lastCalculatedCivilDate: '2026-08-10', referenceHash: 'sha256:reference', inputFingerprint,
+    profileRevision: 1, chronologicalAgeDeltaYears: null, windowDays: 28,
+    exclusionCounts: {
+      invalidDailyVo2: 0, futureDailyVo2: 0, untrustedDailyVo2: 0,
+      invalidDailyRhr: 0, futureDailyRhr: 0, untrustedDailyRhr: 0,
+    },
+    computedAt: '2026-08-10T12:00:00.000Z',
+  });
+
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  assert.equal(view.freshness, 'fresh');
+  const bodyAge = requiredBodyAge(view);
+  assert.equal(bodyAge.status, 'stale');
+  assert.equal(bodyAge.age, null);
+  assert.equal(bodyAge.edge, null);
+  assert.equal(bodyAge.route, 'daily_vo2');
+  assert.equal(bodyAge.lastCalculatedCivilDate, '2026-08-10');
+  assert.equal(bodyAge.chronologicalAgeDeltaYears, null);
+});
+
+test('demo body age remains a safe profile-missing default without a metrics store', async () => {
+  const view = await buildTodayView({
+    provider: { capabilities: { mode: 'demo', canSync: false }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'demo_user', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T12:00:00.000Z',
+    allowDefaultTimeZone: true,
+  });
+  const bodyAge = requiredBodyAge(view);
+  assert.equal(bodyAge.status, 'profile_missing');
+  assert.equal(bodyAge.age, null);
+  assert.equal(bodyAge.route, null);
 });
 
 test('does not allow provider records for another user into the view', async () => {

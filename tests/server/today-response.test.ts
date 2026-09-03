@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { parseMetricResult } from '../../src/domain/cardio-records';
+import { BODY_AGE_REFERENCE_VERSION } from '../../src/domain/body-age';
 import { WHOOP_STYLE_METRIC_VERSION, type MetricCoverageState, type MetricSourceState } from '../../src/domain/metric-types';
 import { loadConfig } from '../../src/server/config/env';
 import { createMemoryStore } from '../../src/server/db/memory-store';
 import { emptyUserHealthRecords } from '../../src/server/health/provider';
+import { BODY_AGE_ALGORITHM_VERSION } from '../../src/server/health/body-age-recompute';
 import { buildTodayResponse, buildTodayViewForUser } from '../../src/server/dashboard/today-response';
 
 const coverage: MetricCoverageState = {
@@ -77,6 +79,50 @@ test('oauth today responses never fall back to demo_user', async () => {
   assert.equal(response.status, 200);
   assert.equal(body.userId, '11111111-1111-1111-1111-111111111111');
   assert.equal(JSON.stringify(body).includes('demo_user'), false);
+});
+
+test('today response serializes only the body-age dashboard allowlist', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.updateBodyAgeProfile({ userId: 'u1', birthDate: '1988-04-20', referenceSex: 'female' });
+  await store.healthMetrics.recordObservedHrPeak({ userId: 'u1', observedHrPeakBpm: 181, observedAt: '2026-08-24T10:00:00.000Z' });
+  await store.healthMetrics.writeBodyAgeResult({
+    userId: 'u1', algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+    estimate: {
+      age: 45, coverageDays: 7, latestInputCivilDate: '2026-08-24', route: 'daily_vo2',
+      status: 'daily_vo2_provisional', referenceVersion: BODY_AGE_REFERENCE_VERSION,
+      disclaimer: 'non_medical_non_calibrated_estimate',
+      dataGaps: { dailyVo2DaysNeeded: 0, rhrDaysNeeded: 0, observedHrPeakRequired: false },
+    },
+    lastCalculatedCivilDate: '2026-08-24', referenceHash: 'sha256:reference-hash', inputFingerprint: 'sha256:fingerprint',
+    profileRevision: 1, chronologicalAgeDeltaYears: 7, windowDays: 28,
+    exclusionCounts: {
+      invalidDailyVo2: 0, futureDailyVo2: 0, untrustedDailyVo2: 0,
+      invalidDailyRhr: 0, futureDailyRhr: 0, untrustedDailyRhr: 0,
+    },
+    computedAt: '2026-08-24T12:00:00.000Z',
+  });
+
+  const response = await buildTodayResponse({ mode: 'oauth', id: 'u1' }, '2026-08-24T12:00:00.000Z', {
+    config: oauthConfig(), store,
+    snapshotForUser: async () => ({ syncedAt: new Date('2026-08-24T11:00:00.000Z'), records: emptyUserHealthRecords() }),
+  });
+  const body = await response.json() as { metrics: { bodyAge: Record<string, unknown> } };
+  assert.equal(response.status, 200);
+  assert.deepEqual(Object.keys(body.metrics.bodyAge).sort(), [
+    'age', 'chronologicalAgeDeltaYears', 'coverageDays', 'dataGaps', 'disclaimer', 'edge',
+    'label', 'lastCalculatedCivilDate', 'latestInputCivilDate', 'referenceVersion', 'route', 'status',
+  ]);
+  const serialized = JSON.stringify(body);
+  for (const forbidden of [
+    'birthDate', 'vo2Max', 'valueBpm', 'observedHrPeakBpm', 'sourceFamily', 'receivedAt', 'revision',
+    'inputFingerprint', 'referenceHash', 'computedAt', 'oauth', 'token', 'scopes', 'accessToken', 'refreshToken',
+    'providerPayload', 'googleRecord', 'raw',
+  ]) {
+    assert.equal(serialized.includes(forbidden), false, forbidden);
+  }
+  assert.equal(serialized.includes('1988-04-20'), false);
+  assert.equal(serialized.includes('181'), false);
 });
 
 test('oauth today view reads stored v2 metrics and does not fetch live google records', async () => {

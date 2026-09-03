@@ -6,16 +6,18 @@ import { parseDailyHrv, parseDailyRhr, parseSleepSession } from '../../src/domai
 import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import type { ConnectionRow } from '../../src/server/auth/types';
 import { createMemoryStore } from '../../src/server/db/memory-store';
+import { BODY_AGE_ALGORITHM_VERSION } from '../../src/server/health/body-age-recompute';
 import {
   connectionNextSyncAt,
   recomputeAffectedDays,
+  syncWindowFor,
   syncCardioConnection,
   type CardioSyncState,
 } from '../../src/server/health/cardio-sync';
-import type { HealthSyncDataType } from '../../src/server/health/cardio-store';
-import { HEALTH_HIGH_VOLUME_PAGE_SIZE } from '../../src/server/health/filters';
+import { HEALTH_SYNC_DATA_TYPES, type HealthSyncDataType } from '../../src/server/health/cardio-store';
+import { dataPointFilter, HEALTH_HIGH_VOLUME_PAGE_SIZE } from '../../src/server/health/filters';
 import type { HealthApiClient } from '../../src/server/health/health-api';
-import type { GoogleDataPoint } from '../../src/server/health/map-records';
+import { mapDailyVo2, type GoogleDataPoint } from '../../src/server/health/map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server/health/provider';
 
 const userId = 'u1';
@@ -108,6 +110,10 @@ function zonesPoint(date: string): GoogleDataPoint {
       })),
     },
   };
+}
+
+function dailyVo2Point(date: string, vo2Max: number, estimated = false): GoogleDataPoint {
+  return { dailyVo2Max: { date: civilParts(date), vo2Max, estimated } };
 }
 
 function timeInZonePoint(startTime: string, heartRateZoneType = 'LIGHT', utcOffset = '0s'): GoogleDataPoint {
@@ -262,6 +268,244 @@ function containsRawPoint(value: unknown): boolean {
   return json.includes('beatsPerMinute') || json.includes('"heartRate"') || json.includes('dataPoints');
 }
 
+test('daily VO2 uses the exact Google civil-date windows and mapping', () => {
+  const initial = syncWindowFor('daily-vo2-max', NOW, undefined);
+  assert.deepEqual(initial, { from: '2026-07-28', untilExclusive: '2026-08-25' });
+  const incremental = syncWindowFor('daily-vo2-max', NOW, {
+    connectionId,
+    dataType: 'daily-vo2-max',
+    successfulWatermark: new Date('2026-08-24T01:00:00.000Z'),
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: NOW,
+  });
+  assert.deepEqual(incremental, { from: '2026-08-22', untilExclusive: '2026-08-25' });
+  assert.equal(
+    dataPointFilter('daily-vo2-max', initial.from, initial.untilExclusive),
+    'daily_vo2_max.date >= "2026-07-28" AND daily_vo2_max.date < "2026-08-25"',
+  );
+  const mappedPoint = dailyVo2Point('2026-08-24', 42.5, true);
+  mappedPoint.dailyVo2Max!.cardioFitnessLevel = 'HIGH';
+  mappedPoint.dailyVo2Max!.covariance = { ignored: true };
+  assert.deepEqual(mapDailyVo2(mappedPoint), { civilDate: '2026-08-24', vo2Max: 42.5, estimated: true });
+  assert.equal(mapDailyVo2({ dailyVo2Max: { date: civilParts('2026-08-24'), vo2Max: 0 } }), undefined);
+  assert.equal(HEALTH_SYNC_DATA_TYPES.includes('daily-vo2-max'), true);
+});
+
+test('daily VO2 windows use the effective user civil date across UTC and DST boundaries', () => {
+  const shanghaiNow = new Date('2026-08-24T16:00:00.000Z');
+  assert.deepEqual(syncWindowFor('daily-vo2-max', shanghaiNow, undefined, 'Asia/Shanghai'), {
+    from: '2026-07-29',
+    untilExclusive: '2026-08-26',
+  });
+  assert.deepEqual(syncWindowFor('daily-vo2-max', shanghaiNow, {
+    connectionId,
+    dataType: 'daily-vo2-max',
+    successfulWatermark: new Date('2026-08-24T15:00:00.000Z'),
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: shanghaiNow,
+  }, 'Asia/Shanghai'), {
+    from: '2026-08-23',
+    untilExclusive: '2026-08-26',
+  });
+
+  const dstNow = new Date('2026-03-09T04:00:00.000Z');
+  assert.deepEqual(syncWindowFor('daily-vo2-max', dstNow, {
+    connectionId,
+    dataType: 'daily-vo2-max',
+    successfulWatermark: new Date('2026-03-09T03:00:00.000Z'),
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: dstNow,
+  }, 'America/New_York'), {
+    from: '2026-03-06',
+    untilExclusive: '2026-03-10',
+  });
+});
+
+test('daily VO2 empty refresh authoritatively removes its Google civil-date window', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.upsertDailyVo2([{
+    userId,
+    civilDate: '2026-08-23',
+    vo2Max: 41,
+    sourceFamily: 'google-wearables',
+    receivedAt: '2026-08-23T12:00:00.000Z',
+    revision: 0,
+    estimated: false,
+  }]);
+  const api = createFakeApi({ 'daily-vo2-max': [[]] });
+  await runSync(store, api, { dataTypes: ['daily-vo2-max'] });
+
+  assert.deepEqual(await store.healthMetrics.listDailyVo2({
+    userId,
+    fromCivilDate: '2026-07-28',
+    toCivilDate: '2026-08-24',
+  }), []);
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'daily-vo2-max').filter), {
+    from: '2026-07-28',
+    untilExclusive: '2026-08-25',
+  });
+  assert.equal((await store.healthMetrics.readCursor({ connectionId, dataType: 'daily-vo2-max' }))?.successfulWatermark?.toISOString(), NOW.toISOString());
+});
+
+test('incremental daily VO2 empty refresh removes only its 48-hour civil-date window', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.upsertDailyVo2(['2026-08-21', '2026-08-22', '2026-08-23', '2026-08-24'].map((civilDate) => ({
+    userId,
+    civilDate,
+    vo2Max: 41,
+    sourceFamily: 'google-wearables' as const,
+    receivedAt: '2026-08-23T12:00:00.000Z',
+    revision: 0,
+    estimated: false,
+  })));
+  await store.healthMetrics.updateCursor({
+    connectionId,
+    dataType: 'daily-vo2-max',
+    successfulWatermark: new Date('2026-08-24T01:00:00.000Z'),
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: NOW,
+  });
+  const api = createFakeApi({ 'daily-vo2-max': [[]] });
+  await runSync(store, api, { dataTypes: ['daily-vo2-max'] });
+
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'daily-vo2-max').filter), {
+    from: '2026-08-22',
+    untilExclusive: '2026-08-25',
+  });
+  assert.deepEqual(await store.healthMetrics.listDailyVo2({
+    userId,
+    fromCivilDate: '2026-08-21',
+    toCivilDate: '2026-08-24',
+  }), [{
+    userId,
+    civilDate: '2026-08-21',
+    vo2Max: 41,
+    sourceFamily: 'google-wearables',
+    receivedAt: '2026-08-23T12:00:00.000Z',
+    revision: 0,
+    estimated: false,
+  }]);
+});
+
+test('daily VO2 incremental API filter and authoritative replacement use the effective user time zone', async () => {
+  const store = await seedStore({ timeZone: 'Asia/Shanghai' });
+  const now = new Date('2026-08-24T16:00:00.000Z');
+  await store.healthMetrics.upsertDailyVo2(['2026-08-22', '2026-08-23', '2026-08-24', '2026-08-25'].map((civilDate) => ({
+    userId,
+    civilDate,
+    vo2Max: 41,
+    sourceFamily: 'google-wearables' as const,
+    receivedAt: '2026-08-23T12:00:00.000Z',
+    revision: 0,
+    estimated: false,
+  })));
+  await store.healthMetrics.updateCursor({
+    connectionId,
+    dataType: 'daily-vo2-max',
+    successfulWatermark: new Date('2026-08-24T15:00:00.000Z'),
+    lastErrorCode: undefined,
+    retryCount: 0,
+    nextAttemptAt: now,
+  });
+  const api = createFakeApi({ 'daily-vo2-max': [[]] });
+  await runSync(store, api, { now, dataTypes: ['daily-vo2-max'] });
+
+  assert.deepEqual(filterBounds(requestFor(api.requests, 'daily-vo2-max').filter), {
+    from: '2026-08-23',
+    untilExclusive: '2026-08-26',
+  });
+  assert.deepEqual(await store.healthMetrics.listDailyVo2({
+    userId,
+    fromCivilDate: '2026-08-22',
+    toCivilDate: '2026-08-25',
+  }), [{
+    userId,
+    civilDate: '2026-08-22',
+    vo2Max: 41,
+    sourceFamily: 'google-wearables',
+    receivedAt: '2026-08-23T12:00:00.000Z',
+    revision: 0,
+    estimated: false,
+  }]);
+  assert.equal(
+    (await store.healthMetrics.readLatestBodyAgeResult({ userId, algorithmVersion: BODY_AGE_ALGORITHM_VERSION }))?.lastCalculatedCivilDate,
+    '2026-08-25',
+  );
+});
+
+test('daily VO2 failure is isolated from other cardio cursor updates', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({
+    'daily-vo2-max': [new Error('health api 403')],
+    'daily-heart-rate-zones': [[zonesPoint('2026-08-24')]],
+  });
+  await runSync(store, api, { dataTypes: ['daily-vo2-max', 'daily-heart-rate-zones'] });
+
+  const vo2 = await store.healthMetrics.readCursor({ connectionId, dataType: 'daily-vo2-max' });
+  const zones = await store.healthMetrics.readCursor({ connectionId, dataType: 'daily-heart-rate-zones' });
+  assert.equal(vo2?.successfulWatermark, undefined);
+  assert.equal(vo2?.lastErrorCode, 'sync_failed');
+  assert.equal(zones?.successfulWatermark?.toISOString(), NOW.toISOString());
+});
+
+test('a valid persisted heart-rate minute raises the historical observed peak once', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({ 'heart-rate': [[hrPoint('2026-08-24T11:59:00.000Z', 176)]] });
+  await runSync(store, api, { dataTypes: ['heart-rate'] });
+
+  assert.deepEqual(await store.healthMetrics.getBodyAgeProfile({ userId }), {
+    userId,
+    birthDate: undefined,
+    referenceSex: undefined,
+    profileRevision: 0,
+    observedHrPeakBpm: 176,
+    firstObservedHrPeakAt: '2026-08-24T11:59:00.000Z',
+    latestObservedHrPeakAt: '2026-08-24T11:59:00.000Z',
+  });
+});
+
+test('a lower heart-rate minute does not rewrite observed-peak history', async () => {
+  const store = await seedStore();
+  await store.healthMetrics.recordObservedHrPeak({ userId, observedHrPeakBpm: 180, observedAt: '2026-08-20T11:00:00.000Z' });
+  const api = createFakeApi({ 'heart-rate': [[hrPoint('2026-08-24T11:59:00.000Z', 170)]] });
+  await runSync(store, api, { dataTypes: ['heart-rate'] });
+
+  assert.deepEqual(await store.healthMetrics.getBodyAgeProfile({ userId }), {
+    userId,
+    birthDate: undefined,
+    referenceSex: undefined,
+    profileRevision: 0,
+    observedHrPeakBpm: 180,
+    firstObservedHrPeakAt: '2026-08-20T11:00:00.000Z',
+    latestObservedHrPeakAt: '2026-08-20T11:00:00.000Z',
+  });
+});
+
+test('a body-age recompute failure is isolated from cardio metrics and cursor updates', async () => {
+  const store = await seedStore();
+  const originalTransaction = store.withTransaction;
+  let transactionCount = 0;
+  store.withTransaction = async (work) => originalTransaction(async (inner) => {
+    transactionCount += 1;
+    if (transactionCount === 2) {
+      inner.healthMetrics.writeBodyAgeResult = async () => {
+        throw new Error('body-age write failure');
+      };
+    }
+    return work(inner);
+  });
+  const api = createFakeApi({ 'daily-heart-rate-zones': [[zonesPoint('2026-08-24')]] });
+  await runSync(store, api, { dataTypes: ['daily-heart-rate-zones'] });
+
+  assert.equal(transactionCount, 2);
+  assert.equal((await store.healthMetrics.readCursor({ connectionId, dataType: 'daily-heart-rate-zones' }))?.successfulWatermark?.toISOString(), NOW.toISOString());
+  assert.ok(await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' }));
+});
+
 test('initial raw HR and activity-level windows are now minus 37 days through now', async () => {
   const store = await seedStore();
   const api = createFakeApi();
@@ -272,6 +516,7 @@ test('initial raw HR and activity-level windows are now minus 37 days through no
   assert.equal(heartRate.from, INITIAL_HR_FROM);
   assert.equal(heartRate.untilExclusive, NOW.toISOString());
   assert.deepEqual(activity, heartRate);
+  assert.equal(requestFor(api.requests, 'daily-vo2-max').filter.includes('daily_vo2_max.date'), true);
   assert.equal(requestFor(api.requests, 'heart-rate').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
   assert.equal(requestFor(api.requests, 'activity-level').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
   assert.equal(requestFor(api.requests, 'time-in-heart-rate-zone').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
@@ -1024,7 +1269,7 @@ test('skips all cardio types in backoff but still recomputes extra snapshot date
       PEAK: { minBeatsPerMinute: 156, maxBeatsPerMinute: 200 },
     },
   });
-  for (const dataType of ['heart-rate', 'activity-level', 'daily-heart-rate-zones', 'time-in-heart-rate-zone', 'exercise'] as const) {
+  for (const dataType of ['heart-rate', 'activity-level', 'daily-heart-rate-zones', 'time-in-heart-rate-zone', 'exercise', 'daily-vo2-max'] as const) {
     await store.healthMetrics.updateCursor({
       connectionId,
       dataType,

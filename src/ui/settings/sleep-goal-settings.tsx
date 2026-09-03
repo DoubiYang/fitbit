@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 
 import { AppShell } from '../shell/app-shell';
+import { BodyAgeProfileSettings, type BodyAgeProfileValues } from './body-age-settings';
 import { TIME_ZONE_READY_EVENT, TimeZoneBootstrap } from './time-zone-bootstrap';
 
 export const SLEEP_GOAL_ENDPOINT = '/rhythm/api/settings/sleep-goal';
@@ -120,13 +121,17 @@ export function SleepGoalSettings({
   );
 }
 
-export function SleepGoalSettingsPanel({
+export function SettingsPanel({
   initialGoalMinutes,
   hasTimeZone,
+  initialBodyAgeProfile = { birthDate: null, referenceSex: null },
+  bodyAgeEditable = true,
   includeTimeZoneBootstrap = true,
 }: {
   initialGoalMinutes: number | null;
   hasTimeZone: boolean;
+  initialBodyAgeProfile?: BodyAgeProfileValues;
+  bodyAgeEditable?: boolean;
   includeTimeZoneBootstrap?: boolean;
 }) {
   return (
@@ -135,16 +140,27 @@ export function SleepGoalSettingsPanel({
         <header className="dashboard-header">
           <p className="eyebrow">节律 · 设置</p>
           <div className="dashboard-header__title-row">
-            <h1>睡眠目标</h1>
+            <h1>健康设置</h1>
           </div>
-          <p className="lede">基础睡眠目标按你的偏好保存，并用于次日睡眠表现，不是医学处方。</p>
+          <p className="lede">在这里管理睡眠目标与身体年龄资料；两项都只用于各自的非医疗健康估算。</p>
         </header>
         {includeTimeZoneBootstrap ? <TimeZoneBootstrap /> : null}
-        <SleepGoalSettings initialGoalMinutes={initialGoalMinutes} hasTimeZone={hasTimeZone} />
+        <div className="settings-stack">
+          <SleepGoalSettings initialGoalMinutes={initialGoalMinutes} hasTimeZone={hasTimeZone} />
+          <BodyAgeProfileSettings initialProfile={initialBodyAgeProfile} editable={bodyAgeEditable} />
+        </div>
         <p>
           <a href="/rhythm">返回今日</a>
         </p>
       </main>
     </AppShell>
   );
+}
+
+export function SleepGoalSettingsPanel(props: {
+  initialGoalMinutes: number | null;
+  hasTimeZone: boolean;
+  includeTimeZoneBootstrap?: boolean;
+}) {
+  return <SettingsPanel {...props} />;
 }

@@ -1,4 +1,5 @@
 import type { DailyHeartRateZones, MetricResult } from '../../domain/cardio-records';
+import { BODY_AGE_REFERENCE_VERSION, type BodyAgeDataGaps, type BodyAgeStatus, type BodyAgeRoute } from '../../domain/body-age';
 import {
   type MetricCoverageState,
   type MetricEvidence,
@@ -10,6 +11,8 @@ import {
 import { computeRecovery, computeSleepPerformance } from '../../domain/whoop-style-metrics';
 import type { UserHealthRecords } from '../health/provider';
 import type { HealthMetricsStore } from '../health/cardio-store';
+import { BODY_AGE_ALGORITHM_VERSION, BODY_AGE_WINDOW_DAYS } from '../health/body-age-recompute';
+import { bodyAgeFingerprintContext, bodyAgeInputFingerprint } from '../health/body-age-fingerprint';
 import type { HealthProvider } from '../health/provider';
 import { civilDateDaysAgo, resolveDashboardCivilDate } from '../time/civil-date';
 
@@ -52,6 +55,21 @@ export type SleepPerformanceMetricView = {
   evidence?: MetricEvidence[];
 };
 
+export type BodyAgeMetricView = {
+  label: string;
+  age: number | null;
+  edge: 'below_reference_min' | 'above_reference_max' | null;
+  status: BodyAgeStatus | 'data_updating';
+  route: BodyAgeRoute;
+  coverageDays: number;
+  latestInputCivilDate: string | null;
+  lastCalculatedCivilDate: string | null;
+  referenceVersion: string;
+  chronologicalAgeDeltaYears: number | null;
+  dataGaps: BodyAgeDataGaps;
+  disclaimer: 'non_medical_non_calibrated_estimate';
+};
+
 type TodayAction =
   | {
       kind: 'recommendation';
@@ -74,6 +92,8 @@ export type TodayView = {
     strain: StrainMetricView;
     recovery: RecoveryMetricView;
     sleepPerformance: SleepPerformanceMetricView;
+    /** Present in API/build output; optional only while the dashboard UI rolls out separately. */
+    bodyAge?: BodyAgeMetricView;
   };
 };
 
@@ -204,18 +224,103 @@ function sleepFromResult(result: MetricResult | undefined): SleepPerformanceMetr
   };
 }
 
+function genericBodyAgeDataGaps(): BodyAgeDataGaps {
+  return { dailyVo2DaysNeeded: 7, rhrDaysNeeded: 7, observedHrPeakRequired: true };
+}
+
+function unavailableBodyAge(status: 'profile_missing' | 'data_accumulating' | 'data_updating'): BodyAgeMetricView {
+  return {
+    label: '身体年龄',
+    age: null,
+    edge: null,
+    status,
+    route: null,
+    coverageDays: 0,
+    latestInputCivilDate: null,
+    lastCalculatedCivilDate: null,
+    referenceVersion: BODY_AGE_REFERENCE_VERSION,
+    chronologicalAgeDeltaYears: null,
+    dataGaps: genericBodyAgeDataGaps(),
+    disclaimer: 'non_medical_non_calibrated_estimate',
+  };
+}
+
+function bodyAgeResultView(result: NonNullable<Awaited<ReturnType<HealthMetricsStore['readLatestBodyAgeResult']>>>): BodyAgeMetricView {
+  const age = result.estimate.age;
+  return {
+    label: '身体年龄',
+    age: typeof age === 'number' ? age : null,
+    edge: age === 'below_reference_min' || age === 'above_reference_max' ? age : null,
+    status: result.estimate.status,
+    route: result.estimate.route,
+    coverageDays: result.estimate.coverageDays,
+    latestInputCivilDate: result.estimate.latestInputCivilDate,
+    lastCalculatedCivilDate: result.lastCalculatedCivilDate,
+    referenceVersion: result.estimate.referenceVersion,
+    chronologicalAgeDeltaYears: typeof age === 'number' ? result.chronologicalAgeDeltaYears : null,
+    dataGaps: { ...result.estimate.dataGaps },
+    disclaimer: result.estimate.disclaimer,
+  };
+}
+
+async function bodyAgeFromStore(input: {
+  store: HealthMetricsStore;
+  userId: string;
+  now: Date;
+  records: UserHealthRecords;
+}): Promise<BodyAgeMetricView> {
+  const [profile, result, timeZoneHistory] = await Promise.all([
+    input.store.getBodyAgeProfile({ userId: input.userId }),
+    input.store.readLatestBodyAgeResult({ userId: input.userId, algorithmVersion: BODY_AGE_ALGORITHM_VERSION }),
+    input.store.listTimeZoneHistory(input.userId),
+  ]);
+  if (!profile?.birthDate || !profile.referenceSex) return unavailableBodyAge('profile_missing');
+  if (!result) return unavailableBodyAge('data_accumulating');
+  if (profile.profileRevision !== result.profileRevision) return unavailableBodyAge('data_updating');
+
+  try {
+    const fingerprintContext = bodyAgeFingerprintContext({
+      timeZoneHistory,
+      now: input.now,
+      windowDays: BODY_AGE_WINDOW_DAYS,
+    });
+    const dailyVo2 = await input.store.listDailyVo2({
+      userId: input.userId,
+      fromCivilDate: fingerprintContext.fromCivilDate,
+      toCivilDate: fingerprintContext.asOfCivilDate,
+    });
+    const currentFingerprint = bodyAgeInputFingerprint({
+      algorithmVersion: BODY_AGE_ALGORITHM_VERSION,
+      windowDays: BODY_AGE_WINDOW_DAYS,
+      userId: input.userId,
+      profile,
+      timeZoneHistory,
+      now: input.now,
+      dailyVo2,
+      records: input.records,
+    });
+    if (currentFingerprint !== result.inputFingerprint) return unavailableBodyAge('data_updating');
+  } catch {
+    return unavailableBodyAge('data_updating');
+  }
+  return bodyAgeResultView(result);
+}
+
 async function metricsFromStore(
   store: HealthMetricsStore,
   userId: string,
   localDate: string,
+  now: Date,
+  records: UserHealthRecords,
 ): Promise<TodayView['metrics']> {
-  const [strain, recovery, sleepPerformance, zones, timeInZone, dailyCardio] = await Promise.all([
+  const [strain, recovery, sleepPerformance, zones, timeInZone, dailyCardio, bodyAge] = await Promise.all([
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'strain' }),
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'recovery' }),
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'sleep_performance' }),
     store.getHeartRateZones({ userId, civilDate: localDate }),
     store.getTimeInZone({ userId, civilDate: localDate }),
     store.getDailyCardio({ userId, civilDate: localDate }),
+    bodyAgeFromStore({ store, userId, now, records }),
   ]);
   return {
     strain: {
@@ -226,6 +331,7 @@ async function metricsFromStore(
     },
     recovery: recoveryFromResult(recovery),
     sleepPerformance: sleepFromResult(sleepPerformance),
+    bodyAge,
   };
 }
 
@@ -271,6 +377,7 @@ async function metricsFromRecords(
       detail: sleepDetail(sleep.score, sleep.reason),
       evidence: sleep.evidence,
     },
+    bodyAge: unavailableBodyAge('profile_missing'),
   };
 }
 
@@ -280,16 +387,17 @@ export async function buildTodayView(input: BuildTodayInput): Promise<TodayView>
     input.timeZone,
     input.allowDefaultTimeZone ? 'default' : 'utc',
   );
+  const records = scopedRecords(
+    await input.provider.listRecords(input.userId, {
+      from: civilDateDaysAgo(localDate, 90),
+      to: localDate,
+    }),
+    input.userId,
+  );
   const metrics = input.healthMetrics
-    ? await metricsFromStore(input.healthMetrics, input.userId, localDate)
+    ? await metricsFromStore(input.healthMetrics, input.userId, localDate, new Date(input.now), records)
     : await metricsFromRecords(
-        scopedRecords(
-          await input.provider.listRecords(input.userId, {
-            from: civilDateDaysAgo(localDate, 90),
-            to: localDate,
-          }),
-          input.userId,
-        ),
+        records,
         input.userId,
         localDate,
         input.now,

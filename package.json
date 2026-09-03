@@ -21,10 +21,12 @@
     "zod": "latest"
   },
   "devDependencies": {
+    "@types/jsdom": "^30.0.0",
     "@types/node": "latest",
     "@types/pg": "^8.23.1",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "jsdom": "^30.0.1",
     "tsx": "latest",
     "typescript": "5.9.3"
   }

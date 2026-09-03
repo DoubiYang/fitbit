@@ -17,6 +17,7 @@ import {
   metricsAffectedByStrainRecompute,
   type AggregatedHeartRateMinute,
 } from '../../domain/whoop-style-metrics';
+import { updateObservedHrPeakBpm } from '../../domain/body-age';
 import type { AuthStore, ConnectionRow, ScheduledSyncLease } from '../auth/types';
 import { civilDate } from '../time/civil-date';
 import {
@@ -29,8 +30,10 @@ import {
 } from './cardio-map';
 import type { HealthSyncCursor, HealthSyncDataType, HealthTimeZoneHistory } from './cardio-store';
 import { dataPointFilter, HEALTH_HIGH_VOLUME_PAGE_SIZE } from './filters';
+import { recomputeBodyAge } from './body-age-recompute';
 import type { HealthApiClient } from './health-api';
 import type { GoogleDataPoint } from './map-records';
+import { mapDailyVo2 } from './map-records';
 import { emptyUserHealthRecords, type UserHealthRecords } from './provider';
 import type { HealthSnapshot } from './snapshot-store';
 
@@ -46,6 +49,7 @@ const CARDIO_SYNC_TYPES: HealthSyncDataType[] = [
   'daily-heart-rate-zones',
   'time-in-heart-rate-zone',
   'exercise',
+  'daily-vo2-max',
 ];
 
 export type CardioSyncState = {
@@ -138,6 +142,17 @@ function utcDate(instant: Date): string {
   return instant.toISOString().slice(0, 10);
 }
 
+function dailyVo2CivilDate(instant: Date, timeZone: string | undefined): string {
+  if (!timeZone) {
+    return utcDate(instant);
+  }
+  try {
+    return civilDate(instant, timeZone);
+  } catch {
+    return utcDate(instant);
+  }
+}
+
 export function initialCivilBackfillRange(now: Date, rangeDays = 35): { from: string; to: string } {
   const to = utcDate(now);
   return { from: addCivilDays(to, -(rangeDays + 1)), to };
@@ -190,7 +205,12 @@ function twoHourCivilWindow(now: Date, watermark: Date): QueryWindow {
   };
 }
 
-export function syncWindowFor(dataType: HealthSyncDataType, now: Date, cursor: HealthSyncCursor | undefined): QueryWindow {
+export function syncWindowFor(
+  dataType: HealthSyncDataType,
+  now: Date,
+  cursor: HealthSyncCursor | undefined,
+  timeZone?: string,
+): QueryWindow {
   const watermark = cursor?.successfulWatermark;
   switch (dataType) {
     case 'heart-rate':
@@ -206,6 +226,15 @@ export function syncWindowFor(dataType: HealthSyncDataType, now: Date, cursor: H
     case 'daily-heart-rate-variability':
     case 'daily-resting-heart-rate':
       return watermark ? fortyEightHourCivilWindow(now) : utcWideWindow(now);
+    case 'daily-vo2-max': {
+      const asOf = dailyVo2CivilDate(now, timeZone);
+      return watermark
+        ? {
+          from: dailyVo2CivilDate(new Date(now.getTime() - FORTY_EIGHT_HOURS_MS), timeZone),
+          untilExclusive: addCivilDays(asOf, 1),
+        }
+        : { from: addCivilDays(asOf, -27), untilExclusive: addCivilDays(asOf, 1) };
+    }
   }
 }
 
@@ -330,6 +359,7 @@ async function ingestHeartRate(input: {
   signal?: AbortSignal;
 }): Promise<string[]> {
   const affected = new Set<string>();
+  const persistedMinutes: HeartRateMinuteAggregate[] = [];
   let previousMinutes: AggregatedHeartRateMinute[] = [];
   let lookahead: HeartRateSample | undefined;
   for await (const page of input.api.iterateReconciledDataPoints({
@@ -364,8 +394,27 @@ async function ingestHeartRate(input: {
     if (persistable.length > 0) {
       await requireSyncable(input.store, input.userId);
       await scheduledWrite(input, (store) => store.healthMetrics.upsertMinutes(persistable));
+      persistedMinutes.push(...persistable);
       for (const minute of persistable) {
         affected.add(minute.civilDate);
+      }
+    }
+  }
+  if (persistedMinutes.length > 0) {
+    const profile = await input.store.healthMetrics.getBodyAgeProfile({ userId: input.userId });
+    const observedPeakBpm = updateObservedHrPeakBpm(profile?.observedHrPeakBpm, persistedMinutes);
+    if (observedPeakBpm !== undefined && observedPeakBpm > (profile?.observedHrPeakBpm ?? Number.NEGATIVE_INFINITY)) {
+      const observedAt = persistedMinutes
+        .filter((minute) => updateObservedHrPeakBpm(undefined, [minute]) === observedPeakBpm)
+        .map((minute) => minute.minuteStartUtc)
+        .sort()[0];
+      if (observedAt) {
+        await requireSyncable(input.store, input.userId);
+        await scheduledWrite(input, (store) => store.healthMetrics.recordObservedHrPeak({
+          userId: input.userId,
+          observedHrPeakBpm: observedPeakBpm,
+          observedAt,
+        }));
       }
     }
   }
@@ -531,6 +580,40 @@ async function ingestExercise(input: {
   return [...affected];
 }
 
+async function ingestDailyVo2(input: {
+  store: AuthStore;
+  api: HealthApiClient;
+  accessToken: string;
+  userId: string;
+  now: Date;
+  window: QueryWindow;
+  lease?: ScheduledCardioRun;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const points = await input.api.listDataPoints({
+    accessToken: input.accessToken,
+    dataType: 'daily-vo2-max',
+    filter: dataPointFilter('daily-vo2-max', input.window.from, input.window.untilExclusive),
+    signal: input.signal,
+  });
+  throwIfAborted(input.signal);
+  const receivedAt = input.now.toISOString();
+  const rows = points.flatMap((point) => {
+    const mapped = mapDailyVo2(point);
+    return mapped
+      ? [{ userId: input.userId, ...mapped, sourceFamily: 'google-wearables' as const, receivedAt, revision: 0 }]
+      : [];
+  });
+  await requireSyncable(input.store, input.userId);
+  await scheduledWrite(input, (store) => store.healthMetrics.authoritativelyReplaceDailyVo2({
+    userId: input.userId,
+    fromCivilDate: input.window.from,
+    toCivilDate: addCivilDays(input.window.untilExclusive, -1),
+    rows,
+  }));
+  return rows.map((row) => row.civilDate);
+}
+
 async function ingestDataType(input: {
   store: AuthStore;
   api: HealthApiClient;
@@ -553,6 +636,8 @@ async function ingestDataType(input: {
       return ingestTimeInZone(input);
     case 'exercise':
       return ingestExercise(input);
+    case 'daily-vo2-max':
+      return ingestDailyVo2(input);
     default:
       throw new Error(`unsupported cardio sync data type ${input.dataType}`);
   }
@@ -786,7 +871,13 @@ export async function syncCardioConnection(input: {
     if (cursor?.nextAttemptAt && cursor.nextAttemptAt.getTime() > input.now.getTime()) {
       continue;
     }
-    const window = syncWindowFor(dataType, input.now, cursor);
+    const timeZone = dataType === 'daily-vo2-max'
+      ? (await input.store.healthMetrics.lookupTimeZoneHistory({
+        userId: input.connection.userId,
+        at: input.now.toISOString(),
+      }))?.ianaTimeZone
+      : undefined;
+    const window = syncWindowFor(dataType, input.now, cursor, timeZone);
     try {
       const dates = await ingestDataType({
         store: input.store,
@@ -845,6 +936,27 @@ export async function syncCardioConnection(input: {
     await input.store.withScheduledSyncLease(input.lease, (inner) => finalize(inner));
   } else {
     await input.store.withTransaction(finalize);
+  }
+
+  try {
+    const records = await recordsLoader({
+      loadRecords: input.loadRecords,
+      loadSnapshot: input.loadSnapshot,
+    })(input.connection.userId);
+    const recompute = (inner: AuthStore) => recomputeBodyAge({
+      store: inner.healthMetrics,
+      userId: input.connection.userId,
+      now: input.now,
+      records,
+    });
+    if (input.lease) {
+      await input.store.withScheduledSyncLease(input.lease, recompute);
+    } else {
+      await input.store.withTransaction(recompute);
+    }
+  } catch {
+    // A body-age estimate is server-only supplemental output. Its independent
+    // transaction may roll back without affecting committed metrics or cursors.
   }
 
   throwIfAborted(input.signal);

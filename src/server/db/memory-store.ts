@@ -7,8 +7,15 @@ import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, Sche
 import {
   HealthMetricsConnectionMismatchError,
   mergeHeartRateMinuteUpsert,
+  normalizeDailyVo2Writes,
   parseActivityLevelInterval,
+  parseAuthoritativeDailyVo2Replace,
+  parseBodyAgeProfileUpdate,
+  parseBodyAgeProfileRead,
+  parseBodyAgeResultRead,
+  parseBodyAgeResultWrite,
   parseDailyCardio,
+  parseDailyVo2ListInput,
   parseDailyHeartRateZones,
   parseDailyTimeInZone,
   parseExerciseInterval,
@@ -16,14 +23,22 @@ import {
   parseHealthTimeZoneHistory,
   parseHeartRateMinuteAggregate,
   parseMetricResult,
+  parseObservedHrPeakWrite,
   parseSleepGoal,
+  parseStoredBodyAgeProfile,
+  parseStoredDailyVo2,
+  selectNewestDailyVo2,
   SleepGoalConflictError,
   TimeZoneHistoryConflictError,
+  type BodyAgeResultWrite,
   type HealthMetricsStore,
   type HealthMetricsWindowWrite,
   type HealthSyncCursor,
   type HealthTimeZoneHistory,
   type HeartRateMinuteAggregate,
+  type StoredBodyAgeProfile,
+  type StoredBodyAgeResult,
+  type StoredDailyVo2,
 } from '../health/cardio-store';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
 import { buildCurrentMealGooglePayloads } from '../meals/current-meal';
@@ -212,6 +227,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
   const healthCursors = new Map<string, HealthSyncCursor>();
   const sleepGoals = new Map<string, ReturnType<typeof parseSleepGoal>>();
   const timeZoneHistory = new Map<string, HealthTimeZoneHistory>();
+  const bodyAgeProfiles = new Map<string, StoredBodyAgeProfile>();
+  const dailyVo2 = new Map<string, StoredDailyVo2>();
+  const bodyAgeResults = new Map<string, StoredBodyAgeResult>();
   let foodComposition: LocalTwFdaFood[] = [];
   let rootTransactionTail = Promise.resolve();
 
@@ -293,6 +311,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       healthCursors: new Map([...healthCursors].map(([id, row]) => [id, cloneCursor(row)])),
       sleepGoals: new Map([...sleepGoals].map(([id, row]) => [id, structuredClone(row)])),
       timeZoneHistory: new Map([...timeZoneHistory].map(([id, row]) => [id, structuredClone(row)])),
+      bodyAgeProfiles: new Map([...bodyAgeProfiles].map(([id, row]) => [id, structuredClone(row)])),
+      dailyVo2: new Map([...dailyVo2].map(([id, row]) => [id, structuredClone(row)])),
+      bodyAgeResults: new Map([...bodyAgeResults].map(([id, row]) => [id, structuredClone(row)])),
       foodComposition: structuredClone(foodComposition),
     };
   }
@@ -334,6 +355,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
     restoreMap(healthCursors, state.healthCursors, cloneCursor);
     restoreMap(sleepGoals, state.sleepGoals, (row) => structuredClone(row));
     restoreMap(timeZoneHistory, state.timeZoneHistory, (row) => structuredClone(row));
+    restoreMap(bodyAgeProfiles, state.bodyAgeProfiles, (row) => structuredClone(row));
+    restoreMap(dailyVo2, state.dailyVo2, (row) => structuredClone(row));
+    restoreMap(bodyAgeResults, state.bodyAgeResults, (row) => structuredClone(row));
     foodComposition = structuredClone(state.foodComposition);
   }
 
@@ -893,6 +917,94 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         .sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt))
         .map((row) => structuredClone(row));
     },
+    async getBodyAgeProfile(input) {
+      const parsed = parseBodyAgeProfileRead(input);
+      const row = bodyAgeProfiles.get(parsed.userId);
+      return row ? structuredClone(row) : undefined;
+    },
+    async updateBodyAgeProfile(input) {
+      const parsed = parseBodyAgeProfileUpdate(input);
+      const current = bodyAgeProfiles.get(parsed.userId);
+      const changed = !current
+        ? parsed.birthDate !== null || parsed.referenceSex !== null
+        : current.birthDate !== (parsed.birthDate ?? undefined)
+          || current.referenceSex !== (parsed.referenceSex ?? undefined);
+      const next = parseStoredBodyAgeProfile({
+        userId: parsed.userId,
+        birthDate: parsed.birthDate ?? undefined,
+        referenceSex: parsed.referenceSex ?? undefined,
+        profileRevision: (current?.profileRevision ?? 0) + (changed ? 1 : 0),
+        observedHrPeakBpm: current?.observedHrPeakBpm,
+        firstObservedHrPeakAt: current?.firstObservedHrPeakAt,
+        latestObservedHrPeakAt: current?.latestObservedHrPeakAt,
+      });
+      bodyAgeProfiles.set(parsed.userId, structuredClone(next));
+      return structuredClone(next);
+    },
+    async recordObservedHrPeak(input) {
+      const parsed = parseObservedHrPeakWrite(input);
+      const current = bodyAgeProfiles.get(parsed.userId);
+      const next = parseStoredBodyAgeProfile({
+        userId: parsed.userId,
+        birthDate: current?.birthDate,
+        referenceSex: current?.referenceSex,
+        profileRevision: current?.profileRevision ?? 0,
+        observedHrPeakBpm: Math.max(current?.observedHrPeakBpm ?? parsed.observedHrPeakBpm, parsed.observedHrPeakBpm),
+        firstObservedHrPeakAt: current?.firstObservedHrPeakAt
+          ? (current.firstObservedHrPeakAt < parsed.observedAt ? current.firstObservedHrPeakAt : parsed.observedAt)
+          : parsed.observedAt,
+        latestObservedHrPeakAt: current?.latestObservedHrPeakAt
+          ? (current.latestObservedHrPeakAt > parsed.observedAt ? current.latestObservedHrPeakAt : parsed.observedAt)
+          : parsed.observedAt,
+      });
+      bodyAgeProfiles.set(parsed.userId, structuredClone(next));
+      return structuredClone(next);
+    },
+    async upsertDailyVo2(rows) {
+      for (const parsed of normalizeDailyVo2Writes(rows)) {
+        const key = compositeKey(parsed.userId, parsed.civilDate);
+        const current = dailyVo2.get(key);
+        dailyVo2.set(key, structuredClone(current ? selectNewestDailyVo2(current, parsed) : parsed));
+      }
+    },
+    async authoritativelyReplaceDailyVo2(input) {
+      if (!options.transactionChild) {
+        return store.withTransaction((inner) => inner.healthMetrics.authoritativelyReplaceDailyVo2(input));
+      }
+      const parsed = parseAuthoritativeDailyVo2Replace(input);
+      await healthMetrics.upsertDailyVo2(parsed.rows);
+      const retainedDates = new Set(parsed.rows.map((row) => row.civilDate));
+      for (const [key, row] of dailyVo2) {
+        if (
+          row.userId === parsed.userId
+          && row.civilDate >= parsed.fromCivilDate
+          && row.civilDate <= parsed.toCivilDate
+          && !retainedDates.has(row.civilDate)
+        ) {
+          dailyVo2.delete(key);
+        }
+      }
+    },
+    async listDailyVo2(input) {
+      const parsed = parseDailyVo2ListInput(input);
+      return [...dailyVo2.values()]
+        .filter((row) => (
+          row.userId === parsed.userId
+          && row.civilDate >= parsed.fromCivilDate
+          && row.civilDate <= parsed.toCivilDate
+        ))
+        .sort((left, right) => left.civilDate.localeCompare(right.civilDate))
+        .map((row) => structuredClone(row));
+    },
+    async writeBodyAgeResult(input) {
+      const parsed = parseBodyAgeResultWrite(input);
+      bodyAgeResults.set(compositeKey(parsed.userId, parsed.algorithmVersion), structuredClone(parsed));
+    },
+    async readLatestBodyAgeResult(input) {
+      const parsed = parseBodyAgeResultRead(input);
+      const row = bodyAgeResults.get(compositeKey(parsed.userId, parsed.algorithmVersion));
+      return row ? structuredClone(row) : undefined;
+    },
     async deleteForUser(userId) {
       const removeUser = <T extends { userId: string }>(map: Map<string, T>) => {
         for (const [key, row] of map) {
@@ -908,6 +1020,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       removeUser(metricResults);
       removeUser(sleepGoals);
       removeUser(timeZoneHistory);
+      removeUser(bodyAgeProfiles);
+      removeUser(dailyVo2);
+      removeUser(bodyAgeResults);
       const connectionIds = new Set(
         [...connections.values()].filter((row) => row.userId === userId).map((row) => row.id),
       );

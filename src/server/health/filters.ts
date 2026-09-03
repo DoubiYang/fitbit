@@ -16,6 +16,8 @@ export function dataPointFilter(dataType: string, from: string, untilExclusive: 
       return `daily_heart_rate_variability.date >= "${from}" AND daily_heart_rate_variability.date < "${untilExclusive}"`;
     case 'daily-resting-heart-rate':
       return `daily_resting_heart_rate.date >= "${from}" AND daily_resting_heart_rate.date < "${untilExclusive}"`;
+    case 'daily-vo2-max':
+      return `daily_vo2_max.date >= "${from}" AND daily_vo2_max.date < "${untilExclusive}"`;
     case 'exercise':
       return `exercise.interval.civil_start_time >= "${from}" AND exercise.interval.civil_start_time < "${untilExclusive}"`;
     case 'heart-rate':

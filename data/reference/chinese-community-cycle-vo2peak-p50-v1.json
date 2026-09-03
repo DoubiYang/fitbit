@@ -1,0 +1,74 @@
+{
+  "version": "chinese-community-cycle-vo2peak-p50-v1",
+  "reference": {
+    "authors": "Wang et al.",
+    "publicationYear": 2022,
+    "title": "Normal References of Peak Oxygen Uptake for Cardiorespiratory Fitness Measured with Cardiopulmonary Exercise Testing in Chinese Adults",
+    "journal": "Journal of Clinical Medicine",
+    "volumeIssue": "11(16)",
+    "articleNumber": "4904",
+    "pmcid": "PMC9409785",
+    "pmid": "36013143",
+    "doi": "10.3390/jcm11164904",
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9409785/"
+  },
+  "cohort": {
+    "completedCycleCpetParticipants": 1114,
+    "population": "Apparently healthy Chinese community adults from four urban and rural communities in Beijing and Hezhou, Guangxi.",
+    "ageRangeYears": {
+      "min": 20,
+      "max": 79
+    },
+    "sampleLimitations": {
+      "requiredNormalEcgDuringExercise": true,
+      "communitySampleNotNationallyRepresentative": true
+    }
+  },
+  "protocol": {
+    "modality": "cycle ergometer CPET",
+    "ergometer": "Ergosana320F",
+    "measure": "VO2peak",
+    "units": "mL·kg^-1·min^-1"
+  },
+  "anchors": [
+    {
+      "ageYears": 25,
+      "maleP50": 35.7,
+      "femaleP50": 27.7
+    },
+    {
+      "ageYears": 35,
+      "maleP50": 27.7,
+      "femaleP50": 26.0
+    },
+    {
+      "ageYears": 45,
+      "maleP50": 26.7,
+      "femaleP50": 24.7
+    },
+    {
+      "ageYears": 55,
+      "maleP50": 24.4,
+      "femaleP50": 22.0
+    },
+    {
+      "ageYears": 65,
+      "maleP50": 22.4,
+      "femaleP50": 21.2
+    },
+    {
+      "ageYears": 75,
+      "maleP50": 19.7,
+      "femaleP50": 17.0
+    }
+  ],
+  "accessedOn": "2026-09-02",
+  "limitations": [
+    "community-based Chinese adult reference; not nationally representative",
+    "Air daily VO2 and the observed-peak proxy are not CPET VO2peak",
+    "non_medical_non_calibrated_estimate",
+    "observed peak is not physiological HRmax"
+  ],
+  "canonicalization": "recursive-key-sorted-json-v1",
+  "canonicalPayloadSha256": "09f30d6811517341849f929a1da36b5af52d43a1dd0780b10e4a6acf11df2681"
+}

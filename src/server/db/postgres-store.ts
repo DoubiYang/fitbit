@@ -19,17 +19,29 @@ import {
   mapHeartRateMinuteAggregateRow,
   mapMetricResultRow,
   mapSleepGoalRow,
+  mapStoredBodyAgeProfileRow,
+  mapStoredBodyAgeResultRow,
+  mapStoredDailyVo2Row,
   mergeHeartRateMinuteUpsert,
+  normalizeDailyVo2Writes,
   parseActivityLevelInterval,
+  parseAuthoritativeDailyVo2Replace,
+  parseBodyAgeProfileRead,
+  parseBodyAgeProfileUpdate,
+  parseBodyAgeResultRead,
+  parseBodyAgeResultWrite,
   parseDailyCardio,
   parseDailyHeartRateZones,
   parseDailyTimeInZone,
+  parseDailyVo2ListInput,
   parseExerciseInterval,
   parseHealthSyncCursor,
   parseHealthTimeZoneHistory,
   parseHeartRateMinuteAggregate,
   parseMetricResult,
+  parseObservedHrPeakWrite,
   parseSleepGoal,
+  selectNewestDailyVo2,
   SleepGoalConflictError,
   TimeZoneHistoryConflictError,
   type HealthMetricsStore,
@@ -1898,6 +1910,212 @@ function storeFor(queryable: Queryable): AuthStore {
       );
       return result.rows.map(mapHealthTimeZoneHistoryRow);
     },
+    async getBodyAgeProfile(input) {
+      const parsed = parseBodyAgeProfileRead(input);
+      const result = await queryable.query(
+        'SELECT * FROM user_body_age_profiles WHERE user_id = $1',
+        [parsed.userId],
+      );
+      return result.rows[0] ? mapStoredBodyAgeProfileRow(result.rows[0]) : undefined;
+    },
+    async updateBodyAgeProfile(input) {
+      const parsed = parseBodyAgeProfileUpdate(input);
+      const result = await queryable.query(
+        `INSERT INTO user_body_age_profiles (user_id, birth_date, reference_sex, profile_revision, updated_at)
+         VALUES ($1,$2,$3, CASE WHEN $2::date IS NULL AND $3::text IS NULL THEN 0 ELSE 1 END, now())
+         ON CONFLICT (user_id) DO UPDATE SET
+           birth_date = EXCLUDED.birth_date,
+           reference_sex = EXCLUDED.reference_sex,
+           profile_revision = CASE WHEN (
+             user_body_age_profiles.birth_date IS DISTINCT FROM EXCLUDED.birth_date
+             OR user_body_age_profiles.reference_sex IS DISTINCT FROM EXCLUDED.reference_sex
+           ) THEN user_body_age_profiles.profile_revision + 1
+           ELSE user_body_age_profiles.profile_revision END,
+           updated_at = CASE WHEN (
+             user_body_age_profiles.birth_date IS DISTINCT FROM EXCLUDED.birth_date
+             OR user_body_age_profiles.reference_sex IS DISTINCT FROM EXCLUDED.reference_sex
+           ) THEN EXCLUDED.updated_at
+           ELSE user_body_age_profiles.updated_at END
+         RETURNING *`,
+        [parsed.userId, parsed.birthDate, parsed.referenceSex],
+      );
+      if (!result.rows[0]) throw new Error('body-age profile update did not return a profile');
+      return mapStoredBodyAgeProfileRow(result.rows[0]);
+    },
+    async recordObservedHrPeak(input) {
+      const parsed = parseObservedHrPeakWrite(input);
+      const result = await queryable.query(
+        `INSERT INTO user_body_age_profiles (
+          user_id, historical_observed_hr_peak_bpm, first_observed_hr_peak_at, latest_observed_hr_peak_at, updated_at
+        ) VALUES ($1,$2,$3,$3, now())
+         ON CONFLICT (user_id) DO UPDATE SET
+           historical_observed_hr_peak_bpm = GREATEST(
+             user_body_age_profiles.historical_observed_hr_peak_bpm,
+             EXCLUDED.historical_observed_hr_peak_bpm
+           ),
+           first_observed_hr_peak_at = LEAST(
+             user_body_age_profiles.first_observed_hr_peak_at,
+             EXCLUDED.first_observed_hr_peak_at
+           ),
+           latest_observed_hr_peak_at = GREATEST(
+             user_body_age_profiles.latest_observed_hr_peak_at,
+             EXCLUDED.latest_observed_hr_peak_at
+           ),
+           updated_at = EXCLUDED.updated_at
+         RETURNING *`,
+        [parsed.userId, parsed.observedHrPeakBpm, new Date(parsed.observedAt)],
+      );
+      if (!result.rows[0]) throw new Error('observed HR peak write did not return a profile');
+      return mapStoredBodyAgeProfileRow(result.rows[0]);
+    },
+    async upsertDailyVo2(rows) {
+      const parsed = normalizeDailyVo2Writes(rows);
+      if (parsed.length === 0) return;
+      const payload = JSON.stringify(parsed.map((row) => ({
+        user_id: row.userId,
+        civil_date: row.civilDate,
+      })));
+      const existingResult = await queryable.query(
+        `WITH incoming AS (
+           SELECT *
+           FROM jsonb_to_recordset($1::jsonb) AS item(user_id UUID, civil_date DATE)
+         )
+         SELECT stored.*
+         FROM air_daily_vo2 AS stored
+         JOIN incoming ON incoming.user_id = stored.user_id AND incoming.civil_date = stored.civil_date`,
+        [payload],
+      );
+      const existingByKey = new Map(existingResult.rows.map((row) => {
+        const current = mapStoredDailyVo2Row(row);
+        return [`${current.userId}\0${current.civilDate}`, current] as const;
+      }));
+      for (const incoming of parsed) {
+        const current = existingByKey.get(`${incoming.userId}\0${incoming.civilDate}`);
+        if (current) selectNewestDailyVo2(current, incoming);
+      }
+      await queryable.query(
+        `WITH incoming AS (
+           SELECT *
+           FROM jsonb_to_recordset($1::jsonb) AS item(
+             user_id UUID,
+             source_family TEXT,
+             civil_date DATE,
+             vo2_max DOUBLE PRECISION,
+             estimated BOOLEAN,
+             received_at TIMESTAMPTZ,
+             revision INTEGER
+           )
+         )
+         INSERT INTO air_daily_vo2 (
+           user_id, source_family, civil_date, vo2_max, estimated, received_at, revision
+         )
+         SELECT user_id, source_family, civil_date, vo2_max, estimated, received_at, revision
+         FROM incoming
+         ON CONFLICT (user_id, civil_date) DO UPDATE SET
+           source_family = EXCLUDED.source_family,
+           vo2_max = EXCLUDED.vo2_max,
+           estimated = EXCLUDED.estimated,
+           received_at = EXCLUDED.received_at,
+           revision = EXCLUDED.revision
+         WHERE EXCLUDED.received_at > air_daily_vo2.received_at
+           OR (
+             EXCLUDED.received_at = air_daily_vo2.received_at
+             AND EXCLUDED.revision > air_daily_vo2.revision
+           )`,
+        [JSON.stringify(parsed.map((row) => ({
+          user_id: row.userId,
+          source_family: row.sourceFamily,
+          civil_date: row.civilDate,
+          vo2_max: row.vo2Max,
+          estimated: row.estimated,
+          received_at: row.receivedAt,
+          revision: row.revision,
+        })))],
+      );
+    },
+    async authoritativelyReplaceDailyVo2(input) {
+      if (canStartTransaction(queryable)) {
+        return store.withTransaction((inner) => inner.healthMetrics.authoritativelyReplaceDailyVo2(input));
+      }
+      const parsed = parseAuthoritativeDailyVo2Replace(input);
+      await healthMetrics.upsertDailyVo2(parsed.rows);
+      await queryable.query(
+        `DELETE FROM air_daily_vo2
+         WHERE user_id = $1
+           AND civil_date >= $2 AND civil_date <= $3
+           AND NOT (civil_date = ANY($4::date[]))`,
+        [parsed.userId, parsed.fromCivilDate, parsed.toCivilDate, parsed.rows.map((row) => row.civilDate)],
+      );
+    },
+    async listDailyVo2(input) {
+      const parsed = parseDailyVo2ListInput(input);
+      const result = await queryable.query(
+        `SELECT * FROM air_daily_vo2
+         WHERE user_id = $1 AND civil_date >= $2 AND civil_date <= $3
+         ORDER BY civil_date ASC`,
+        [parsed.userId, parsed.fromCivilDate, parsed.toCivilDate],
+      );
+      return result.rows.map(mapStoredDailyVo2Row);
+    },
+    async writeBodyAgeResult(input) {
+      const parsed = parseBodyAgeResultWrite(input);
+      const ageYears = typeof parsed.estimate.age === 'number' ? parsed.estimate.age : null;
+      const ageBoundary = typeof parsed.estimate.age === 'string' ? parsed.estimate.age : null;
+      await queryable.query(
+        `INSERT INTO body_age_results (
+          user_id, algorithm_version, age_years, age_boundary, route, status, coverage_days,
+          latest_input_civil_date, last_calculated_civil_date, reference_version, reference_hash,
+          input_fingerprint, profile_revision, chronological_age_delta_years, data_gaps,
+          window_days, exclusion_counts, computed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18)
+         ON CONFLICT (user_id, algorithm_version) DO UPDATE SET
+           age_years = EXCLUDED.age_years,
+           age_boundary = EXCLUDED.age_boundary,
+           route = EXCLUDED.route,
+           status = EXCLUDED.status,
+           coverage_days = EXCLUDED.coverage_days,
+           latest_input_civil_date = EXCLUDED.latest_input_civil_date,
+           last_calculated_civil_date = EXCLUDED.last_calculated_civil_date,
+           reference_version = EXCLUDED.reference_version,
+           reference_hash = EXCLUDED.reference_hash,
+           input_fingerprint = EXCLUDED.input_fingerprint,
+           profile_revision = EXCLUDED.profile_revision,
+           chronological_age_delta_years = EXCLUDED.chronological_age_delta_years,
+           data_gaps = EXCLUDED.data_gaps,
+           window_days = EXCLUDED.window_days,
+           exclusion_counts = EXCLUDED.exclusion_counts,
+           computed_at = EXCLUDED.computed_at`,
+        [
+          parsed.userId,
+          parsed.algorithmVersion,
+          ageYears,
+          ageBoundary,
+          parsed.estimate.route,
+          parsed.estimate.status,
+          parsed.estimate.coverageDays,
+          parsed.estimate.latestInputCivilDate,
+          parsed.lastCalculatedCivilDate,
+          parsed.estimate.referenceVersion,
+          parsed.referenceHash,
+          parsed.inputFingerprint,
+          parsed.profileRevision,
+          parsed.chronologicalAgeDeltaYears,
+          JSON.stringify(parsed.estimate.dataGaps),
+          parsed.windowDays,
+          JSON.stringify(parsed.exclusionCounts),
+          new Date(parsed.computedAt),
+        ],
+      );
+    },
+    async readLatestBodyAgeResult(input) {
+      const parsed = parseBodyAgeResultRead(input);
+      const result = await queryable.query(
+        `SELECT * FROM body_age_results
+         WHERE user_id = $1 AND algorithm_version = $2`,
+        [parsed.userId, parsed.algorithmVersion],
+      );
+      return result.rows[0] ? mapStoredBodyAgeResultRow(result.rows[0]) : undefined;
+    },
     async deleteForUser(userId) {
       if (canStartTransaction(queryable)) {
         return store.withTransaction((inner) => inner.healthMetrics.deleteForUser(userId));
@@ -1916,6 +2134,9 @@ function storeFor(queryable: Queryable): AuthStore {
       );
       await queryable.query('DELETE FROM user_sleep_goal_history WHERE user_id = $1', [userId]);
       await queryable.query('DELETE FROM user_health_time_zone_history WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM user_body_age_profiles WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM air_daily_vo2 WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM body_age_results WHERE user_id = $1', [userId]);
     },
   };
 

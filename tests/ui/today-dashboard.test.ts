@@ -101,7 +101,32 @@ test('renders an action-first health journal inside the primary navigation', () 
   assert.doesNotMatch(html, /训练负荷/);
   assert.match(html, /数据质量：中/);
   assert.match(html, /数据新鲜/);
+  assert.match(html, /身体年龄/);
+  assert.match(html, /完成资料后开始估算/);
   assert.equal((html.match(/<main\b/g) ?? []).length, 1);
+});
+
+test('places all three existing metrics before body age and body age before today advice without serializing raw health values', () => {
+  const html = render({
+    metrics: {
+      ...view.metrics,
+      bodyAge: {
+        label: '身体年龄', age: 34, edge: null, status: 'daily_vo2_provisional', route: 'daily_vo2',
+        coverageDays: 7, latestInputCivilDate: '2026-08-22', lastCalculatedCivilDate: '2026-08-22',
+        referenceVersion: 'chinese-community-cycle-vo2peak-p50-v1', chronologicalAgeDeltaYears: -2,
+        dataGaps: { dailyVo2DaysNeeded: 0, rhrDaysNeeded: 0, observedHrPeakRequired: false },
+        disclaimer: 'non_medical_non_calibrated_estimate',
+      },
+    },
+  });
+
+  assert.ok(html.indexOf('recovery-status') < html.indexOf('metric-heading'));
+  assert.ok(html.indexOf('全天心肺负荷') < html.indexOf('body-age-card'));
+  assert.ok(html.indexOf('metric-heading') < html.indexOf('body-age-card'));
+  assert.ok(html.indexOf('body-age-card') < html.indexOf('today-action-heading'));
+  assert.match(html, /34 岁/);
+  assert.match(html, /Air 每日心肺估算/);
+  assert.doesNotMatch(html, /birthDate|vo2Max|valueBpm|observedHrPeakBpm|sampleCount|receivedAt|sourceFamily/);
 });
 
 test('renders missing metric scores as a dash without inventing a numeric value', () => {

@@ -5,6 +5,7 @@ import { TimeZoneBootstrap } from '../settings/time-zone-bootstrap';
 import { AppShell } from '../shell/app-shell';
 
 import { DataState, EvidenceList } from './data-state';
+import { BodyAgeCard } from './body-age-card';
 import { formatMetricQuality, formatMetricScore, MetricCard } from './metric-card';
 
 const zoneThresholdOrder: Array<[keyof DailyHeartRateZones['zones'], string]> = [
@@ -161,6 +162,31 @@ export function TodayDashboard({
           <p className="recovery-status__detail">{recovery.detail}</p>
         </section>
 
+        <section aria-labelledby="metric-heading">
+          <div className="section-heading">
+            <div>
+              <p className="section-kicker">今日三项</p>
+              <h2 id="metric-heading">可解释的指标</h2>
+            </div>
+            <p className="section-note">数据质量会影响参考程度</p>
+          </div>
+          <div className="metric-grid">
+            <MetricCard metric={view.metrics.strain} />
+            <MetricCard metric={recovery} />
+            <MetricCard metric={view.metrics.sleepPerformance} />
+          </div>
+        </section>
+
+        <ZoneBreakdown strain={view.metrics.strain} />
+
+        <BodyAgeCard metric={view.metrics.bodyAge ?? {
+          label: '身体年龄', age: null, edge: null, status: 'profile_missing', route: null,
+          coverageDays: 0, latestInputCivilDate: null, lastCalculatedCivilDate: null,
+          referenceVersion: 'chinese-community-cycle-vo2peak-p50-v1', chronologicalAgeDeltaYears: null,
+          dataGaps: { dailyVo2DaysNeeded: 7, rhrDaysNeeded: 7, observedHrPeakRequired: true },
+          disclaimer: 'non_medical_non_calibrated_estimate',
+        }} />
+
         <section className="today-advice" aria-labelledby="today-action-heading">
           <div className="today-advice__heading">
             <p className="section-kicker">今日建议</p>
@@ -177,7 +203,6 @@ export function TodayDashboard({
         </section>
 
         {variant === 'oauth' ? <SettingsCallouts view={view} /> : null}
-        <ZoneBreakdown strain={view.metrics.strain} />
 
         <section className="dashboard-record" aria-labelledby="meal-record-heading">
           <div>
@@ -192,21 +217,6 @@ export function TodayDashboard({
             ? '基于演示样本生成。分数只作辅助，建议始终保留给你的主观感受。'
             : '基于你最近同步的睡眠、恢复与训练记录生成。分数只作辅助，建议始终保留给你的主观感受。'}
         </p>
-
-        <section aria-labelledby="metric-heading">
-          <div className="section-heading">
-            <div>
-              <p className="section-kicker">今日三项</p>
-              <h2 id="metric-heading">可解释的指标</h2>
-            </div>
-            <p className="section-note">数据质量会影响参考程度</p>
-          </div>
-          <div className="metric-grid">
-            <MetricCard metric={view.metrics.strain} />
-            <MetricCard metric={recovery} />
-            <MetricCard metric={view.metrics.sleepPerformance} />
-          </div>
-        </section>
       </main>
     </AppShell>
   );
