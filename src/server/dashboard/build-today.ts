@@ -97,6 +97,73 @@ export type TodayView = {
   };
 };
 
+/** Browser-facing homepage projection. Keep the internal TodayView server-only. */
+export type HomepageTodayView = {
+  localDate: string;
+  freshness: 'fresh' | 'stale';
+  primaryAction: {
+    kind: 'recommendation' | 'data_state';
+    text: string;
+  };
+  metrics: {
+    strain: Pick<StrainMetricView, 'label' | 'score' | 'status' | 'detail'>;
+    recovery: Pick<RecoveryMetricView, 'label' | 'score' | 'quality' | 'detail'>;
+    sleepPerformance: Pick<SleepPerformanceMetricView, 'label' | 'score' | 'detail'>;
+    bodyAge?: BodyAgeMetricView;
+  };
+};
+
+export function toHomepageTodayView(view: TodayView): HomepageTodayView {
+  const bodyAge = view.metrics.bodyAge;
+  return {
+    localDate: view.localDate,
+    freshness: view.freshness,
+    primaryAction: {
+      kind: view.primaryAction.kind,
+      text: view.primaryAction.text,
+    },
+    metrics: {
+      strain: {
+        label: view.metrics.strain.label,
+        score: view.metrics.strain.score,
+        status: view.metrics.strain.status,
+        detail: view.metrics.strain.detail,
+      },
+      recovery: {
+        label: view.metrics.recovery.label,
+        score: view.metrics.recovery.score,
+        quality: view.metrics.recovery.quality,
+        detail: view.metrics.recovery.detail,
+      },
+      sleepPerformance: {
+        label: view.metrics.sleepPerformance.label,
+        score: view.metrics.sleepPerformance.score,
+        detail: view.metrics.sleepPerformance.detail,
+      },
+      ...(bodyAge ? {
+        bodyAge: {
+          label: bodyAge.label,
+          age: bodyAge.age,
+          edge: bodyAge.edge,
+          status: bodyAge.status,
+          route: bodyAge.route,
+          coverageDays: bodyAge.coverageDays,
+          latestInputCivilDate: bodyAge.latestInputCivilDate,
+          lastCalculatedCivilDate: bodyAge.lastCalculatedCivilDate,
+          referenceVersion: bodyAge.referenceVersion,
+          chronologicalAgeDeltaYears: bodyAge.chronologicalAgeDeltaYears,
+          dataGaps: {
+            dailyVo2DaysNeeded: bodyAge.dataGaps.dailyVo2DaysNeeded,
+            rhrDaysNeeded: bodyAge.dataGaps.rhrDaysNeeded,
+            observedHrPeakRequired: bodyAge.dataGaps.observedHrPeakRequired,
+          },
+          disclaimer: bodyAge.disclaimer,
+        },
+      } : {}),
+    },
+  };
+}
+
 const STALE_SYNC_MS = 36 * 60 * 60 * 1_000;
 
 function scopedRecords(records: UserHealthRecords, userId: string): UserHealthRecords {

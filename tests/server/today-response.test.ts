@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseMetricResult } from '../../src/domain/cardio-records';
+import {
+  parseDailyCardio,
+  parseDailyHeartRateZones,
+  parseDailyTimeInZone,
+  parseMetricResult,
+} from '../../src/domain/cardio-records';
 import { BODY_AGE_REFERENCE_VERSION } from '../../src/domain/body-age';
 import { WHOOP_STYLE_METRIC_VERSION, type MetricCoverageState, type MetricSourceState } from '../../src/domain/metric-types';
 import { loadConfig } from '../../src/server/config/env';
@@ -50,6 +55,7 @@ function result(input: {
   quality?: 'unavailable' | 'provisional' | 'medium' | 'high' | null;
   reason?: string | null;
   evidenceLabel?: string;
+  evidenceValue?: number | string;
 }) {
   return parseMetricResult({
     userId: input.userId,
@@ -60,7 +66,11 @@ function result(input: {
     status: input.status ?? (input.metricName === 'strain' ? 'complete' : null),
     quality: input.quality ?? (input.metricName === 'recovery' ? 'medium' : null),
     reason: input.reason ?? null,
-    evidence: [{ label: input.evidenceLabel ?? input.metricName, date: input.civilDate, value: input.score ?? 0 }],
+    evidence: [{
+      label: input.evidenceLabel ?? input.metricName,
+      date: input.civilDate,
+      value: input.evidenceValue ?? input.score ?? 0,
+    }],
     source,
     coverage,
   });
@@ -75,10 +85,99 @@ function assertNoTrainingPermission(text: string): void {
 
 test('oauth today responses never fall back to demo_user', async () => {
   const response = await buildTodayResponse({ mode: 'oauth', id: '11111111-1111-1111-1111-111111111111' });
-  const body = (await response.json()) as { userId: string };
+  const body = (await response.json()) as Record<string, unknown>;
   assert.equal(response.status, 200);
-  assert.equal(body.userId, '11111111-1111-1111-1111-111111111111');
+  assert.equal('userId' in body, false);
   assert.equal(JSON.stringify(body).includes('demo_user'), false);
+});
+
+test('oauth today response exposes only the homepage allowlist', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.users.insert('u2');
+  await store.healthMetrics.upsertMetricResult(result({
+    userId: 'u1',
+    civilDate: '2026-08-24',
+    metricName: 'strain',
+    score: 8.4,
+    status: 'complete',
+    evidenceLabel: 'u1-strain-evidence',
+    evidenceValue: 'u1-sensitive-evidence-value',
+  }));
+  await store.healthMetrics.replaceHeartRateZones(parseDailyHeartRateZones({
+    userId: 'u1', sourceFamily: 'google-wearables', date: '2026-08-24',
+    zones: {
+      LIGHT: { minBeatsPerMinute: 91, maxBeatsPerMinute: 110 },
+      MODERATE: { minBeatsPerMinute: 111, maxBeatsPerMinute: 130 },
+      VIGOROUS: { minBeatsPerMinute: 131, maxBeatsPerMinute: 150 },
+      PEAK: { minBeatsPerMinute: 151, maxBeatsPerMinute: 190 },
+    },
+  }));
+  await store.healthMetrics.replaceTimeInZone(parseDailyTimeInZone({
+    userId: 'u1', sourceFamily: 'google-wearables', date: '2026-08-24',
+    minutes: { light: 410, moderate: 23, vigorous: 7, peak: 1 },
+  }));
+  await store.healthMetrics.upsertDailyCardio(parseDailyCardio({
+    userId: 'u1', date: '2026-08-24', status: 'complete', strain: 8.4, dose: 987.65,
+    zoneMinutes: { light: 12, moderate: 8, vigorous: 4, peak: 1 },
+    knownContextMinutes: 600, rawCoverageMinutes: 610, attributedMinutes: 25,
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  }));
+  await store.healthMetrics.upsertMetricResult(result({
+    userId: 'u2',
+    civilDate: '2026-08-24',
+    metricName: 'strain',
+    score: 19.7,
+    status: 'complete',
+    evidenceLabel: 'other-user-strain-evidence',
+    evidenceValue: 'other-user-sensitive-value',
+  }));
+  await store.healthMetrics.replaceHeartRateZones(parseDailyHeartRateZones({
+    userId: 'u2', sourceFamily: 'google-wearables', date: '2026-08-24',
+    zones: {
+      LIGHT: { minBeatsPerMinute: 100, maxBeatsPerMinute: 120 },
+      MODERATE: { minBeatsPerMinute: 121, maxBeatsPerMinute: 140 },
+      VIGOROUS: { minBeatsPerMinute: 141, maxBeatsPerMinute: 160 },
+      PEAK: { minBeatsPerMinute: 161, maxBeatsPerMinute: 199 },
+    },
+  }));
+  await store.healthMetrics.replaceTimeInZone(parseDailyTimeInZone({
+    userId: 'u2', sourceFamily: 'google-wearables', date: '2026-08-24',
+    minutes: { light: 1, moderate: 2, vigorous: 3, peak: 4 },
+  }));
+  await store.healthMetrics.upsertDailyCardio(parseDailyCardio({
+    userId: 'u2', date: '2026-08-24', status: 'complete', strain: 19.7, dose: 4321,
+    zoneMinutes: { light: 1, moderate: 2, vigorous: 3, peak: 4 },
+    knownContextMinutes: 10, rawCoverageMinutes: 10, attributedMinutes: 10,
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  }));
+
+  const response = await buildTodayResponse({ mode: 'oauth', id: 'u1' }, '2026-08-24T12:00:00.000Z', {
+    config: oauthConfig(),
+    store,
+    snapshotForUser: async () => ({ syncedAt: new Date('2026-08-24T11:00:00.000Z'), records: emptyUserHealthRecords() }),
+  });
+  const body = await response.json() as {
+    metrics: Record<string, Record<string, unknown>>;
+  } & Record<string, unknown>;
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(Object.keys(body).sort(), ['freshness', 'localDate', 'metrics', 'primaryAction']);
+  assert.deepEqual(Object.keys(body.metrics).sort(), ['bodyAge', 'recovery', 'sleepPerformance', 'strain']);
+  assert.deepEqual(Object.keys(body.metrics.strain ?? {}).sort(), ['detail', 'label', 'score', 'status']);
+  assert.deepEqual(Object.keys(body.metrics.recovery ?? {}).sort(), ['detail', 'label', 'quality', 'score']);
+  assert.deepEqual(Object.keys(body.metrics.sleepPerformance ?? {}).sort(), ['detail', 'label', 'score']);
+
+  const serialized = JSON.stringify(body);
+  for (const forbidden of [
+    'evidence', 'value', 'heartRateZones', 'timeInZone', 'activityZoneMinutes', 'dose', 'zoneMinutes',
+    'knownContextMinutes', 'rawHeartRateMinutes', 'attributedMinutes', 'sourceFamily', 'bpm',
+    'token', 'oauth', 'raw', 'record', 'userId', 'generatedAt',
+    'u1-sensitive-evidence-value', 'u1-strain-evidence', '987.65',
+    'other-user-sensitive-value', 'other-user-strain-evidence', '4321', '19.7', '199',
+  ]) {
+    assert.equal(serialized.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+  }
 });
 
 test('today response serializes only the body-age dashboard allowlist', async () => {

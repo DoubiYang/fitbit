@@ -2,7 +2,7 @@ import type { HttpDeps } from '../auth/http';
 import { DemoHealthProvider } from '../health/demo-provider';
 import { emptyUserHealthRecords } from '../health/provider';
 import { loadHealthSnapshot } from '../health/snapshot-store';
-import { buildTodayView, type TodayView } from './build-today';
+import { buildTodayView, toHomepageTodayView, type TodayView } from './build-today';
 import type { CurrentUser } from '../session/current-user';
 
 async function oauthSnapshot(userId: string, deps: HttpDeps) {
@@ -64,5 +64,5 @@ export async function buildTodayResponse(
     return Response.json({ error: 'unauthenticated' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
   }
   const view = await buildTodayViewForUser(user, now, deps);
-  return Response.json(view, { headers: { 'Cache-Control': 'no-store' } });
+  return Response.json(toHomepageTodayView(view!), { headers: { 'Cache-Control': 'no-store' } });
 }
