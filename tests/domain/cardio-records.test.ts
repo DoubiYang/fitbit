@@ -600,3 +600,76 @@ test('validated cardio records keep sleep-goal T+1 and whoop-style-v2 metric res
   assert.equal(metric.status, 'provisional');
   assert.notEqual(metric.status, 'calibrating');
 });
+
+test('cardio provenance is all-or-nothing and metric quality flags default to an empty recognized set', () => {
+  const dailyCardio = {
+    userId,
+    date: '2026-08-22',
+    status: 'complete' as const,
+    strain: 4.2,
+    dose: 31,
+    zoneMinutes: { light: 12, moderate: 8, vigorous: 4, peak: 0 },
+    knownContextMinutes: 600,
+    rawCoverageMinutes: 610,
+    attributedMinutes: 24,
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  };
+  const metricResult = {
+    userId,
+    civilDate: '2026-08-22',
+    metricName: 'strain' as const,
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+    score: 4.2,
+    status: 'complete' as const,
+    quality: null,
+    reason: null,
+    evidence: [{ label: 'dose', date: '2026-08-22', value: 31 }],
+    source: {
+      heartRateZones: true,
+      activityLevel: true,
+      exercise: false,
+      sleep: false,
+      hrv: false,
+      rhr: false,
+      sleepGoal: false,
+      timeZone: 'unambiguous' as const,
+    },
+    coverage: {
+      knownContextMinutes: 600,
+      rawHeartRateMinutes: 610,
+      attributedMinutes: 24,
+      lastKnownContextAt: '2026-08-22T15:50:00.000Z',
+    },
+  };
+  const provenance = {
+    provenanceVersion: 1,
+    inputFingerprint: `sha256:${'a'.repeat(64)}`,
+    calculationContext: { dayBoundary: 'Asia/Shanghai' },
+  };
+
+  assert.equal(parseDailyCardio(dailyCardio).provenance, undefined);
+  assert.deepEqual(parseMetricResult(metricResult).qualityFlags, []);
+  assert.deepEqual(parseDailyCardio({ ...dailyCardio, provenance }).provenance, provenance);
+  assert.deepEqual(
+    parseMetricResult({ ...metricResult, provenance, qualityFlags: ['sleep_history_incomplete'] }).provenance,
+    provenance,
+  );
+
+  assert.throws(() => parseDailyCardio({
+    ...dailyCardio,
+    provenance: { provenanceVersion: 1, inputFingerprint: provenance.inputFingerprint },
+  }));
+  assert.throws(() => parseDailyCardio({
+    ...dailyCardio,
+    provenance: { ...provenance, provenanceVersion: 2 },
+  }));
+  assert.throws(() => parseMetricResult({
+    ...metricResult,
+    provenance: { ...provenance, inputFingerprint: 'sha256:ABCDEF' },
+  }));
+  assert.throws(() => parseMetricResult({
+    ...metricResult,
+    provenance: { ...provenance, calculationContext: {} },
+  }));
+  assert.throws(() => parseMetricResult({ ...metricResult, qualityFlags: ['unknown_flag'] }));
+});

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -14,6 +14,8 @@ import { createPostgresStoreForTesting } from '../../src/server/db/postgres-stor
 import {
   healthMetricsExposesRawSamplePersistence,
   HealthMetricsConnectionMismatchError,
+  mapDailyCardioRow,
+  mapMetricResultRow,
   SleepGoalConflictError,
 } from '../../src/server/health/cardio-store';
 
@@ -25,6 +27,8 @@ const connectionId = '22222222-2222-2222-2222-222222222222';
 const civilDate = '2026-08-22';
 const now = new Date('2026-08-22T16:00:00.000Z');
 const migration = readFileSync(new URL('../../db/migrations/010_whoop_style_metrics.sql', import.meta.url), 'utf8');
+const provenanceMigrationPath = new URL('../../db/migrations/013_homepage_strain_provenance.sql', import.meta.url);
+const provenanceMigration = existsSync(provenanceMigrationPath) ? readFileSync(provenanceMigrationPath, 'utf8') : '';
 
 const zones = {
   LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
@@ -128,6 +132,105 @@ function metric() {
     },
   });
 }
+
+test('migration 013 preserves legacy rows while constraining version 1 homepage strain provenance', () => {
+  assert.match(provenanceMigration, /ALTER TABLE daily_cardio[\s\S]*?ADD COLUMN provenance_version SMALLINT/u);
+  assert.match(provenanceMigration, /ALTER TABLE metric_results[\s\S]*?ADD COLUMN provenance_version SMALLINT/u);
+  assert.match(provenanceMigration, /input_fingerprint TEXT/u);
+  assert.match(provenanceMigration, /calculation_context JSONB/u);
+  assert.match(provenanceMigration, /quality_flags TEXT\[\] NOT NULL DEFAULT '\{\}'/u);
+  assert.match(provenanceMigration, /provenance_version = 1/u);
+  assert.match(provenanceMigration, /input_fingerprint IS NOT NULL/u);
+  assert.match(provenanceMigration, /input_fingerprint ~ '\^sha256:\[a-f0-9\]\{64\}\$'/u);
+  assert.match(provenanceMigration, /calculation_context IS NOT NULL/u);
+  assert.match(provenanceMigration, /jsonb_typeof\(calculation_context\) = 'object'/u);
+  assert.match(provenanceMigration, /provenance_version IS NULL[\s\S]*?input_fingerprint IS NULL[\s\S]*?calculation_context IS NULL/u);
+  assert.doesNotMatch(provenanceMigration, /metric_version.*provenance_version|provenance_version.*metric_version/u);
+});
+
+test('postgres health metrics persistence maps legacy null provenance and parameterizes verified provenance writes', async () => {
+  const fingerprint = `sha256:${'a'.repeat(64)}`;
+  const provenance = {
+    provenanceVersion: 1,
+    inputFingerprint: fingerprint,
+    calculationContext: { dayBoundary: 'Asia/Shanghai' },
+  };
+  const daily = parseDailyCardio({
+    userId,
+    date: civilDate,
+    status: 'complete',
+    strain: 8.4,
+    dose: 70,
+    zoneMinutes: { light: 12, moderate: 8, vigorous: 4, peak: 0 },
+    knownContextMinutes: 600,
+    rawCoverageMinutes: 610,
+    attributedMinutes: 24,
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+    provenance,
+  });
+  const result = parseMetricResult({
+    ...metric(),
+    provenance,
+    qualityFlags: ['sleep_history_incomplete'],
+  });
+  const pool = new RecordingPool();
+  const store = createPostgresStoreForTesting(pool);
+
+  await store.healthMetrics.upsertDailyCardio(daily);
+  await store.healthMetrics.upsertMetricResult(result);
+
+  const dailyInsert = pool.queries.find((query) => /INSERT INTO daily_cardio/u.test(query.text));
+  const metricInsert = pool.queries.find((query) => /INSERT INTO metric_results/u.test(query.text));
+  assert.match(dailyInsert?.text ?? '', /provenance_version, input_fingerprint, calculation_context/u);
+  assert.match(dailyInsert?.text ?? '', /\$14,\$15,\$16::jsonb/u);
+  assert.deepEqual(dailyInsert?.values?.slice(-3), [1, fingerprint, JSON.stringify(provenance.calculationContext)]);
+  assert.match(metricInsert?.text ?? '', /provenance_version, input_fingerprint, calculation_context, quality_flags/u);
+  assert.match(metricInsert?.text ?? '', /\$12,\$13,\$14::jsonb,\$15::text\[\]/u);
+  assert.deepEqual(metricInsert?.values?.slice(-4), [1, fingerprint, JSON.stringify(provenance.calculationContext), ['sleep_history_incomplete']]);
+
+  const legacyDaily = mapDailyCardioRow({
+    user_id: userId,
+    civil_date: civilDate,
+    status: 'complete',
+    strain: 8.4,
+    dose: 70,
+    light_minutes: 12,
+    moderate_minutes: 8,
+    vigorous_minutes: 4,
+    peak_minutes: 0,
+    known_context_minutes: 600,
+    raw_coverage_minutes: 610,
+    attributed_minutes: 24,
+    metric_version: WHOOP_STYLE_METRIC_VERSION,
+    provenance_version: null,
+    input_fingerprint: null,
+    calculation_context: null,
+  });
+  const legacyMetric = mapMetricResultRow({
+    user_id: userId,
+    civil_date: civilDate,
+    metric_name: 'strain',
+    metric_version: WHOOP_STYLE_METRIC_VERSION,
+    score: 8.4,
+    status: 'complete',
+    quality: null,
+    reason: null,
+    evidence: [{ label: 'dose', date: civilDate, value: 70 }],
+    source: {
+      heartRateZones: true, activityLevel: true, exercise: false, sleep: false, hrv: false, rhr: false, sleepGoal: false, timeZone: 'missing',
+    },
+    coverage: {
+      knownContextMinutes: 600, rawHeartRateMinutes: 610, attributedMinutes: 24, lastKnownContextAt: '2026-08-22T15:50:00.000Z',
+    },
+    provenance_version: null,
+    input_fingerprint: null,
+    calculation_context: null,
+    quality_flags: null,
+  });
+  assert.equal(legacyDaily.provenance, undefined);
+  assert.equal(legacyMetric.provenance, undefined);
+  assert.deepEqual(legacyMetric.qualityFlags, []);
+});
 
 test('migration 010 creates the ten whoop-style metric tables with cascade, checks, and lookup indexes', () => {
   for (const table of [

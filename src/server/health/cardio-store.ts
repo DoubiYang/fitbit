@@ -818,6 +818,7 @@ export function mapDailyCardioRow(row: Record<string, unknown>): DailyCardio {
     rawCoverageMinutes: Number(row.raw_coverage_minutes),
     attributedMinutes: Number(row.attributed_minutes),
     metricVersion: row.metric_version ?? WHOOP_STYLE_METRIC_VERSION,
+    provenance: mapStrainProvenance(row, 'daily_cardio'),
   });
 }
 
@@ -834,7 +835,19 @@ export function mapMetricResultRow(row: Record<string, unknown>): MetricResult {
     evidence: parseJsonValue(row.evidence, 'metric_results.evidence'),
     source: parseJsonValue(row.source, 'metric_results.source'),
     coverage: parseJsonValue(row.coverage, 'metric_results.coverage'),
+    provenance: mapStrainProvenance(row, 'metric_results'),
+    qualityFlags: row.quality_flags ?? [],
   });
+}
+
+function mapStrainProvenance(row: Record<string, unknown>, table: string): unknown {
+  if (row.provenance_version == null) return undefined;
+
+  return {
+    provenanceVersion: Number(row.provenance_version),
+    inputFingerprint: row.input_fingerprint,
+    calculationContext: parseJsonValue(row.calculation_context, `${table}.calculation_context`),
+  };
 }
 
 export function mapSleepGoalRow(row: Record<string, unknown>): SleepGoal {

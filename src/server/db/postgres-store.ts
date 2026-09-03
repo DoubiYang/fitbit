@@ -1694,8 +1694,9 @@ function storeFor(queryable: Queryable): AuthStore {
         `INSERT INTO daily_cardio (
           user_id, civil_date, status, strain, dose,
           light_minutes, moderate_minutes, vigorous_minutes, peak_minutes,
-          known_context_minutes, raw_coverage_minutes, attributed_minutes, metric_version
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          known_context_minutes, raw_coverage_minutes, attributed_minutes, metric_version,
+          provenance_version, input_fingerprint, calculation_context
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
          ON CONFLICT (user_id, civil_date) DO UPDATE SET
            status = EXCLUDED.status,
            strain = EXCLUDED.strain,
@@ -1707,7 +1708,10 @@ function storeFor(queryable: Queryable): AuthStore {
            known_context_minutes = EXCLUDED.known_context_minutes,
            raw_coverage_minutes = EXCLUDED.raw_coverage_minutes,
            attributed_minutes = EXCLUDED.attributed_minutes,
-           metric_version = EXCLUDED.metric_version`,
+           metric_version = EXCLUDED.metric_version,
+           provenance_version = EXCLUDED.provenance_version,
+           input_fingerprint = EXCLUDED.input_fingerprint,
+           calculation_context = EXCLUDED.calculation_context`,
         [
           parsed.userId,
           parsed.date,
@@ -1722,6 +1726,9 @@ function storeFor(queryable: Queryable): AuthStore {
           parsed.rawCoverageMinutes,
           parsed.attributedMinutes,
           parsed.metricVersion,
+          parsed.provenance?.provenanceVersion ?? null,
+          parsed.provenance?.inputFingerprint ?? null,
+          parsed.provenance ? JSON.stringify(parsed.provenance.calculationContext) : null,
         ],
       );
     },
@@ -1746,8 +1753,8 @@ function storeFor(queryable: Queryable): AuthStore {
       await queryable.query(
         `INSERT INTO metric_results (
           user_id, civil_date, metric_name, metric_version, score, status, quality, reason,
-          evidence, source, coverage, computed_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb, now())
+          evidence, source, coverage, provenance_version, input_fingerprint, calculation_context, quality_flags, computed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13,$14::jsonb,$15::text[], now())
          ON CONFLICT (user_id, civil_date, metric_name, metric_version) DO UPDATE SET
            score = EXCLUDED.score,
            status = EXCLUDED.status,
@@ -1756,6 +1763,10 @@ function storeFor(queryable: Queryable): AuthStore {
            evidence = EXCLUDED.evidence,
            source = EXCLUDED.source,
            coverage = EXCLUDED.coverage,
+           provenance_version = EXCLUDED.provenance_version,
+           input_fingerprint = EXCLUDED.input_fingerprint,
+           calculation_context = EXCLUDED.calculation_context,
+           quality_flags = EXCLUDED.quality_flags,
            computed_at = EXCLUDED.computed_at`,
         [
           parsed.userId,
@@ -1769,6 +1780,10 @@ function storeFor(queryable: Queryable): AuthStore {
           JSON.stringify(parsed.evidence),
           JSON.stringify(parsed.source),
           JSON.stringify(parsed.coverage),
+          parsed.provenance?.provenanceVersion ?? null,
+          parsed.provenance?.inputFingerprint ?? null,
+          parsed.provenance ? JSON.stringify(parsed.provenance.calculationContext) : null,
+          parsed.qualityFlags,
         ],
       );
     },

@@ -25,6 +25,15 @@ const minuteActivityLevelSchema = z.enum(['SEDENTARY', 'LIGHTLY_ACTIVE', 'MODERA
 const strainStatusSchema = z.enum(['complete', 'provisional', 'incomplete', 'timezone_ambiguous', 'unavailable']);
 const recoveryQualitySchema = z.enum(['unavailable', 'provisional', 'medium', 'high']);
 const timeZoneStateSchema = z.enum(['unambiguous', 'ambiguous', 'missing']);
+const strainProvenanceSchema = z.object({
+  provenanceVersion: z.literal(1),
+  inputFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/, 'Expected a sha256 fingerprint.'),
+  calculationContext: z.object({}).catchall(z.unknown()).refine(
+    (context) => Object.keys(context).length > 0,
+    'Calculation context must be a nonempty object.',
+  ),
+}).strict();
+const metricQualityFlagSchema = z.literal('sleep_history_incomplete');
 
 const zoneBoundsSchema = z
   .object({
@@ -184,6 +193,7 @@ const dailyCardioSchema = z
     rawCoverageMinutes: z.number().int().min(0).max(1_500),
     attributedMinutes: z.number().int().min(0).max(1_500),
     metricVersion: z.literal(WHOOP_STYLE_METRIC_VERSION),
+    provenance: strainProvenanceSchema.optional(),
   })
   .superRefine((value, context) => {
     if (value.status === 'complete' && value.strain === null) {
@@ -229,6 +239,8 @@ const metricResultSchema = z.object({
   evidence: z.array(evidenceSchema),
   source: sourceStateSchema,
   coverage: coverageStateSchema,
+  provenance: strainProvenanceSchema.optional(),
+  qualityFlags: z.array(metricQualityFlagSchema).default([]),
 });
 
 export type ActivityLevelType = z.infer<typeof activityLevelTypeSchema>;
@@ -239,6 +251,8 @@ export type HeartRateMinuteAggregate = z.infer<typeof heartRateMinuteAggregateSc
 export type DailyTimeInZone = z.infer<typeof dailyTimeInZoneSchema>;
 export type ExerciseInterval = z.infer<typeof exerciseIntervalSchema>;
 export type ActivityLevelInterval = z.infer<typeof activityLevelIntervalSchema>;
+export type StrainProvenance = z.infer<typeof strainProvenanceSchema>;
+export type MetricQualityFlag = z.infer<typeof metricQualityFlagSchema>;
 export type DailyCardio = z.infer<typeof dailyCardioSchema>;
 export type SleepGoal = z.infer<typeof sleepGoalSchema>;
 export type MetricResult = z.infer<typeof metricResultSchema>;
