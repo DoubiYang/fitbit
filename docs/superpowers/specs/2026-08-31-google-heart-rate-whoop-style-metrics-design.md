@@ -56,7 +56,7 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 
 - 用户首次授权后，回填最近 **35 个当地日**。35 天只是拉取缓冲和稳定基线目标，不是指标显示门槛。
 - 每个已连接用户每 **1 小时**同步一次。
-- 原始心率、`activity-level` 和锻炼使用各自上次成功水位减 2 小时的重叠窗口，幂等 upsert。`time-in-heart-rate-zone` 按当地日把 60 秒 interval 加总，使用 48 小时重叠窗口。睡眠、HRV、RHR 与每日阈值使用各自最近 48 小时重叠窗口，吸收设备迟到修订。
+- 原始心率和 `activity-level` 使用各自上次成功水位减 **24 小时**的 UTC 物理时间重叠窗口，幂等 upsert，以回补 Fitbit Air / Google Health 延迟到达的分钟和活动上下文；锻炼继续使用其上次成功水位减 2 小时的民用日期重叠窗口。`time-in-heart-rate-zone` 按当地日把 60 秒 interval 加总，使用 48 小时重叠窗口。睡眠、HRV、RHR 与每日阈值使用各自最近 48 小时重叠窗口，吸收设备迟到修订。每次小时同步只保存聚合/interval 和派生指标，绝不保存原始心率样本或完整 Google 响应。
 - 每一种数据类型有独立的成功水位、最后错误、retry count 与 `next_attempt_at`。原始心率的各页可先幂等 upsert，但**只有该窗口所有页成功处理、所有受影响日重算完成后**才推进成功水位；任何晚页失败时成功水位保持不变，下一次从原窗口重叠区重新读取。429、网络故障、令牌错误均不得把失败窗口标为已同步。
 - 单一数据类型失败时，只写它自己的错误和带抖动退避（30/60/120 分钟，之后一小时）；其他数据类型仍可成功写入并推进各自水位。connection 的 `next_sync_at` 必须取所有数据类型 `next_attempt_at` 的最早值，确保 A 类型 429 不会被 B 类型的“一小时后再同步”掩盖。用户可见同步状态显示每类失败，但不得泄露 API 响应或 token。
 - Webhook 可作为未来加速路径；一期以每小时轮询为正确性基线，不依赖 webhook 才能获得数据。
@@ -94,7 +94,7 @@ Google Health 未公开其 Readiness、Sleep Score 或 Cardio Load 的分数及�
 
 首次 35 日回填的 `heart-rate` 必须按当地日分段并分页处理。`reconcile` 的 `pageSize` 用 10000（API 上限），禁止沿用睡眠/训练的 25。实测采样约 1–3 秒一点，35 日量级可达百万点，必须分页且按页释放。每一页先按 `physicalTime` 升序，并保留上一页最后一个样本作为 lookahead，才能计算“延伸到下一个更晚样本、最长 75 秒”；页末样本在看到下一页首点（或窗口结束）之前不得 flush 该分钟。同一 UTC 分钟的覆盖按时间并段合并，禁止把两页的覆盖秒数直接相加。flush 后才能释放该页原始点；不得把 35 天高频样本或完整 API JSON 一次性装入内存。`heart-rate` 的 `list` 对本账户返回 400，只走 `reconcile`。
 
-`activity-level` 用同样的 UTC 宽窗口和 2 小时重叠 cursor，`pageSize` 可用 10000（约每分钟一条）。`exercise` 同步 upsert `exercise_intervals`。心率、`activity-level` 和 exercise 无论谁先到达，都必须得到同一日归因结果。任一当地日的 Strain 重算成功后，必须级联重算下一当地日的 Sleep Performance 和 Recovery（它们依赖 `Strain(D−1)`）。
+`activity-level` 用同样的 UTC 宽窗口和 24 小时重叠 cursor，`pageSize` 可用 10000（约每分钟一条）。`exercise` 同步 upsert `exercise_intervals`，保留其独立的 2 小时民用日期 overlap。心率、`activity-level` 和 exercise 无论谁先到达，都必须得到同一日归因结果。任一当地日的 Strain 重算成功后，必须级联重算下一当地日的 Sleep Performance 和 Recovery（它们依赖 `Strain(D−1)`）。
 
 用户在账户设置中断开 Google Health 连接时，即使 `users` 和断开状态的 connection 行仍保留，也必须在同一事务中显式删除该用户的 `heart_rate_minute_aggregates`、`activity_level_intervals`、每日区间/时长、`exercise_intervals`、`daily_cardio`、`metric_results`、sync cursors、睡眠目标/时区历史和既有 `health_snapshots`，并清除连接凭证。账户删除则同时通过外键级联完成同样清理。
 

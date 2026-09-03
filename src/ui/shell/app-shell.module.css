@@ -1,11 +1,12 @@
 :global(.appShell__shell) {
+  width: min(100%, 26.625rem);
   min-height: 100dvh;
+  margin-inline: auto;
   padding: 0 max(20px, env(safe-area-inset-right)) calc(64px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
 }
 
 :global(.appShell__shell) > main {
-  width: min(100%, 68rem);
-  margin-inline: auto;
+  width: 100%;
 }
 
 :global(.appShell__shell > .dashboard) {
@@ -15,12 +16,13 @@
 :global(.appShell__navigation) {
   position: fixed;
   z-index: 10;
-  right: 0;
   bottom: 0;
-  left: 0;
+  left: 50%;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: min(100%, 26.625rem);
   min-height: calc(64px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
   padding: 6px max(20px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
   border-top: 1px solid rgb(23 40 38 / 10%);
   background: rgb(255 255 255 / 94%);
@@ -45,14 +47,4 @@
 :global(.appShell__navigationItemActive) {
   color: var(--ink);
   background: var(--sage);
-}
-
-@media (min-width: 48rem) {
-  :global(.appShell__shell) {
-    padding-inline: max(32px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-left));
-  }
-
-  :global(.appShell__navigation) {
-    padding-inline: max(32px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-left));
-  }
 }

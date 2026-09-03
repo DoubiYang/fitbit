@@ -116,7 +116,7 @@ async function seed(input: {
     userId,
     date: targetDate,
     status: 'complete',
-    strain: 2.1,
+    strain: 0.1,
     dose: 2,
     zoneMinutes: { light: 0, moderate: 1, vigorous: 0, peak: 0 },
     knownContextMinutes: 1,
@@ -130,7 +130,7 @@ async function seed(input: {
     civilDate: targetDate,
     metricName: 'strain',
     metricVersion: WHOOP_STYLE_METRIC_VERSION,
-    score: 2.1,
+    score: 0.1,
     status: 'complete',
     quality: null,
     reason: null,
@@ -155,6 +155,12 @@ test('returns a DST-correct, safe 15-minute timeline only for a reproducible str
   assert.equal(timeline.buckets.every((bucket) => !('bpm' in bucket)), true);
   assert.equal(JSON.stringify(timeline).includes('125'), false);
   assert.equal(timeline.buckets.some((bucket) => bucket.observedHeartRateMinutes > 0), true);
+  const mediumBucket = timeline.buckets.find((bucket) => bucket.intensity === 2);
+  assert.equal((mediumBucket as { cumulativeScore?: number } | undefined)?.cumulativeScore, 0.1);
+  assert.equal(
+    (timeline.buckets.find((bucket) => bucket.observedHeartRateMinutes === 0) as { cumulativeScore?: number | null } | undefined)?.cumulativeScore,
+    null,
+  );
 });
 
 test('returns all 100 fall-back buckets and labels the repeated local hour with its UTC offsets', async () => {

@@ -1,5 +1,5 @@
 import type { SleepSession } from '../../domain/health-records';
-import { strainMinuteContribution } from '../../domain/whoop-style-metrics';
+import { strainMinuteContribution, strainScoreFromDose } from '../../domain/whoop-style-metrics';
 import type { HealthMetricsStore } from '../health/cardio-store';
 import {
   strainCalculationContext,
@@ -23,6 +23,8 @@ export type StrainTimelineBucket = {
   knownContextMinutes: number;
   attributedMinutes: number;
   intensity: 0 | 1 | 2 | 3 | null;
+  /** Sanitized, verified Strain score as of the end of this observed bucket. */
+  cumulativeScore: number | null;
 };
 
 export type StrainTimeline = {
@@ -88,6 +90,14 @@ function localLabel(instant: Date, timeZone: string): string {
     timeZoneName: 'shortOffset',
   }).format(instant);
   return label.replace(/^GMT/, 'UTC').replace(' GMT', ' UTC');
+}
+
+function contributionDose(contribution: ReturnType<typeof strainMinuteContribution>): number {
+  if (!contribution.attributed || !contribution.zone) return 0;
+  if (contribution.zone === 'light') return 0.5;
+  if (contribution.zone === 'moderate') return 1;
+  if (contribution.zone === 'vigorous') return 2;
+  return 3;
 }
 
 function timezoneUnambiguous(minutes: Array<{ minuteStartUtc: string; utcOffsetMinutes: number }>, history: Parameters<typeof strainTimeZoneAt>[0]): boolean {
@@ -185,6 +195,7 @@ export async function buildVerifiedStrainTimeline(input: {
     && Date.parse(minute.minuteStartUtc) < Date.parse(bounds.toUtcExclusive)
   ));
   const buckets: StrainTimelineBucket[] = [];
+  let cumulativeDose = 0;
   for (let startMs = Date.parse(bounds.fromUtc); startMs < Date.parse(bounds.toUtcExclusive); startMs += BUCKET_MS) {
     const endMs = Math.min(startMs + BUCKET_MS, Date.parse(bounds.toUtcExclusive));
     const members = eligibleMinutes.filter((minute) => {
@@ -204,6 +215,10 @@ export async function buildVerifiedStrainTimeline(input: {
     )).length;
     const attributedMinutes = contributions.filter((contribution) => contribution.attributed).length;
     const numericIntensities = contributions.flatMap((contribution) => contribution.intensity === null ? [] : [contribution.intensity]);
+    const hasObservedHeartRate = observedHeartRateMinutes > 0;
+    if (hasObservedHeartRate) {
+      cumulativeDose += contributions.reduce((total, contribution) => total + contributionDose(contribution), 0);
+    }
     buckets.push({
       start: new Date(startMs).toISOString(),
       end: new Date(endMs).toISOString(),
@@ -212,8 +227,12 @@ export async function buildVerifiedStrainTimeline(input: {
       knownContextMinutes,
       attributedMinutes,
       intensity: numericIntensities.length === 0 ? null : Math.max(...numericIntensities) as 0 | 1 | 2 | 3,
+      cumulativeScore: hasObservedHeartRate ? strainScoreFromDose(cumulativeDose) : null,
     });
   }
+
+  const recomputedScore = strainScoreFromDose(cumulativeDose);
+  if (dailyCardio.strain !== recomputedScore || strain.score !== recomputedScore) return undefined;
 
   return {
     observedThrough: context.as_of_utc,

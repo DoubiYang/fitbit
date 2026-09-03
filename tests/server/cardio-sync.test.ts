@@ -550,7 +550,7 @@ test('initial physical window covers a 35 local-day UTC+14 boundary', async () =
   assert.equal(minutes[0]?.civilDate, '2026-07-19');
 });
 
-test('incremental HR, activity-level, and exercise use watermark minus two hours', async () => {
+test('incremental HR and activity-level reconcile the preceding 24 hours while exercise keeps its civil overlap', async () => {
   const store = await seedStore();
   for (const dataType of ['heart-rate', 'activity-level', 'exercise'] as const) {
     await store.healthMetrics.updateCursor({
@@ -565,7 +565,7 @@ test('incremental HR, activity-level, and exercise use watermark minus two hours
   const api = createFakeApi();
   await runSync(store, api);
 
-  const from = '2026-08-24T10:00:00.000Z';
+  const from = '2026-08-23T12:00:00.000Z';
   assert.deepEqual(filterBounds(requestFor(api.requests, 'heart-rate').filter), {
     from,
     untilExclusive: NOW.toISOString(),

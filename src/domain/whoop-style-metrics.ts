@@ -500,7 +500,7 @@ function incrementZone(zoneMinutes: ZoneMinutes, zone: HeartRateZoneId): void {
   zoneMinutes[zone] += 1;
 }
 
-function strainFromDose(dose: number): number {
+export function strainScoreFromDose(dose: number): number {
   return Math.round(Math.min(21, 21 * (1 - Math.exp(-dose / 140))) * 10) / 10;
 }
 
@@ -597,7 +597,7 @@ export function computeStrain(input: ComputeStrainInput): StrainResult {
   const dose = input.zones
     ? 0.5 * zoneMinutes.light + zoneMinutes.moderate + 2 * zoneMinutes.vigorous + 3 * zoneMinutes.peak
     : null;
-  const score = dose === null ? null : strainFromDose(dose);
+  const score = dose === null ? null : strainScoreFromDose(dose);
   const evidence: MetricEvidence[] = [
     { label: '剂量', date: input.date, value: dose ?? 0 },
     { label: 'light', date: input.date, value: zoneMinutes.light },

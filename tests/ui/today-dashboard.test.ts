@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import React from 'react';
@@ -47,7 +47,7 @@ function assertNoRawHealthData(html: string): void {
   ]) assert.equal(html.includes(forbidden), false, forbidden);
 }
 
-test('renders the approved editorial reading flow with body age before the single factual action', () => {
+test('renders the approved editorial reading flow with body age compactly inside recovery', () => {
   const html = render();
 
   assert.match(html, /class="editorial-home"/);
@@ -59,11 +59,56 @@ test('renders the approved editorial reading flow with body age before the singl
   assert.match(html, /<nav[^>]*aria-label="主要导航"/);
   assert.equal((html.match(/<details/g) ?? []).length, 1);
   assert.ok(html.indexOf('editorial-recovery') < html.indexOf('editorial-strain'));
-  assert.ok(html.indexOf('editorial-strain') < html.indexOf('body-age-card'));
-  assert.ok(html.indexOf('body-age-card') < html.indexOf('editorial-action'));
+  assert.match(html, /class="editorial-recovery__body-age"/);
+  assert.match(html, /身体年龄<strong>34 岁<\/strong>/);
+  assert.doesNotMatch(html, /body-age-card--inline/);
   assert.ok(html.indexOf('editorial-action') < html.indexOf('记录一餐'));
   assert.doesNotMatch(html, /metric-grid|Google 当日阈值|全天区间时长|依据/);
   assertNoRawHealthData(html);
+});
+
+test('renders the selected editorial header with local date context and an account entry', () => {
+  const html = render();
+
+  assert.match(html, /class="editorial-home__brand-lockup"/);
+  assert.match(html, /class="editorial-home__tagline">让身体回到自己的节奏<\/p>/);
+  assert.match(html, /<time[^>]*class="editorial-home__date-meta"[^>]*dateTime="2026-08-22"[^>]*>2026年08月22日 · 周六<\/time>/);
+  assert.match(html, /class="editorial-home__profile"[^>]*href="\/rhythm\/account"[^>]*aria-label="打开账户"/);
+});
+
+test('uses the project-owned botanical artwork in the integrated meal action', () => {
+  const html = render();
+
+  assert.equal(existsSync(new URL('../../public/images/editorial-home-botanical-v2.png', import.meta.url)), true);
+  assert.match(html, /class="editorial-action__art"[^>]*src="\/rhythm\/images\/editorial-home-botanical-v2\.png"[^>]*alt=""/);
+  assert.match(html, /class="editorial-action__meal"[^>]*href="\/rhythm\/meals\/new"/);
+});
+
+test('binds the editorial recovery meter to the real score and never copies reference health claims', () => {
+  const html = render();
+  const unavailableHtml = render({
+    metrics: {
+      ...view.metrics,
+      recovery: { ...view.metrics.recovery, score: null, quality: 'unavailable' },
+    },
+  });
+  const homepageCss = readFileSync(new URL('../../app/globals.css', import.meta.url), 'utf8');
+
+  assert.match(html, /class="editorial-recovery__meter"[^>]*data-score-available="true"[^>]*style="--recovery-progress:66%"/);
+  assert.match(unavailableHtml, /class="editorial-recovery__meter"[^>]*data-score-available="false"[^>]*style="--recovery-progress:0%"/);
+  assert.match(homepageCss, /\.editorial-recovery__meter\s*\{[^}]*border-radius:\s*50%/s);
+  assert.match(homepageCss, /\.editorial-action\s*\{[^}]*position:\s*relative/s);
+  assert.match(html, /恢复分数相对你近期个人常态。这只说明趋势。/);
+  assert.doesNotMatch(html, /心肺状态：平稳|一次轻松步行|20–30 分钟|出微汗即可|预计变化/);
+});
+
+test('frames strain as a current observed value without a forecast', () => {
+  const html = render();
+
+  assert.match(html, /class="editorial-strain__summary"/);
+  assert.match(html, /class="editorial-strain__current-label">当前负荷<\/span>/);
+  assert.match(html, /全天已观测变化/);
+  assert.doesNotMatch(html, /预测变化|预计变化/);
 });
 
 test('does not invent a score or an activity timeline when no verified projection is present', () => {
@@ -91,11 +136,11 @@ test('renders an approved timeline without raw heart-rate values and retains exa
           observedThrough: '2026-08-22T10:00:00.000Z',
           observedThroughLabel: 'UTC+8 18:00',
           buckets: [
-            { start: '2026-08-22T08:00:00.000Z', end: '2026-08-22T08:15:00.000Z', label: 'UTC+8 16:00', observedHeartRateMinutes: 15, knownContextMinutes: 15, attributedMinutes: 0, intensity: 0 },
-            { start: '2026-08-22T08:15:00.000Z', end: '2026-08-22T08:30:00.000Z', label: 'UTC+8 16:15', observedHeartRateMinutes: 15, knownContextMinutes: 0, attributedMinutes: 0, intensity: null },
-            { start: '2026-08-22T08:30:00.000Z', end: '2026-08-22T08:45:00.000Z', label: 'UTC+8 16:30', observedHeartRateMinutes: 0, knownContextMinutes: 0, attributedMinutes: 0, intensity: null },
-            { start: '2026-08-22T08:45:00.000Z', end: '2026-08-22T09:00:00.000Z', label: 'UTC+8 16:45', observedHeartRateMinutes: 15, knownContextMinutes: 15, attributedMinutes: 15, intensity: 0 },
-            { start: '2026-08-22T09:00:00.000Z', end: '2026-08-22T09:15:00.000Z', label: 'UTC+8 17:00', observedHeartRateMinutes: 15, knownContextMinutes: 10, attributedMinutes: 15, intensity: 2 },
+            { start: '2026-08-22T08:00:00.000Z', end: '2026-08-22T08:15:00.000Z', label: 'UTC+8 16:00', observedHeartRateMinutes: 15, knownContextMinutes: 15, attributedMinutes: 0, intensity: 0, cumulativeScore: 0 },
+            { start: '2026-08-22T08:15:00.000Z', end: '2026-08-22T08:30:00.000Z', label: 'UTC+8 16:15', observedHeartRateMinutes: 15, knownContextMinutes: 0, attributedMinutes: 0, intensity: null, cumulativeScore: 0 },
+            { start: '2026-08-22T08:30:00.000Z', end: '2026-08-22T08:45:00.000Z', label: 'UTC+8 16:30', observedHeartRateMinutes: 0, knownContextMinutes: 0, attributedMinutes: 0, intensity: null, cumulativeScore: null },
+            { start: '2026-08-22T08:45:00.000Z', end: '2026-08-22T09:00:00.000Z', label: 'UTC+8 16:45', observedHeartRateMinutes: 15, knownContextMinutes: 15, attributedMinutes: 15, intensity: 0, cumulativeScore: 0 },
+            { start: '2026-08-22T09:00:00.000Z', end: '2026-08-22T09:15:00.000Z', label: 'UTC+8 17:00', observedHeartRateMinutes: 15, knownContextMinutes: 10, attributedMinutes: 15, intensity: 2, cumulativeScore: 2.1 },
           ],
         } as HomepageTodayView['metrics']['strain']['timeline'],
       },
@@ -103,13 +148,17 @@ test('renders an approved timeline without raw heart-rate values and retains exa
   });
   assert.match(html, /class="editorial-strain__score">0\.0/);
   assert.match(html, /class="editorial-timeline"/);
+  assert.match(html, /class="editorial-timeline__curve"/);
+  assert.equal((html.match(/class="editorial-timeline__gap"/g) ?? []).length, 1);
+  assert.match(html, /数据缺口/);
+  assert.doesNotMatch(html, /editorial-timeline__buckets/);
   assert.match(html, /UTC\+8 16:00：未归因/);
   assert.match(html, /UTC\+8 16:15：上下文未知/);
   assert.match(html, /UTC\+8 16:30：未观测/);
   assert.match(html, /UTC\+8 16:45：低强度/);
   assert.match(html, /UTC\+8 17:00：运动归因 · 中等强度（活动上下文未知）/);
   assert.match(html, /观测截至 UTC\+8 18:00；后续暂无数据。/);
-  assert.match(html, /<p class="editorial-timeline__caption"><span class="editorial-timeline__start">UTC\+8 16:00<\/span><span class="editorial-timeline__center">日内观测<\/span><span class="editorial-timeline__end">UTC\+8 17:00<\/span><\/p>/);
+  assert.match(html, /class="editorial-timeline__axis"/);
   assertNoRawHealthData(html);
 });
 
@@ -121,12 +170,12 @@ test('keeps body-age data states compact and retains its explanation control', (
     },
   });
   assert.match(html, /数据待积累/);
-  assert.match(html, /还差 3 天 Air 心肺数据/);
+  assert.match(html, /身体年龄<strong>数据待积累<\/strong>/);
   assert.match(html, /aria-label="了解身体年龄估算"/);
   assert.doesNotMatch(html, /偏低|低于同龄/);
 });
 
-test('keeps the inline profile CTA large enough to tap', () => {
+test('keeps the compact profile CTA large enough to tap', () => {
   const html = render({
     metrics: {
       ...view.metrics,
@@ -135,8 +184,39 @@ test('keeps the inline profile CTA large enough to tap', () => {
   });
   const css = readFileSync(new URL('../../app/globals.css', import.meta.url), 'utf8');
 
-  assert.match(html, /class="body-age-card__settings-link"/);
-  assert.match(css, /\.body-age-card--inline \.body-age-card__settings-link\s*\{[^}]*min-height:\s*2\.75rem;[^}]*padding:/s);
+  assert.match(html, /<a href="\/rhythm\/settings">完善资料<\/a>/);
+  assert.match(css, /\.editorial-recovery__body-age a\s*\{[^}]*min-height:\s*2\.25rem;/s);
+});
+
+test('keeps the selected homepage as one phone canvas at every viewport width', () => {
+  const homepageCss = readFileSync(new URL('../../app/globals.css', import.meta.url), 'utf8');
+  const shellCss = readFileSync(new URL('../../src/ui/shell/app-shell.module.css', import.meta.url), 'utf8');
+
+  assert.match(homepageCss, /\.editorial-home\s*\{[^}]*width:\s*min\(100%, 26\.625rem\);/s);
+  assert.doesNotMatch(homepageCss, /grid-template-columns:\s*minmax\(0, 4fr\)\s+minmax\(0, 8fr\)/);
+  assert.doesNotMatch(homepageCss, /\.body-age-card--inline\s*\{[^}]*grid-column:/s);
+  assert.match(shellCss, /:global\(\.appShell__shell\)\s*\{[^}]*width:\s*min\(100%, 26\.625rem\);[^}]*margin-inline:\s*auto;/s);
+  assert.match(shellCss, /:global\(\.appShell__navigation\)\s*\{(?=[^}]*width:\s*min\(100%, 26\.625rem\);)(?=[^}]*left:\s*50%;)(?=[^}]*transform:\s*translateX\(-50%\);)/s);
+  assert.doesNotMatch(shellCss, /@media \(min-width: 48rem\)/);
+});
+
+test('keeps the 426px editorial hierarchy dense enough to reach the meal action without enlarging observed data', () => {
+  const homepageCss = readFileSync(new URL('../../app/globals.css', import.meta.url), 'utf8');
+
+  assert.match(homepageCss, /\.editorial-home__intro\s*\{[^}]*margin-top:\s*2\.7rem;/s);
+  assert.match(homepageCss, /\.editorial-recovery\s*\{[^}]*padding:\s*0 0 0\.3rem;/s);
+  assert.match(homepageCss, /\.editorial-timeline__plot\s*\{[^}]*height:\s*5\.25rem;/s);
+  assert.match(homepageCss, /\.editorial-action__art\s*\{[^}]*bottom:\s*2\.5rem;/s);
+});
+
+test('uses the selected prototype’s quieter display scale and recovery spacing', () => {
+  const homepageCss = readFileSync(new URL('../../app/globals.css', import.meta.url), 'utf8');
+
+  assert.match(homepageCss, /\.editorial-home__intro h1\s*\{[^}]*font-size:\s*clamp\(2\.85rem, 10vw, 3\.2rem\);[^}]*font-weight:\s*550;[^}]*letter-spacing:\s*-0\.075em;/s);
+  assert.match(homepageCss, /\.editorial-recovery__meter\s*\{[^}]*width:\s*7rem;[^}]*margin-left:\s*1rem;/s);
+  assert.match(homepageCss, /\.editorial-recovery__copy\s*\{[^}]*padding-left:\s*1\.75rem;/s);
+  assert.match(homepageCss, /\.editorial-recovery__copy h2,[\s\S]*?\.editorial-action h2\s*\{[^}]*font-size:\s*clamp\(1\.58rem, 6vw, 1\.85rem\);[^}]*font-weight:\s*550;/s);
+  assert.match(homepageCss, /\.editorial-strain__score\s*\{[^}]*font-size:\s*clamp\(3rem, 13vw, 3\.85rem\);/s);
 });
 
 test('first authenticated load submits the browser IANA zone over the settings endpoint', async () => {

@@ -45,6 +45,7 @@ import {
 
 export const HOURLY_SYNC_MS = 60 * 60 * 1_000;
 const TWO_HOURS_MS = 2 * HOURLY_SYNC_MS;
+const TWENTY_FOUR_HOURS_MS = 24 * HOURLY_SYNC_MS;
 const FORTY_EIGHT_HOURS_MS = 48 * HOURLY_SYNC_MS;
 const INITIAL_PHYSICAL_LOOKBACK_MS = 37 * 24 * HOURLY_SYNC_MS;
 const RETRY_DELAYS_MS = [30 * 60 * 1_000, 60 * 60 * 1_000, 2 * 60 * 60 * 1_000] as const;
@@ -221,7 +222,7 @@ export function syncWindowFor(
   switch (dataType) {
     case 'heart-rate':
     case 'activity-level':
-      return physicalWindow(now, watermark, TWO_HOURS_MS);
+      return physicalWindow(now, watermark, TWENTY_FOUR_HOURS_MS);
     case 'time-in-heart-rate-zone':
       return physicalWindow(now, watermark, FORTY_EIGHT_HOURS_MS);
     case 'daily-heart-rate-zones':
