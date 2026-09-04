@@ -27,8 +27,14 @@ const view: HomepageTodayView = {
   primaryAction: { kind: 'recommendation', text: '恢复分数相对你近期个人常态。这只说明趋势。' },
   metrics: {
     recovery: { label: '恢复', score: 66, quality: 'medium', detail: '恢复分数相对你近期个人常态，部分输入仍在校准。' },
-    strain: { label: '全天心肺负荷', score: 8.4, status: 'complete', detail: '完整日心肺负荷，仅计入可归因活动分钟。' },
     sleepPerformance: { label: '睡眠表现', score: 82, detail: '昨夜主睡眠相对于动态睡眠需求的完成度。' },
+    cardioLoad: {
+      label: '全天心肺负荷', dailyLoad: 6.4, status: 'scored', detail: '今日 TRIMP 仅累计已验证的活动与清醒时间交集。',
+      timeline: { state: 'verified_load', detail: '已验证的活动负荷会随当天记录累计。' },
+      observation: { observedThrough: '11:41', qualifiedMinutes: 30, unverifiedElevatedHrMinutes: 2 },
+      capacity: { status: 'scored', usableLoad: 7.2, utilization: 88.9, recoveryAdjusted: true },
+      weekly: { status: 'stable', baseline: 56, weekToDateLoad: 6.4 },
+    },
     bodyAge,
   },
 };
@@ -58,7 +64,7 @@ test('renders the approved editorial reading flow with body age compactly inside
   assert.match(html, /记录一餐/);
   assert.match(html, /<nav[^>]*aria-label="主要导航"/);
   assert.equal((html.match(/<details/g) ?? []).length, 1);
-  assert.ok(html.indexOf('editorial-recovery') < html.indexOf('editorial-strain'));
+  assert.ok(html.indexOf('editorial-recovery') < html.indexOf('editorial-cardio-load'));
   assert.match(html, /class="editorial-recovery__body-age"/);
   assert.match(html, /身体年龄<strong>34 岁<\/strong>/);
   assert.doesNotMatch(html, /body-age-card--inline/);
@@ -102,63 +108,57 @@ test('binds the editorial recovery meter to the real score and never copies refe
   assert.doesNotMatch(html, /心肺状态：平稳|一次轻松步行|20–30 分钟|出微汗即可|预计变化/);
 });
 
-test('frames strain as a current observed value without a forecast', () => {
+test('frames TRIMP as a current verified load with capacity and weekly baseline', () => {
   const html = render();
 
-  assert.match(html, /class="editorial-strain__summary"/);
-  assert.match(html, /class="editorial-strain__current-label">当前负荷<\/span>/);
-  assert.match(html, /全天已观测变化/);
-  assert.doesNotMatch(html, /预测变化|预计变化/);
+  assert.match(html, /class="editorial-cardio-load__summary"/);
+  assert.match(html, /6\.4\s*TRIMP/);
+  assert.match(html, /今日可用负荷/);
+  assert.match(html, /7\.2\s*<span>TRIMP/);
+  assert.match(html, /使用率\s*88\.9%/);
+  assert.match(html, /本周提升基线/);
+  assert.match(html, /56\.0\s*<span>TRIMP/);
+  assert.match(html, /已验证负荷/);
+  assert.match(html, /观测截至 11:41 · 有效动作 30.0 分钟 · 未验证升高心率 2.0 分钟/);
+  assert.doesNotMatch(html, /\/ 21|全天已观测变化|预测变化|预计变化/);
 });
 
-test('does not invent a score or an activity timeline when no verified projection is present', () => {
+test('renders an unknown TRIMP state without inventing a zero or chart', () => {
   const html = render({
     metrics: {
       ...view.metrics,
-      strain: { label: '全天心肺负荷', score: null, status: 'incomplete', detail: '覆盖不足，因此没有完整日 Strain。' },
+      cardioLoad: {
+        label: '全天心肺负荷', dailyLoad: null, status: 'insufficient_context', detail: '覆盖或活动上下文不足，因此不把当天显示为零负荷。',
+        timeline: { state: 'no_verified_load', detail: '今天尚无可验证的活动负荷。' },
+        observation: { observedThrough: null, qualifiedMinutes: 0, unverifiedElevatedHrMinutes: 0 },
+        capacity: { status: 'unavailable', usableLoad: null, utilization: null, recoveryAdjusted: false },
+        weekly: { status: 'calibrating', baseline: null, weekToDateLoad: null },
+      },
       recovery: { ...view.metrics.recovery, score: null, quality: 'unavailable' },
     },
   });
-  assert.match(html, /class="editorial-strain__score">—/);
-  assert.match(html, /覆盖不足，因此没有完整日 Strain。/);
+  assert.match(html, /class="editorial-cardio-load__score">—/);
+  assert.match(html, /覆盖或活动上下文不足，因此不把当天显示为零负荷。/);
   assert.doesNotMatch(html, /editorial-timeline/);
   assert.doesNotMatch(html, />0\.0</);
 });
 
-test('renders an approved timeline without raw heart-rate values and retains exact zero strain', () => {
+test('retains an exact zero only for a verified closed-day TRIMP result', () => {
   const html = render({
     metrics: {
       ...view.metrics,
-      strain: {
-        ...view.metrics.strain,
-        score: 0,
-        timeline: {
-          observedThrough: '2026-08-22T10:00:00.000Z',
-          observedThroughLabel: 'UTC+8 18:00',
-          buckets: [
-            { start: '2026-08-22T08:00:00.000Z', end: '2026-08-22T08:15:00.000Z', label: 'UTC+8 16:00', observedHeartRateMinutes: 15, knownContextMinutes: 15, attributedMinutes: 0, intensity: 0, cumulativeScore: 0 },
-            { start: '2026-08-22T08:15:00.000Z', end: '2026-08-22T08:30:00.000Z', label: 'UTC+8 16:15', observedHeartRateMinutes: 15, knownContextMinutes: 0, attributedMinutes: 0, intensity: null, cumulativeScore: 0 },
-            { start: '2026-08-22T08:30:00.000Z', end: '2026-08-22T08:45:00.000Z', label: 'UTC+8 16:30', observedHeartRateMinutes: 0, knownContextMinutes: 0, attributedMinutes: 0, intensity: null, cumulativeScore: null },
-            { start: '2026-08-22T08:45:00.000Z', end: '2026-08-22T09:00:00.000Z', label: 'UTC+8 16:45', observedHeartRateMinutes: 15, knownContextMinutes: 15, attributedMinutes: 15, intensity: 0, cumulativeScore: 0 },
-            { start: '2026-08-22T09:00:00.000Z', end: '2026-08-22T09:15:00.000Z', label: 'UTC+8 17:00', observedHeartRateMinutes: 15, knownContextMinutes: 10, attributedMinutes: 15, intensity: 2, cumulativeScore: 2.1 },
-          ],
-        } as HomepageTodayView['metrics']['strain']['timeline'],
+      cardioLoad: {
+        ...view.metrics.cardioLoad,
+        dailyLoad: 0,
+        detail: '完整日没有达到计入阈值的已验证活动，因此为 0.0 TRIMP。',
+        timeline: { state: 'verified_load', detail: '这是完整日中已验证的活动负荷。' },
       },
     },
   });
-  assert.match(html, /class="editorial-strain__score">0\.0/);
-  assert.match(html, /class="editorial-timeline"/);
-  assert.match(html, /class="editorial-timeline__curve"/);
-  assert.equal((html.match(/class="editorial-timeline__gap"/g) ?? []).length, 1);
-  assert.match(html, /数据缺口/);
-  assert.doesNotMatch(html, /editorial-timeline__buckets/);
-  assert.match(html, /UTC\+8 16:00：未归因/);
-  assert.match(html, /UTC\+8 16:15：上下文未知/);
-  assert.match(html, /UTC\+8 16:30：未观测/);
-  assert.match(html, /UTC\+8 16:45：低强度/);
-  assert.match(html, /UTC\+8 17:00：运动归因 · 中等强度（活动上下文未知）/);
-  assert.match(html, /观测截至 UTC\+8 18:00；后续暂无数据。/);
-  assert.match(html, /class="editorial-timeline__axis"/);
+  assert.match(html, /class="editorial-cardio-load__score">0\.0/);
+  assert.match(html, /完整日没有达到计入阈值的已验证活动，因此为 0\.0 TRIMP。/);
+  assert.match(html, /已验证负荷/);
+  assert.doesNotMatch(html, /editorial-timeline|\/ 21/);
   assertNoRawHealthData(html);
 });
 
@@ -221,8 +221,8 @@ test('uses the selected prototype’s compact display scale without shrinking th
   assert.match(homepageCss, /\.editorial-recovery__meter\s*\{[^}]*width:\s*7rem;[^}]*margin-left:\s*1rem;/s);
   assert.match(homepageCss, /\.editorial-recovery__copy\s*\{[^}]*padding-left:\s*1\.75rem;/s);
   assert.match(homepageCss, /\.editorial-recovery__score strong\s*\{[^}]*font-size:\s*clamp\(2rem, 7\.8vw, 2\.2rem\);/s);
-  assert.match(homepageCss, /\.editorial-strain h2\s*\{[^}]*font-size:\s*clamp\(1\.4rem, 5\.2vw, 1\.48rem\);/s);
-  assert.match(homepageCss, /\.editorial-strain__score\s*\{[^}]*font-size:\s*clamp\(2\.75rem, 11\.5vw, 3\.25rem\);/s);
+  assert.match(homepageCss, /\.editorial-cardio-load h2\s*\{[^}]*font-size:\s*clamp\(1\.4rem, 5\.2vw, 1\.48rem\);/s);
+  assert.match(homepageCss, /\.editorial-cardio-load__score\s*\{[^}]*font-size:\s*clamp\(2\.75rem, 11\.5vw, 3\.25rem\);/s);
   assert.doesNotMatch(narrowViewportCss, /\.editorial-home__intro h1\s*\{[^}]*font-size:/s);
   assert.doesNotMatch(narrowViewportCss, /\.editorial-recovery__meter\s*\{[^}]*width:/s);
   assert.doesNotMatch(narrowViewportCss, /\.editorial-strain__score\s*\{[^}]*font-size:/s);

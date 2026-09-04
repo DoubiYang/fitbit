@@ -5,7 +5,6 @@ import type { HomepageTodayView } from '../../server/dashboard/build-today';
 
 import { BodyAgeInfoSheet } from './body-age-info-sheet';
 import { bodyAgeCardContent } from './body-age-card';
-import { StrainTimeline } from './strain-timeline';
 
 function dateLabel(civilDate: string): string {
   const match = civilDate.match(/^\d{4}-(\d{2})-(\d{2})$/);
@@ -25,7 +24,7 @@ function dateMetaLabel(civilDate: string): string {
 function dataQualityLabel(view: HomepageTodayView): string {
   if (view.freshness !== 'fresh') return '待同步';
   if (view.metrics.recovery.quality === 'provisional' || view.metrics.recovery.quality === 'unavailable') return '临时数据';
-  if (view.metrics.strain.status !== 'complete') return '临时数据';
+  if (view.metrics.cardioLoad.status !== 'scored') return '临时数据';
   return '已同步';
 }
 
@@ -55,6 +54,20 @@ function score(value: number | null, digits = 0): string {
   return value === null ? '—' : value.toFixed(digits);
 }
 
+function observationSummary(observation: HomepageTodayView['metrics']['cardioLoad']['observation']): string {
+  if (observation.observedThrough === null) return '暂无心率观测；未知数据不会记为零负荷。';
+  return `观测截至 ${observation.observedThrough} · 有效动作 ${observation.qualifiedMinutes.toFixed(1)} 分钟 · 未验证升高心率 ${observation.unverifiedElevatedHrMinutes.toFixed(1)} 分钟`;
+}
+
+function cardioLoadState(state: HomepageTodayView['metrics']['cardioLoad']['timeline']['state']): string {
+  const labels = {
+    verified_load: '已验证负荷',
+    unverified_elevated_hr: '未验证升高心率',
+    no_verified_load: '暂无可验证负荷',
+  } as const;
+  return labels[state];
+}
+
 const unavailableBodyAge: NonNullable<HomepageTodayView['metrics']['bodyAge']> = {
   label: '身体年龄', age: null, edge: null, status: 'profile_missing', route: null,
   coverageDays: 0, latestInputCivilDate: null, lastCalculatedCivilDate: null,
@@ -71,7 +84,7 @@ export function EditorialHomepage({
   variant: 'demo' | 'oauth';
 }) {
   const recovery = view.metrics.recovery;
-  const strain = view.metrics.strain;
+  const cardioLoad = view.metrics.cardioLoad;
   const bodyAgeMetric = view.metrics.bodyAge ?? unavailableBodyAge;
   const bodyAge = bodyAgeCardContent(bodyAgeMetric);
   const qualityLabel = dataQualityLabel(view);
@@ -106,7 +119,7 @@ export function EditorialHomepage({
             <div className="editorial-quality__content">
               <p>恢复：{recovery.detail}</p>
               <p>睡眠表现：{view.metrics.sleepPerformance.detail}</p>
-              <p>负荷：{strain.detail}</p>
+              <p>负荷：{cardioLoad.detail}</p>
               <p>仅展示已验证的汇总指标；原始测量不会进入本页。</p>
               {view.metrics.sleepPerformance.detail.includes('尚未设置基础睡眠目标') ? (
                 <a href="/rhythm/settings">前往设置睡眠目标</a>
@@ -146,22 +159,46 @@ export function EditorialHomepage({
         </div>
       </section>
 
-      <section className="editorial-strain" aria-labelledby="strain-heading">
-        <div className="editorial-strain__summary">
-          <div className="editorial-strain__heading">
+      <section className="editorial-cardio-load" aria-labelledby="cardio-load-heading">
+        <div className="editorial-cardio-load__summary">
+          <div className="editorial-cardio-load__heading">
             <p className="editorial-kicker">全天心肺负荷</p>
-            <h2 id="strain-heading">全天心肺负荷</h2>
-            <p className="editorial-strain__subtitle">全天已观测变化</p>
+            <h2 id="cardio-load-heading">全天心肺负荷</h2>
+            <p className="editorial-cardio-load__subtitle">仅累计已验证的活动与清醒时间交集</p>
           </div>
-          <div>
-            <p className="editorial-strain__value">
-              <span className="editorial-strain__score">{score(strain.score, 1)}</span>
-              <span>/ 21</span>
+          <div className="editorial-cardio-load__value-block">
+            <p className="editorial-cardio-load__value">
+              <span className="editorial-cardio-load__score">{score(cardioLoad.dailyLoad, 1)}</span>
+              <span>TRIMP</span>
             </p>
-            <span className="editorial-strain__current-label">当前负荷</span>
+            <span className="editorial-cardio-load__current-label">当前负荷</span>
           </div>
         </div>
-        {strain.timeline ? <StrainTimeline timeline={strain.timeline} /> : <p className="editorial-strain__detail">{strain.detail}</p>}
+        <div className="editorial-cardio-load__state">
+          <span className={`editorial-cardio-load__state-dot editorial-cardio-load__state-dot--${cardioLoad.timeline.state}`} aria-hidden="true" />
+          <strong>{cardioLoadState(cardioLoad.timeline.state)}</strong>
+          <p>{cardioLoad.timeline.detail}</p>
+        </div>
+        <p className="editorial-cardio-load__detail">{cardioLoad.detail}</p>
+        <p className="editorial-cardio-load__observation">{observationSummary(cardioLoad.observation)}</p>
+        <div className="editorial-cardio-load__grid">
+          <section className="editorial-cardio-load__mini" aria-label="今日可用负荷">
+            <p>今日可用负荷</p>
+            <strong>{score(cardioLoad.capacity.usableLoad, 1)} <span>TRIMP</span></strong>
+            <small>{cardioLoad.capacity.status === 'scored'
+              ? `${cardioLoad.capacity.recoveryAdjusted ? '已纳入恢复状态 · ' : ''}使用率 ${score(cardioLoad.capacity.utilization, 1)}%`
+              : '恢复或历史数据仍在校准'}</small>
+          </section>
+          <section className="editorial-cardio-load__mini" aria-label="本周提升基线">
+            <p>本周提升基线</p>
+            <strong>{score(cardioLoad.weekly.baseline, 1)} <span>TRIMP</span></strong>
+            <small>{cardioLoad.weekly.status === 'frozen'
+              ? '本周数据不完整；保持上次稳定基线'
+              : cardioLoad.weekly.weekToDateLoad === null
+                ? '完整周数据仍在积累'
+                : `本周已累计 ${score(cardioLoad.weekly.weekToDateLoad, 1)} TRIMP`}</small>
+          </section>
+        </div>
       </section>
 
       <section className="editorial-action" aria-labelledby="action-heading">

@@ -163,8 +163,12 @@ test('oauth today response exposes only the homepage allowlist', async () => {
 
   assert.equal(response.status, 200);
   assert.deepEqual(Object.keys(body).sort(), ['freshness', 'localDate', 'metrics', 'primaryAction']);
-  assert.deepEqual(Object.keys(body.metrics).sort(), ['bodyAge', 'recovery', 'sleepPerformance', 'strain']);
-  assert.deepEqual(Object.keys(body.metrics.strain ?? {}).sort(), ['detail', 'label', 'score', 'status']);
+  assert.deepEqual(Object.keys(body.metrics).sort(), ['bodyAge', 'cardioLoad', 'recovery', 'sleepPerformance']);
+  assert.deepEqual(Object.keys(body.metrics.cardioLoad ?? {}).sort(), ['capacity', 'dailyLoad', 'detail', 'label', 'observation', 'status', 'timeline', 'weekly']);
+  assert.deepEqual(Object.keys((body.metrics.cardioLoad?.capacity as Record<string, unknown>) ?? {}).sort(), ['recoveryAdjusted', 'status', 'usableLoad', 'utilization']);
+  assert.deepEqual(Object.keys((body.metrics.cardioLoad?.timeline as Record<string, unknown>) ?? {}).sort(), ['detail', 'state']);
+  assert.deepEqual(Object.keys((body.metrics.cardioLoad?.observation as Record<string, unknown>) ?? {}).sort(), ['observedThrough', 'qualifiedMinutes', 'unverifiedElevatedHrMinutes']);
+  assert.deepEqual(Object.keys((body.metrics.cardioLoad?.weekly as Record<string, unknown>) ?? {}).sort(), ['baseline', 'status', 'weekToDateLoad']);
   assert.deepEqual(Object.keys(body.metrics.recovery ?? {}).sort(), ['detail', 'label', 'quality', 'score']);
   assert.deepEqual(Object.keys(body.metrics.sleepPerformance ?? {}).sort(), ['detail', 'label', 'score']);
 

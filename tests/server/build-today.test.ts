@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseDailyCardio, parseDailyHeartRateZones, parseDailyTimeInZone, parseMetricResult } from '../../src/domain/cardio-records';
+import {
+  parseDailyCardio,
+  parseDailyCardioLoad,
+  parseDailyHeartRateZones,
+  parseDailyLoadCapacity,
+  parseDailyTimeInZone,
+  parseHeartRateMinuteAggregate,
+  parseMetricResult,
+  parseWeeklyCardioBaseline,
+} from '../../src/domain/cardio-records';
 import { BODY_AGE_REFERENCE_VERSION } from '../../src/domain/body-age';
 import { parseSleepSession, type SleepSession } from '../../src/domain/health-records';
 import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
@@ -99,6 +108,59 @@ test('returns a data state instead of a training instruction with insufficient r
   assert.equal('trainingPrescription' in view.primaryAction, false);
   assert.equal(view.metrics.recovery.score, null);
   assertNoTrainingPermission(view.primaryAction.text);
+});
+
+test('projects only safe v3 TRIMP aggregates for the authenticated homepage', async () => {
+  const store = createMemoryStore();
+  await store.users.insert('u1');
+  await store.healthMetrics.insertTimeZoneHistory({
+    userId: 'u1', ianaTimeZone: 'UTC', effectiveAt: '2026-08-01T00:00:00.000Z', isBackfillAnchor: true,
+  });
+  await store.healthMetrics.upsertDailyCardioLoad(parseDailyCardioLoad({
+    userId: 'u1', civilDate: '2026-08-24', metricVersion: 'cardio-load-trimp-v3', status: 'scored', dailyLoad: 6.4,
+    qualifiedSeconds: 1_800, unverifiedElevatedHrSeconds: 120, rawHrCoverageSeconds: 43_200, awakeCoverageRatio: 0.8,
+    motionSource: 'both', qualityState: 'qualified', rhrBaseBpm: 54, hrMaxEstBpm: 181,
+    hrMaxProvenance: {
+      filterRuleVersion: 'google-wearables-hrmax-v1', sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-20T10:00:00.000Z', bpm: 181, coverageSeconds: 60, sampleCount: 1,
+    },
+    inputFingerprint: `sha256:${'a'.repeat(64)}`, calculationContext: { test: true },
+  }));
+  await store.healthMetrics.upsertDailyLoadCapacity(parseDailyLoadCapacity({
+    userId: 'u1', civilDate: '2026-08-24', metricVersion: 'cardio-load-trimp-v3', status: 'scored',
+    actualLoad: 6.4, usableLoad: 7.2, utilization: 88.9, historySampleCount: 28, usedGlobalFallback: false,
+    recoveryTier: 'middle', recoveryMetricVersion: 'whoop-style-v2', recoveryCivilDate: '2026-08-24', recoveryQuality: 'high',
+    recoveryInputFingerprint: `sha256:${'b'.repeat(64)}`, inputFingerprint: `sha256:${'c'.repeat(64)}`,
+  }));
+  await store.healthMetrics.upsertWeeklyCardioBaseline(parseWeeklyCardioBaseline({
+    userId: 'u1', weekStart: '2026-08-24', metricVersion: 'cardio-load-trimp-v3', status: 'stable', weeklyLoad: null,
+    weekToDateLoad: 6.4, rm4: 52, ewma4: 56, baseline: 56, inputFingerprint: `sha256:${'d'.repeat(64)}`,
+  }));
+  await store.healthMetrics.upsertMinutes([parseHeartRateMinuteAggregate({
+    userId: 'u1', sourceFamily: 'google-wearables', minuteStartUtc: '2026-08-24T11:41:00.000Z',
+    civilDate: '2026-08-24', utcOffsetMinutes: 0, ianaTimeZone: 'UTC', localMinuteOfDay: 701,
+    avgBpm: 140, minBpm: 138, maxBpm: 142, sampleCount: 1, coverageSeconds: 60, activityLevel: 'MODERATELY_ACTIVE',
+  })]);
+
+  const view = await buildHomepageTodayView({
+    provider: { capabilities: { mode: 'oauth', canSync: true }, async listRecords() { return emptyUserHealthRecords(); } },
+    userId: 'u1', now: '2026-08-24T12:00:00.000Z', lastSuccessfulSyncAt: '2026-08-24T11:00:00.000Z',
+    timeZone: 'UTC', healthMetrics: store.healthMetrics,
+  });
+
+  assert.equal(view.metrics.cardioLoad.label, '全天心肺负荷');
+  assert.equal(view.metrics.cardioLoad.dailyLoad, 6.4);
+  assert.equal(view.metrics.cardioLoad.capacity.usableLoad, 7.2);
+  assert.equal(view.metrics.cardioLoad.capacity.utilization, 88.9);
+  assert.equal(view.metrics.cardioLoad.weekly.baseline, 56);
+  assert.equal(view.metrics.cardioLoad.timeline.state, 'verified_load');
+  assert.deepEqual(view.metrics.cardioLoad.observation, {
+    observedThrough: '11:41', qualifiedMinutes: 30, unverifiedElevatedHrMinutes: 2,
+  });
+  const serialized = JSON.stringify(view.metrics.cardioLoad);
+  for (const forbidden of ['bpm', 'segments', 'inputFingerprint', 'calculationContext', 'rhrBaseBpm', 'hrMaxEstBpm']) {
+    assert.equal(serialized.toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+  }
 });
 
 test('raw dashboard metrics ignore manual HRV and RHR records', async () => {
@@ -533,7 +595,7 @@ test('stored incomplete sleep history keeps homepage recovery explicitly provisi
   assert.match(view.metrics.recovery.detail, /数据质量为临时/);
 });
 
-test('stale homepage data never presents a personal-baseline recommendation or timeline', async () => {
+test('stale homepage data never presents a personal-baseline recommendation or cardio-load value', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   const source = {
@@ -566,9 +628,10 @@ test('stale homepage data never presents a personal-baseline recommendation or t
   assert.equal(view.metrics.recovery.score, null);
   assert.equal(view.metrics.recovery.quality, 'unavailable');
   assert.doesNotMatch(view.metrics.recovery.detail, /个人常态/);
-  assert.equal(view.metrics.strain.score, null);
-  assert.equal(view.metrics.strain.status, 'unavailable');
-  assert.equal(view.metrics.strain.timeline, undefined);
+  assert.equal(view.metrics.cardioLoad.dailyLoad, null);
+  assert.equal(view.metrics.cardioLoad.capacity.usableLoad, null);
+  assert.equal(view.metrics.cardioLoad.weekly.baseline, null);
+  assert.equal(view.metrics.cardioLoad.timeline.state, 'no_verified_load');
   assert.equal(recordReads, 1);
 });
 

@@ -183,21 +183,21 @@
 - Modify: `tests/server/today-response.test.ts`
 - Modify: `tests/ui/today-dashboard.test.ts`
 
-- [ ] **Step 1: 写 Dashboard 失败测试**
+- [x] **Step 1: 写 Dashboard 失败测试**
 
   测试 OAuth 首页仅返回 v3 聚合字段（TRIMP、可用负荷、使用率、周基线、当周进度、数据质量、观测截至）；不返回 evidence BPM、OAuth 或原始 Health payload。测试状态文案：缺输入是 `—` 而非零；当天为进行中；周不完整冻结；目标日 Recovery 数据质量为 `medium/high` 时容量可随 recovery tier 变化、但实际 TRIMP 不变，provisional/unavailable/过期时不适配。锁定图表三态：未观测、未验证升高心率、已验证负荷必须显式可分；仅完整闭合日确认无合格活动才是 `0.0 TRIMP`。
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
   Run: `npm test -- tests/server/build-today.test.ts tests/server/today-response.test.ts tests/ui/today-dashboard.test.ts`
 
   Expected: FAIL，因为 v3 DTO 和 UI 尚不存在。
 
-- [ ] **Step 3: 构建服务端投影和 timeline**
+- [x] **Step 3: 构建服务端投影和 timeline**
 
   `build-today.ts` 优先读取 `cardio-load-trimp-v3` 结果并新增 `cardioLoad` DTO；旧 `strain` 只作为未迁移帐户的兼容内部数据，不与 v3 混在同一数值字段。`cardio-load-timeline.ts` 从日 TRIMP 的聚合 buckets 形成已观测阶梯/缺口信息，绝不返回 BPM。`today-response.ts` 只 allowlist 新 DTO。
 
-- [ ] **Step 4: 更新移动首页**
+- [x] **Step 4: 更新移动首页**
 
   保持已选绿色移动单画布视觉语言，首页把 `/21` 与 v2 Strain 文案替换为：
 
@@ -208,7 +208,7 @@
 
   禁止“安全”“过度训练”“可以加练”等医疗/许可表述。现有 Recovery/身体年龄组件继续工作；不新增桌面布局。
 
-- [ ] **Step 5: 运行 Dashboard 测试并提交**
+- [x] **Step 5: 运行 Dashboard 测试并提交**
 
   Run: `npm test -- tests/server/build-today.test.ts tests/server/today-response.test.ts tests/ui/today-dashboard.test.ts`
 
@@ -227,21 +227,23 @@
 - Modify: `docs/superpowers/specs/2026-09-04-trimp-cardio-load-build-target-design.md`
 - Modify: `README.md`（仅在已有运行说明中补充需要的回填/指标说明；若不存在相关段落则不创建无关文档）
 
-- [ ] **Step 1: 写迁移安全失败测试**
+- [x] **Step 1: 写迁移安全失败测试**
 
   断言 migration 014 不修改 v2 check/主键、可对已有用户建表、断开连接级联清理 v3 数据；调度同步在小时运行中不访问 UI、正常回补最近窗口、且输入变化按 v3 规则重算。
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
   Run: `npm test -- tests/integration/postgres-homepage-provenance.test.ts tests/server/postgres-scheduled-sync-fencing.test.ts`
 
   Expected: FAIL，直到迁移/清理/调度断言完成。
 
-- [ ] **Step 3: 完成文档与测试**
+  实施记录（2026-09-04）：调度围栏测试通过；两项真实 PostgreSQL migration integration 用例因本机未设置 `POSTGRES_INTEGRATION_BASE_URL` 跳过，未将跳过视为通过。
+
+- [x] **Step 3: 完成文档与测试**
 
   将设计文档状态更新为“已实施”，如实现中发现公开资料无法支撑某一参数，移除该行为并记录限制，不能私自补公式。更新已有运行说明中的 42 天首同步回填和稳定基线要求。
 
-- [ ] **Step 4: 全量验证**
+- [x] **Step 4: 全量验证**
 
   Run:
 
@@ -253,7 +255,7 @@
 
   Expected: tests 0 failed；TypeScript 0 errors；Next production build succeeds。若配置了 `POSTGRES_INTEGRATION_BASE_URL`，另运行 PostgreSQL 集成测试；未配置时明确报告其跳过，不把跳过说成通过。
 
-- [ ] **Step 5: 审阅并提交**
+- [x] **Step 5: 审阅并提交**
 
   提交前执行 `git diff --check`、请求独立代码审阅并修复 P0/P1。随后只暂存 v3 相关文件：
 

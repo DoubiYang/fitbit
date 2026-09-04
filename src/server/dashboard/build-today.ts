@@ -1,4 +1,4 @@
-import type { DailyHeartRateZones, MetricResult } from '../../domain/cardio-records';
+import type { DailyCardioLoad, DailyHeartRateZones, MetricResult } from '../../domain/cardio-records';
 import { BODY_AGE_REFERENCE_VERSION, type BodyAgeDataGaps, type BodyAgeStatus, type BodyAgeRoute } from '../../domain/body-age';
 import {
   type MetricCoverageState,
@@ -14,8 +14,8 @@ import type { HealthMetricsStore } from '../health/cardio-store';
 import { BODY_AGE_ALGORITHM_VERSION, BODY_AGE_WINDOW_DAYS } from '../health/body-age-recompute';
 import { bodyAgeFingerprintContext, bodyAgeInputFingerprint } from '../health/body-age-fingerprint';
 import type { HealthProvider } from '../health/provider';
-import { buildVerifiedStrainTimeline, type StrainTimeline } from './strain-timeline';
-import { civilDateDaysAgo, resolveDashboardCivilDate } from '../time/civil-date';
+import { buildCardioLoadTimeline, type CardioLoadTimeline } from './cardio-load-timeline';
+import { civilDateDaysAgo, DEFAULT_CIVIL_TIME_ZONE, resolveDashboardCivilDate } from '../time/civil-date';
 
 type BuildTodayInput = {
   provider: HealthProvider;
@@ -56,6 +56,30 @@ export type SleepPerformanceMetricView = {
   evidence?: MetricEvidence[];
 };
 
+export type CardioLoadMetricView = {
+  label: string;
+  dailyLoad: number | null;
+  status: DailyCardioLoad['status'] | 'unavailable';
+  detail: string;
+  timeline: CardioLoadTimeline;
+  observation: {
+    observedThrough: string | null;
+    qualifiedMinutes: number;
+    unverifiedElevatedHrMinutes: number;
+  };
+  capacity: {
+    status: 'scored' | 'calibrating' | 'unavailable';
+    usableLoad: number | null;
+    utilization: number | null;
+    recoveryAdjusted: boolean;
+  };
+  weekly: {
+    status: 'stable' | 'frozen' | 'calibrating' | 'unavailable';
+    baseline: number | null;
+    weekToDateLoad: number | null;
+  };
+};
+
 export type BodyAgeMetricView = {
   label: string;
   age: number | null;
@@ -93,6 +117,7 @@ export type TodayView = {
     strain: StrainMetricView;
     recovery: RecoveryMetricView;
     sleepPerformance: SleepPerformanceMetricView;
+    cardioLoad: CardioLoadMetricView;
     /** Present in API/build output; optional only while the dashboard UI rolls out separately. */
     bodyAge?: BodyAgeMetricView;
   };
@@ -107,14 +132,14 @@ export type HomepageTodayView = {
     text: string;
   };
   metrics: {
-    strain: Pick<StrainMetricView, 'label' | 'score' | 'status' | 'detail'> & { timeline?: StrainTimeline };
     recovery: Pick<RecoveryMetricView, 'label' | 'score' | 'quality' | 'detail'>;
     sleepPerformance: Pick<SleepPerformanceMetricView, 'label' | 'score' | 'detail'>;
+    cardioLoad: CardioLoadMetricView;
     bodyAge?: BodyAgeMetricView;
   };
 };
 
-export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline): HomepageTodayView {
+export function toHomepageTodayView(view: TodayView): HomepageTodayView {
   const bodyAge = view.metrics.bodyAge;
   const staleDetail = '同步数据已超过 36 小时，请等待下一次同步或重新同步后再查看趋势。';
   const isStale = view.freshness === 'stale';
@@ -126,13 +151,6 @@ export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline):
       text: view.primaryAction.text,
     },
     metrics: {
-      strain: {
-        label: view.metrics.strain.label,
-        score: isStale ? null : view.metrics.strain.score,
-        status: isStale ? 'unavailable' : view.metrics.strain.status,
-        detail: isStale ? staleDetail : view.metrics.strain.detail,
-        ...(!isStale && timeline ? { timeline } : {}),
-      },
       recovery: {
         label: view.metrics.recovery.label,
         score: isStale ? null : view.metrics.recovery.score,
@@ -144,6 +162,9 @@ export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline):
         score: view.metrics.sleepPerformance.score,
         detail: view.metrics.sleepPerformance.detail,
       },
+      cardioLoad: isStale
+        ? unavailableCardioLoad(staleDetail)
+        : view.metrics.cardioLoad,
       ...(bodyAge ? {
         bodyAge: {
           label: bodyAge.label,
@@ -166,6 +187,97 @@ export function toHomepageTodayView(view: TodayView, timeline?: StrainTimeline):
       } : {}),
     },
   };
+}
+
+function addCivilDays(civilDate: string, days: number): string {
+  const next = new Date(`${civilDate}T00:00:00.000Z`);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next.toISOString().slice(0, 10);
+}
+
+function mondayOf(civilDate: string): string {
+  const date = new Date(`${civilDate}T00:00:00.000Z`);
+  return addCivilDays(civilDate, -((date.getUTCDay() + 6) % 7));
+}
+
+function roundOne(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function unavailableCardioLoad(detail = '尚无可用的全天心肺负荷。'): CardioLoadMetricView {
+  return {
+    label: '全天心肺负荷',
+    dailyLoad: null,
+    status: 'unavailable',
+    detail,
+    timeline: { state: 'no_verified_load', detail },
+    observation: { observedThrough: null, qualifiedMinutes: 0, unverifiedElevatedHrMinutes: 0 },
+    capacity: { status: 'unavailable', usableLoad: null, utilization: null, recoveryAdjusted: false },
+    weekly: { status: 'unavailable', baseline: null, weekToDateLoad: null },
+  };
+}
+
+function cardioLoadDetail(input: { daily: DailyCardioLoad | undefined; isCurrentDay: boolean }): string {
+  if (!input.daily) return '尚无可用的全天心肺负荷。';
+  if (input.daily.status === 'invalid_hr_reserve') return '心率储备参数无效，因此没有 TRIMP。';
+  if (input.daily.status === 'timezone_ambiguous') return '时区不明确，因此无法计算当地日 TRIMP。';
+  if (input.daily.status === 'insufficient_context') return '覆盖或活动上下文不足，因此不把当天显示为零负荷。';
+  if (input.isCurrentDay) return '今日 TRIMP 仅累计已验证的活动与清醒时间交集。';
+  return input.daily.dailyLoad === 0
+    ? '完整日没有达到计入阈值的已验证活动，因此为 0.0 TRIMP。'
+    : '完整日 TRIMP 基于已验证的活动、清醒时间和心率交集。';
+}
+
+function cardioLoadFromRows(input: {
+  daily: DailyCardioLoad | undefined;
+  capacity: Awaited<ReturnType<HealthMetricsStore['getDailyLoadCapacity']>>;
+  weekly: Awaited<ReturnType<HealthMetricsStore['getWeeklyCardioBaseline']>>;
+  observedThrough: string | null;
+  isCurrentDay: boolean;
+}): CardioLoadMetricView {
+  const displayDailyLoad = input.daily?.dailyLoad === 0 && input.isCurrentDay && input.daily.qualifiedSeconds === 0
+    ? null
+    : input.daily?.dailyLoad ?? null;
+  const detail = cardioLoadDetail({ daily: input.daily, isCurrentDay: input.isCurrentDay });
+  return {
+    label: '全天心肺负荷',
+    dailyLoad: displayDailyLoad,
+    status: input.daily?.status ?? 'unavailable',
+    detail,
+    timeline: buildCardioLoadTimeline({ daily: input.daily, isCurrentDay: input.isCurrentDay }),
+    observation: {
+      observedThrough: input.observedThrough,
+      qualifiedMinutes: roundOne((input.daily?.qualifiedSeconds ?? 0) / 60),
+      unverifiedElevatedHrMinutes: roundOne((input.daily?.unverifiedElevatedHrSeconds ?? 0) / 60),
+    },
+    capacity: {
+      status: input.capacity?.status ?? 'unavailable',
+      usableLoad: input.capacity?.usableLoad ?? null,
+      utilization: input.capacity?.utilization ?? null,
+      recoveryAdjusted: input.capacity?.recoveryTier !== null && input.capacity?.recoveryTier !== undefined && input.capacity.recoveryTier !== 'unadjusted',
+    },
+    weekly: {
+      status: input.weekly?.status ?? 'unavailable',
+      baseline: input.weekly?.baseline ?? null,
+      weekToDateLoad: input.weekly?.weekToDateLoad ?? null,
+    },
+  };
+}
+
+function observationTime(instant: string | undefined, timeZone: string): string | null {
+  if (!instant) return null;
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(new Date(instant));
+  } catch {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(new Date(instant));
+  }
 }
 
 const STALE_SYNC_MS = 36 * 60 * 60 * 1_000;
@@ -391,14 +503,19 @@ async function metricsFromStore(
   localDate: string,
   now: Date,
   records: UserHealthRecords,
+  timeZone: string,
 ): Promise<TodayView['metrics']> {
-  const [strain, recovery, sleepPerformance, zones, timeInZone, dailyCardio, bodyAge] = await Promise.all([
+  const [strain, recovery, sleepPerformance, zones, timeInZone, dailyCardio, cardioLoad, loadCapacity, weeklyBaseline, heartRateMinutes, bodyAge] = await Promise.all([
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'strain' }),
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'recovery' }),
     store.getMetricResult({ userId, civilDate: localDate, metricName: 'sleep_performance' }),
     store.getHeartRateZones({ userId, civilDate: localDate }),
     store.getTimeInZone({ userId, civilDate: localDate }),
     store.getDailyCardio({ userId, civilDate: localDate }),
+    store.getDailyCardioLoad({ userId, civilDate: localDate }),
+    store.getDailyLoadCapacity({ userId, civilDate: localDate }),
+    store.getWeeklyCardioBaseline({ userId, weekStart: mondayOf(localDate) }),
+    store.listMinutesByCivilDate({ userId, civilDate: localDate }),
     bodyAgeFromStore({ store, userId, now, records }),
   ]);
   const storedRecovery = recoveryFromResult(recovery);
@@ -419,6 +536,13 @@ async function metricsFromStore(
     },
     recovery: recoveryView,
     sleepPerformance: sleepFromResult(sleepPerformance),
+    cardioLoad: cardioLoadFromRows({
+      daily: cardioLoad,
+      capacity: loadCapacity,
+      weekly: weeklyBaseline,
+      observedThrough: observationTime(heartRateMinutes.at(-1)?.minuteStartUtc, timeZone),
+      isCurrentDay: true,
+    }),
     bodyAge,
   };
 }
@@ -465,14 +589,16 @@ async function metricsFromRecords(
       detail: sleepDetail(sleep.score, sleep.reason),
       evidence: sleep.evidence,
     },
+    cardioLoad: unavailableCardioLoad(),
     bodyAge: unavailableBodyAge('profile_missing'),
   };
 }
 
 export async function buildTodayView(input: BuildTodayInput): Promise<TodayView> {
+  const dashboardTimeZone = input.timeZone ?? (input.allowDefaultTimeZone ? DEFAULT_CIVIL_TIME_ZONE : 'UTC');
   const localDate = resolveDashboardCivilDate(
     new Date(input.now),
-    input.timeZone,
+    dashboardTimeZone,
     input.allowDefaultTimeZone ? 'default' : 'utc',
   );
   const records = scopedRecords(
@@ -483,7 +609,7 @@ export async function buildTodayView(input: BuildTodayInput): Promise<TodayView>
     input.userId,
   );
   const metrics = input.healthMetrics
-    ? await metricsFromStore(input.healthMetrics, input.userId, localDate, new Date(input.now), records)
+    ? await metricsFromStore(input.healthMetrics, input.userId, localDate, new Date(input.now), records, dashboardTimeZone)
     : await metricsFromRecords(
         records,
         input.userId,
@@ -508,32 +634,8 @@ export async function buildTodayView(input: BuildTodayInput): Promise<TodayView>
   };
 }
 
-/**
- * Homepage-only projection. The timeline is intentionally constructed after
- * the wide, server-side view and is omitted unless persisted Strain inputs can
- * be replayed exactly. No raw health records cross this boundary.
- */
+/** Homepage-only projection. No raw health records cross this boundary. */
 export async function buildHomepageTodayView(input: BuildTodayInput): Promise<HomepageTodayView> {
   const view = await buildTodayView(input);
-  if (!input.healthMetrics || view.freshness !== 'fresh') return toHomepageTodayView(view);
-
-  try {
-    const records = scopedRecords(
-      await input.provider.listRecords(input.userId, {
-        from: civilDateDaysAgo(view.localDate, 90),
-        to: view.localDate,
-      }),
-      input.userId,
-    );
-    const timeline = await buildVerifiedStrainTimeline({
-      store: input.healthMetrics,
-      userId: input.userId,
-      civilDate: view.localDate,
-      now: input.now,
-      sleepSessions: records.sleepSessions,
-    });
-    return toHomepageTodayView(view, timeline);
-  } catch {
-    return toHomepageTodayView(view);
-  }
+  return toHomepageTodayView(view);
 }
