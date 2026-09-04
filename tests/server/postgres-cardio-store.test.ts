@@ -3,13 +3,17 @@ import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  parseCardioLoadBootstrap,
+  parseDailyCardioLoad,
+  parseDailyLoadCapacity,
   parseDailyCardio,
   parseDailyHeartRateZones,
   parseHeartRateMinuteAggregate,
   parseMetricResult,
   parseSleepGoal,
+  parseWeeklyCardioBaseline,
 } from '../../src/domain/cardio-records';
-import { WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
+import { CARDIO_LOAD_TRIMP_VERSION, WHOOP_STYLE_METRIC_VERSION } from '../../src/domain/metric-types';
 import { createPostgresStoreForTesting } from '../../src/server/db/postgres-store';
 import {
   healthMetricsExposesRawSamplePersistence,
@@ -29,6 +33,8 @@ const now = new Date('2026-08-22T16:00:00.000Z');
 const migration = readFileSync(new URL('../../db/migrations/010_whoop_style_metrics.sql', import.meta.url), 'utf8');
 const provenanceMigrationPath = new URL('../../db/migrations/013_homepage_strain_provenance.sql', import.meta.url);
 const provenanceMigration = existsSync(provenanceMigrationPath) ? readFileSync(provenanceMigrationPath, 'utf8') : '';
+const cardioLoadMigrationPath = new URL('../../db/migrations/014_cardio_load_trimp_v3.sql', import.meta.url);
+const cardioLoadMigration = existsSync(cardioLoadMigrationPath) ? readFileSync(cardioLoadMigrationPath, 'utf8') : '';
 
 const zones = {
   LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
@@ -132,6 +138,106 @@ function metric() {
     },
   });
 }
+
+test('migration 014 adds isolated v3 tables without changing v2 constraints', () => {
+  for (const table of [
+    'heart_rate_minute_evidence',
+    'daily_cardio_loads',
+    'weekly_cardio_baselines',
+    'daily_load_capacities',
+    'cardio_load_bootstraps',
+  ]) {
+    assert.match(cardioLoadMigration, new RegExp(`CREATE TABLE ${table}`, 'u'));
+  }
+  assert.match(cardioLoadMigration, /metric_version = 'cardio-load-trimp-v3'/u);
+  assert.match(cardioLoadMigration, /filterRuleVersion' = 'google-wearables-hrmax-v1'/u);
+  assert.match(cardioLoadMigration, /hr_max_est_bpm IS NULL AND hr_max_provenance IS NULL/u);
+  assert.match(cardioLoadMigration, /REFERENCES users \(id\) ON DELETE CASCADE/u);
+  assert.match(cardioLoadMigration, /REFERENCES google_health_connections \(id\) ON DELETE CASCADE/u);
+  assert.doesNotMatch(cardioLoadMigration, /ALTER TABLE (daily_cardio|metric_results)/u);
+});
+
+test('postgres parameterizes v3 evidence, metric rows, bootstrap, and user-scoped reads', async () => {
+  const pool = new RecordingPool([connectionOwnerResponse()]);
+  const store = createPostgresStoreForTesting(pool);
+  const fingerprint = `sha256:${'d'.repeat(64)}`;
+  await store.healthMetrics.upsertCardioLoadBootstrap(parseCardioLoadBootstrap({
+    userId, connectionId, metricVersion: CARDIO_LOAD_TRIMP_VERSION, status: 'pending', attemptedAt: '2026-08-22T16:00:00.000Z', completedAt: null, errorCode: null,
+  }));
+  await store.healthMetrics.upsertHeartRateMinuteEvidence([{
+    userId,
+    sourceFamily: 'google-wearables',
+    minuteStartUtc: '2026-08-22T12:00:00.000Z',
+    segments: [{ startOffsetMs: 0, endOffsetMs: 60_000, bpm: 110 }],
+  }]);
+  await store.healthMetrics.upsertDailyCardioLoad(parseDailyCardioLoad({
+    userId,
+    civilDate,
+    metricVersion: CARDIO_LOAD_TRIMP_VERSION,
+    status: 'scored',
+    dailyLoad: 10,
+    qualifiedSeconds: 900,
+    unverifiedElevatedHrSeconds: 120,
+    rawHrCoverageSeconds: 43_200,
+    awakeCoverageRatio: 0.75,
+    motionSource: 'both',
+    qualityState: 'qualified',
+    rhrBaseBpm: 55,
+    hrMaxEstBpm: 175.5,
+    hrMaxProvenance: { filterRuleVersion: 'google-wearables-hrmax-v1', sourceFamily: 'google-wearables', minuteStartUtc: '2026-08-21T12:00:00.000Z', bpm: 175.5, coverageSeconds: 60, sampleCount: 1 },
+    inputFingerprint: fingerprint,
+    calculationContext: { ianaTimeZone: 'Asia/Shanghai' },
+  }));
+  await store.healthMetrics.upsertWeeklyCardioBaseline(parseWeeklyCardioBaseline({
+    userId, weekStart: '2026-08-17', metricVersion: CARDIO_LOAD_TRIMP_VERSION, status: 'stable',
+    weeklyLoad: 50, weekToDateLoad: 50, rm4: 40, ewma4: 41, baseline: 41, inputFingerprint: fingerprint,
+  }));
+  await store.healthMetrics.upsertDailyLoadCapacity(parseDailyLoadCapacity({
+    userId, civilDate, metricVersion: CARDIO_LOAD_TRIMP_VERSION, status: 'calibrating', actualLoad: 10,
+    usableLoad: 20, utilization: 50, historySampleCount: 28, usedGlobalFallback: true, recoveryTier: 'unadjusted', recoveryMetricVersion: 'whoop-style-v2',
+    recoveryCivilDate: civilDate, recoveryQuality: 'provisional', recoveryInputFingerprint: fingerprint, inputFingerprint: fingerprint,
+  }));
+  await store.healthMetrics.listHeartRateMinuteEvidence({ userId, fromUtc: '2026-08-22T00:00:00.000Z' });
+  await store.healthMetrics.getDailyCardioLoad({ userId, civilDate });
+  await store.healthMetrics.readCardioLoadBootstrap({ userId: '99999999-9999-9999-9999-999999999999', connectionId });
+
+  assert.equal(pool.queries.filter((query) => /INSERT INTO (heart_rate_minute_evidence|daily_cardio_loads|weekly_cardio_baselines|daily_load_capacities|cardio_load_bootstraps)/u.test(query.text)).length, 5);
+  assert.ok(pool.queries.some((query) => /heart_rate_minute_evidence[\s\S]*?user_id = \$1/u.test(query.text)));
+  assert.ok(pool.queries.some((query) => /daily_cardio_loads[\s\S]*?user_id = \$1/u.test(query.text)));
+  const dailyInsert = pool.queries.find((query) => /INSERT INTO daily_cardio_loads/u.test(query.text));
+  assert.equal(JSON.parse(String(dailyInsert?.values?.[13])).bpm, 175.5);
+  const scopedBootstrapRead = pool.queries.find((query) => /FROM cardio_load_bootstraps AS bootstrap/u.test(query.text));
+  assert.match(scopedBootstrapRead?.text ?? '', /connection\.user_id = \$3/u);
+  assert.equal(scopedBootstrapRead?.values?.[2], '99999999-9999-9999-9999-999999999999');
+  assert.ok(pool.queries.every((query) => !query.text.includes(userId)));
+});
+
+test('postgres persists an absent HRmax provenance as SQL NULL', async () => {
+  const pool = new RecordingPool();
+  const store = createPostgresStoreForTesting(pool);
+
+  await store.healthMetrics.upsertDailyCardioLoad(parseDailyCardioLoad({
+    userId,
+    civilDate,
+    metricVersion: CARDIO_LOAD_TRIMP_VERSION,
+    status: 'insufficient_context',
+    dailyLoad: null,
+    qualifiedSeconds: 0,
+    unverifiedElevatedHrSeconds: 0,
+    rawHrCoverageSeconds: 600,
+    awakeCoverageRatio: null,
+    motionSource: 'none',
+    qualityState: 'incomplete',
+    rhrBaseBpm: 55,
+    hrMaxEstBpm: null,
+    hrMaxProvenance: null,
+    inputFingerprint: `sha256:${'e'.repeat(64)}`,
+    calculationContext: { ianaTimeZone: 'Asia/Shanghai' },
+  }));
+
+  const dailyInsert = pool.queries.find((query) => /INSERT INTO daily_cardio_loads/u.test(query.text));
+  assert.equal(dailyInsert?.values?.[13], null);
+});
 
 test('migration 013 preserves legacy rows while constraining version 1 homepage strain provenance', () => {
   assert.match(provenanceMigration, /ALTER TABLE daily_cardio[\s\S]*?ADD COLUMN provenance_version SMALLINT/u);
@@ -644,7 +750,7 @@ test('scheduleCursor leaves successful_watermark untouched and rejects invalid r
   assert.equal(pool.queries.length, beforeInvalid);
 });
 
-test('deleteForUser removes every whoop-style metric table for that user inside a transaction', async () => {
+test('deleteForUser removes every v2 and v3 metric table for that user inside a transaction', async () => {
   const pool = new RecordingPool();
   const store = createPostgresStoreForTesting(pool);
 
@@ -661,6 +767,11 @@ test('deleteForUser removes every whoop-style metric table for that user inside 
     'exercise_intervals',
     'daily_cardio',
     'metric_results',
+    'heart_rate_minute_evidence',
+    'daily_cardio_loads',
+    'weekly_cardio_baselines',
+    'daily_load_capacities',
+    'cardio_load_bootstraps',
     'health_sync_cursors',
     'user_sleep_goal_history',
     'user_health_time_zone_history',

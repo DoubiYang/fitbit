@@ -76,17 +76,17 @@
 - Create: `tests/server/cardio-load-store.test.ts`
 - Modify: `tests/server/postgres-cardio-store.test.ts`
 
-- [ ] **Step 1: 写 schema/store 失败测试**
+- [x] **Step 1: 写 schema/store 失败测试**
 
   覆盖：v3 表能与 v2 `daily_cardio` / `metric_results` 并存；minute evidence 仅接受分钟内的有序 `{startOffsetMs,endOffsetMs,bpm}` 派生片段；v3 日负荷、周基线、容量按 `(user, date/week, version)` upsert；连接级 v3 bootstrap 能区分 `pending` / 可重试失败 / `completed` 且有输入版本和完成时间；删除用户清理全部 v3 表及 bootstrap；Postgres 查询始终带 user scope。
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
   Run: `npm test -- tests/server/cardio-load-store.test.ts tests/server/postgres-cardio-store.test.ts`
 
   Expected: FAIL，因为 v3 schema、类型与 store 方法不存在。
 
-- [ ] **Step 3: 写迁移和验证类型**
+- [x] **Step 3: 写迁移和验证类型**
 
   `014_cardio_load_trimp_v3.sql` 新建：
 
@@ -98,11 +98,11 @@
 
   在 `cardio-records.ts` 添加严格 Zod parsers/导出类型；禁止非有限数、越界片段、空 provenance 或非 v3 version。
 
-- [ ] **Step 4: 扩展 store 实现**
+- [x] **Step 4: 扩展 store 实现**
 
   将 evidence、三种 v3 结果和连接级 bootstrap 状态作为 `HealthMetricsStore` 的显式读写 API，实现 Postgres SQL mapping、内存 store clone/transaction/delete 路径。bootstrap 的成功写入必须能与相关 cursor/派生结果同一事务围栏；失败保留可重试信息。不得改动 v2 的表约束或用 v2 `metric_results` 承载 v3。
 
-- [ ] **Step 5: 运行存储测试并提交**
+- [x] **Step 5: 运行存储测试并提交**
 
   Run: `npm test -- tests/server/cardio-load-store.test.ts tests/server/postgres-cardio-store.test.ts`
 

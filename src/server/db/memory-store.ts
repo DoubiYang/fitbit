@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { editableMealDraftSchema, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
-import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
+import {
+  parseCardioLoadBootstrap,
+  parseDailyCardioLoad,
+  parseDailyLoadCapacity,
+  parseHeartRateMinuteEvidence,
+  parseWeeklyCardioBaseline,
+} from '../../domain/cardio-records';
+import { CARDIO_LOAD_TRIMP_VERSION, WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
 import type { AuthStore, ConnectionRow, MealSyncStore, OauthTransactionRow, ScheduledSyncLease, SessionRow } from '../auth/types';
 import {
   HealthMetricsConnectionMismatchError,
@@ -31,14 +38,19 @@ import {
   SleepGoalConflictError,
   TimeZoneHistoryConflictError,
   type BodyAgeResultWrite,
+  type CardioLoadBootstrap,
+  type DailyCardioLoad,
+  type DailyLoadCapacity,
   type HealthMetricsStore,
   type HealthMetricsWindowWrite,
   type HealthSyncCursor,
   type HealthTimeZoneHistory,
   type HeartRateMinuteAggregate,
+  type HeartRateMinuteEvidence,
   type StoredBodyAgeProfile,
   type StoredBodyAgeResult,
   type StoredDailyVo2,
+  type WeeklyCardioBaseline,
 } from '../health/cardio-store';
 import { confirmDraftRows, resolveDraftNutrition } from '../meals/confirm-draft';
 import { buildCurrentMealGooglePayloads } from '../meals/current-meal';
@@ -224,6 +236,11 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
   const exerciseIntervals = new Map<string, ReturnType<typeof parseExerciseInterval>>();
   const dailyCardio = new Map<string, ReturnType<typeof parseDailyCardio>>();
   const metricResults = new Map<string, ReturnType<typeof parseMetricResult>>();
+  const heartRateMinuteEvidence = new Map<string, HeartRateMinuteEvidence>();
+  const dailyCardioLoads = new Map<string, DailyCardioLoad>();
+  const weeklyCardioBaselines = new Map<string, WeeklyCardioBaseline>();
+  const dailyLoadCapacities = new Map<string, DailyLoadCapacity>();
+  const cardioLoadBootstraps = new Map<string, CardioLoadBootstrap>();
   const healthCursors = new Map<string, HealthSyncCursor>();
   const sleepGoals = new Map<string, ReturnType<typeof parseSleepGoal>>();
   const timeZoneHistory = new Map<string, HealthTimeZoneHistory>();
@@ -308,6 +325,11 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       exerciseIntervals: new Map([...exerciseIntervals].map(([id, row]) => [id, structuredClone(row)])),
       dailyCardio: new Map([...dailyCardio].map(([id, row]) => [id, structuredClone(row)])),
       metricResults: new Map([...metricResults].map(([id, row]) => [id, structuredClone(row)])),
+      heartRateMinuteEvidence: new Map([...heartRateMinuteEvidence].map(([id, row]) => [id, structuredClone(row)])),
+      dailyCardioLoads: new Map([...dailyCardioLoads].map(([id, row]) => [id, structuredClone(row)])),
+      weeklyCardioBaselines: new Map([...weeklyCardioBaselines].map(([id, row]) => [id, structuredClone(row)])),
+      dailyLoadCapacities: new Map([...dailyLoadCapacities].map(([id, row]) => [id, structuredClone(row)])),
+      cardioLoadBootstraps: new Map([...cardioLoadBootstraps].map(([id, row]) => [id, structuredClone(row)])),
       healthCursors: new Map([...healthCursors].map(([id, row]) => [id, cloneCursor(row)])),
       sleepGoals: new Map([...sleepGoals].map(([id, row]) => [id, structuredClone(row)])),
       timeZoneHistory: new Map([...timeZoneHistory].map(([id, row]) => [id, structuredClone(row)])),
@@ -352,6 +374,11 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
     restoreMap(exerciseIntervals, state.exerciseIntervals, (row) => structuredClone(row));
     restoreMap(dailyCardio, state.dailyCardio, (row) => structuredClone(row));
     restoreMap(metricResults, state.metricResults, (row) => structuredClone(row));
+    restoreMap(heartRateMinuteEvidence, state.heartRateMinuteEvidence, (row) => structuredClone(row));
+    restoreMap(dailyCardioLoads, state.dailyCardioLoads, (row) => structuredClone(row));
+    restoreMap(weeklyCardioBaselines, state.weeklyCardioBaselines, (row) => structuredClone(row));
+    restoreMap(dailyLoadCapacities, state.dailyLoadCapacities, (row) => structuredClone(row));
+    restoreMap(cardioLoadBootstraps, state.cardioLoadBootstraps, (row) => structuredClone(row));
     restoreMap(healthCursors, state.healthCursors, cloneCursor);
     restoreMap(sleepGoals, state.sleepGoals, (row) => structuredClone(row));
     restoreMap(timeZoneHistory, state.timeZoneHistory, (row) => structuredClone(row));
@@ -764,6 +791,21 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       }));
       return true;
     },
+    async upsertHeartRateMinuteEvidence(rows) {
+      for (const row of rows) {
+        const parsed = parseHeartRateMinuteEvidence(row);
+        heartRateMinuteEvidence.set(
+          compositeKey(parsed.userId, parsed.sourceFamily, parsed.minuteStartUtc),
+          structuredClone(parsed),
+        );
+      }
+    },
+    async listHeartRateMinuteEvidence(input) {
+      return [...heartRateMinuteEvidence.values()]
+        .filter((row) => row.userId === input.userId && inUtcRange(row.minuteStartUtc, input.fromUtc, input.toUtcExclusive))
+        .sort((left, right) => left.minuteStartUtc.localeCompare(right.minuteStartUtc))
+        .map((row) => structuredClone(row));
+    },
     async upsertActivityLevelIntervals(intervals) {
       for (const row of intervals) {
         const parsed = parseActivityLevelInterval(row);
@@ -817,6 +859,47 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
         .filter((row) => row.userId === input.userId && row.date >= input.fromCivilDate && row.date <= input.toCivilDate)
         .sort((left, right) => left.date.localeCompare(right.date))
         .map((row) => structuredClone(row));
+    },
+    async upsertDailyCardioLoad(row) {
+      const parsed = parseDailyCardioLoad(row);
+      dailyCardioLoads.set(compositeKey(parsed.userId, parsed.civilDate, parsed.metricVersion), structuredClone(parsed));
+    },
+    async getDailyCardioLoad(input) {
+      const row = dailyCardioLoads.get(compositeKey(input.userId, input.civilDate, CARDIO_LOAD_TRIMP_VERSION));
+      return row ? structuredClone(row) : undefined;
+    },
+    async listDailyCardioLoads(input) {
+      return [...dailyCardioLoads.values()]
+        .filter((row) => row.userId === input.userId && row.civilDate >= input.fromCivilDate && row.civilDate <= input.toCivilDate)
+        .sort((left, right) => left.civilDate.localeCompare(right.civilDate))
+        .map((row) => structuredClone(row));
+    },
+    async upsertWeeklyCardioBaseline(row) {
+      const parsed = parseWeeklyCardioBaseline(row);
+      weeklyCardioBaselines.set(compositeKey(parsed.userId, parsed.weekStart, parsed.metricVersion), structuredClone(parsed));
+    },
+    async getWeeklyCardioBaseline(input) {
+      const row = weeklyCardioBaselines.get(compositeKey(input.userId, input.weekStart, CARDIO_LOAD_TRIMP_VERSION));
+      return row ? structuredClone(row) : undefined;
+    },
+    async upsertDailyLoadCapacity(row) {
+      const parsed = parseDailyLoadCapacity(row);
+      dailyLoadCapacities.set(compositeKey(parsed.userId, parsed.civilDate, parsed.metricVersion), structuredClone(parsed));
+    },
+    async getDailyLoadCapacity(input) {
+      const row = dailyLoadCapacities.get(compositeKey(input.userId, input.civilDate, CARDIO_LOAD_TRIMP_VERSION));
+      return row ? structuredClone(row) : undefined;
+    },
+    async upsertCardioLoadBootstrap(row) {
+      const parsed = parseCardioLoadBootstrap(row);
+      if (connections.get(parsed.connectionId)?.userId !== parsed.userId) {
+        throw new HealthMetricsConnectionMismatchError();
+      }
+      cardioLoadBootstraps.set(compositeKey(parsed.connectionId, parsed.metricVersion), structuredClone(parsed));
+    },
+    async readCardioLoadBootstrap(input) {
+      const row = cardioLoadBootstraps.get(compositeKey(input.connectionId, CARDIO_LOAD_TRIMP_VERSION));
+      return row?.userId === input.userId ? structuredClone(row) : undefined;
     },
     async upsertMetricResult(row) {
       const parsed = parseMetricResult(row);
@@ -1018,6 +1101,10 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       removeUser(exerciseIntervals);
       removeUser(dailyCardio);
       removeUser(metricResults);
+      removeUser(heartRateMinuteEvidence);
+      removeUser(dailyCardioLoads);
+      removeUser(weeklyCardioBaselines);
+      removeUser(dailyLoadCapacities);
       removeUser(sleepGoals);
       removeUser(timeZoneHistory);
       removeUser(bodyAgeProfiles);
@@ -1028,6 +1115,9 @@ export function createMemoryStore(options: { transactionChild?: boolean } = {}):
       );
       for (const [key, row] of healthCursors) {
         if (connectionIds.has(row.connectionId)) healthCursors.delete(key);
+      }
+      for (const [key, row] of cardioLoadBootstraps) {
+        if (connectionIds.has(row.connectionId)) cardioLoadBootstraps.delete(key);
       }
     },
   };

@@ -1,23 +1,48 @@
 import {
   parseActivityLevelInterval,
+  parseCardioLoadBootstrap,
+  parseDailyCardioLoad,
+  parseDailyLoadCapacity,
   parseDailyCardio,
   parseDailyHeartRateZones,
   parseDailyTimeInZone,
   parseExerciseInterval,
   parseHeartRateMinuteAggregate,
+  parseHeartRateMinuteEvidence,
   parseMetricResult,
   parseSleepGoal,
+  parseWeeklyCardioBaseline,
   type ActivityLevelInterval,
+  type CardioLoadBootstrap,
+  type DailyCardioLoad,
+  type DailyLoadCapacity,
   type DailyCardio,
   type DailyHeartRateZones,
   type DailyTimeInZone,
   type ExerciseInterval,
   type HeartRateMinuteAggregate,
+  type HeartRateMinuteEvidence,
   type MetricResult,
   type SleepGoal,
+  type WeeklyCardioBaseline,
 } from '../../domain/cardio-records';
 import type { BodyAgeDataGaps, BodyAgeEstimate, BodyAgeProfile, BodyAgeRoute, BodyAgeStatus, BodyAgeValue, DailyVo2Input } from '../../domain/body-age';
 import { WHOOP_STYLE_METRIC_VERSION, type MetricName } from '../../domain/metric-types';
+
+export {
+  parseCardioLoadBootstrap,
+  parseDailyCardioLoad,
+  parseDailyLoadCapacity,
+  parseHeartRateMinuteEvidence,
+  parseWeeklyCardioBaseline,
+};
+export type {
+  CardioLoadBootstrap,
+  DailyCardioLoad,
+  DailyLoadCapacity,
+  HeartRateMinuteEvidence,
+  WeeklyCardioBaseline,
+};
 
 export const HEALTH_SYNC_DATA_TYPES = [
   'heart-rate',
@@ -134,6 +159,9 @@ export type HealthMetricsStore = {
   listMinutesInRange(input: { userId: string; fromUtc: string; toUtcExclusive?: string }): Promise<HeartRateMinuteAggregate[]>;
   updateMinuteLocalAssociation(input: MinuteLocalAssociationUpdate): Promise<boolean>;
 
+  upsertHeartRateMinuteEvidence(rows: HeartRateMinuteEvidence[]): Promise<void>;
+  listHeartRateMinuteEvidence(input: { userId: string; fromUtc: string; toUtcExclusive?: string }): Promise<HeartRateMinuteEvidence[]>;
+
   upsertActivityLevelIntervals(intervals: ActivityLevelInterval[]): Promise<void>;
   listActivityLevelIntervalsInRange(input: {
     userId: string;
@@ -157,6 +185,16 @@ export type HealthMetricsStore = {
   upsertDailyCardio(row: DailyCardio): Promise<void>;
   getDailyCardio(input: { userId: string; civilDate: string }): Promise<DailyCardio | undefined>;
   listDailyCardio(input: { userId: string; fromCivilDate: string; toCivilDate: string }): Promise<DailyCardio[]>;
+
+  upsertDailyCardioLoad(row: DailyCardioLoad): Promise<void>;
+  getDailyCardioLoad(input: { userId: string; civilDate: string }): Promise<DailyCardioLoad | undefined>;
+  listDailyCardioLoads(input: { userId: string; fromCivilDate: string; toCivilDate: string }): Promise<DailyCardioLoad[]>;
+  upsertWeeklyCardioBaseline(row: WeeklyCardioBaseline): Promise<void>;
+  getWeeklyCardioBaseline(input: { userId: string; weekStart: string }): Promise<WeeklyCardioBaseline | undefined>;
+  upsertDailyLoadCapacity(row: DailyLoadCapacity): Promise<void>;
+  getDailyLoadCapacity(input: { userId: string; civilDate: string }): Promise<DailyLoadCapacity | undefined>;
+  upsertCardioLoadBootstrap(row: CardioLoadBootstrap): Promise<void>;
+  readCardioLoadBootstrap(input: { userId: string; connectionId: string }): Promise<CardioLoadBootstrap | undefined>;
 
   upsertMetricResult(row: MetricResult): Promise<void>;
   getMetricResult(input: {
@@ -753,6 +791,83 @@ export function mapHeartRateMinuteAggregateRow(row: Record<string, unknown>): He
     sampleCount: Number(row.sample_count),
     coverageSeconds: Number(row.coverage_seconds),
     activityLevel: row.activity_level,
+  });
+}
+
+export function mapHeartRateMinuteEvidenceRow(row: Record<string, unknown>): HeartRateMinuteEvidence {
+  return parseHeartRateMinuteEvidence({
+    userId: String(row.user_id),
+    sourceFamily: row.source_family,
+    minuteStartUtc: asIsoInstant(row.minute_start_utc, 'heart_rate_minute_evidence.minute_start_utc'),
+    segments: parseJsonValue(row.segments, 'heart_rate_minute_evidence.segments'),
+  });
+}
+
+export function mapDailyCardioLoadRow(row: Record<string, unknown>): DailyCardioLoad {
+  return parseDailyCardioLoad({
+    userId: String(row.user_id),
+    civilDate: asCivilDate(row.civil_date, 'daily_cardio_loads.civil_date'),
+    metricVersion: row.metric_version,
+    status: row.status,
+    dailyLoad: row.daily_load == null ? null : Number(row.daily_load),
+    qualifiedSeconds: Number(row.qualified_seconds),
+    unverifiedElevatedHrSeconds: Number(row.unverified_elevated_hr_seconds),
+    rawHrCoverageSeconds: Number(row.raw_hr_coverage_seconds),
+    awakeCoverageRatio: row.awake_coverage_ratio == null ? null : Number(row.awake_coverage_ratio),
+    motionSource: row.motion_source,
+    qualityState: row.quality_state,
+    rhrBaseBpm: row.rhr_base_bpm == null ? null : Number(row.rhr_base_bpm),
+    hrMaxEstBpm: row.hr_max_est_bpm == null ? null : Number(row.hr_max_est_bpm),
+    hrMaxProvenance: row.hr_max_provenance == null ? null : parseJsonValue(row.hr_max_provenance, 'daily_cardio_loads.hr_max_provenance'),
+    inputFingerprint: row.input_fingerprint,
+    calculationContext: parseJsonValue(row.calculation_context, 'daily_cardio_loads.calculation_context'),
+  });
+}
+
+export function mapWeeklyCardioBaselineRow(row: Record<string, unknown>): WeeklyCardioBaseline {
+  return parseWeeklyCardioBaseline({
+    userId: String(row.user_id),
+    weekStart: asCivilDate(row.week_start, 'weekly_cardio_baselines.week_start'),
+    metricVersion: row.metric_version,
+    status: row.status,
+    weeklyLoad: row.weekly_load == null ? null : Number(row.weekly_load),
+    weekToDateLoad: Number(row.week_to_date_load),
+    rm4: row.rm4 == null ? null : Number(row.rm4),
+    ewma4: row.ewma4 == null ? null : Number(row.ewma4),
+    baseline: row.baseline == null ? null : Number(row.baseline),
+    inputFingerprint: row.input_fingerprint,
+  });
+}
+
+export function mapDailyLoadCapacityRow(row: Record<string, unknown>): DailyLoadCapacity {
+  return parseDailyLoadCapacity({
+    userId: String(row.user_id),
+    civilDate: asCivilDate(row.civil_date, 'daily_load_capacities.civil_date'),
+    metricVersion: row.metric_version,
+    status: row.status,
+    actualLoad: row.actual_load == null ? null : Number(row.actual_load),
+    usableLoad: row.usable_load == null ? null : Number(row.usable_load),
+    utilization: row.utilization == null ? null : Number(row.utilization),
+    historySampleCount: Number(row.history_sample_count),
+    usedGlobalFallback: row.used_global_fallback === true,
+    recoveryTier: row.recovery_tier ?? null,
+    recoveryMetricVersion: row.recovery_metric_version ?? null,
+    recoveryCivilDate: row.recovery_civil_date == null ? null : asCivilDate(row.recovery_civil_date, 'daily_load_capacities.recovery_civil_date'),
+    recoveryQuality: row.recovery_quality ?? null,
+    recoveryInputFingerprint: row.recovery_input_fingerprint ?? null,
+    inputFingerprint: row.input_fingerprint,
+  });
+}
+
+export function mapCardioLoadBootstrapRow(row: Record<string, unknown>): CardioLoadBootstrap {
+  return parseCardioLoadBootstrap({
+    userId: String(row.user_id),
+    connectionId: String(row.connection_id),
+    metricVersion: row.metric_version,
+    status: row.status,
+    attemptedAt: row.attempted_at == null ? null : asIsoInstant(row.attempted_at, 'cardio_load_bootstraps.attempted_at'),
+    completedAt: row.completed_at == null ? null : asIsoInstant(row.completed_at, 'cardio_load_bootstraps.completed_at'),
+    errorCode: row.error_code == null ? null : String(row.error_code),
   });
 }
 

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 import { editableMealDraftSchema, fromInternalNutrientAmount, toInternalNutrientAmount, type EditableMealDraft } from '../../domain/meal-editor';
 import { parseVisionMeal } from '../../domain/meal-vision';
-import { WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
+import { CARDIO_LOAD_TRIMP_VERSION, WHOOP_STYLE_METRIC_VERSION } from '../../domain/metric-types';
 import type { AccessTokenUpdate, AuthStore, ConnectionExpire, ConnectionRow, DueSyncClaim, LastSuccessfulSyncUpdate, MealSyncStore, NutritionOutboxLease, OauthTransactionRow, ScheduledSyncFinish, ScheduledSyncLease, SessionRow, SyncLeaseRelease } from '../auth/types';
 import {
   HealthMetricsConnectionMismatchError,
@@ -17,6 +17,11 @@ import {
   mapHealthSyncCursorRow,
   mapHealthTimeZoneHistoryRow,
   mapHeartRateMinuteAggregateRow,
+  mapHeartRateMinuteEvidenceRow,
+  mapDailyCardioLoadRow,
+  mapWeeklyCardioBaselineRow,
+  mapDailyLoadCapacityRow,
+  mapCardioLoadBootstrapRow,
   mapMetricResultRow,
   mapSleepGoalRow,
   mapStoredBodyAgeProfileRow,
@@ -25,6 +30,9 @@ import {
   mergeHeartRateMinuteUpsert,
   normalizeDailyVo2Writes,
   parseActivityLevelInterval,
+  parseCardioLoadBootstrap,
+  parseDailyCardioLoad,
+  parseDailyLoadCapacity,
   parseAuthoritativeDailyVo2Replace,
   parseBodyAgeProfileRead,
   parseBodyAgeProfileUpdate,
@@ -38,9 +46,11 @@ import {
   parseHealthSyncCursor,
   parseHealthTimeZoneHistory,
   parseHeartRateMinuteAggregate,
+  parseHeartRateMinuteEvidence,
   parseMetricResult,
   parseObservedHrPeakWrite,
   parseSleepGoal,
+  parseWeeklyCardioBaseline,
   selectNewestDailyVo2,
   SleepGoalConflictError,
   TimeZoneHistoryConflictError,
@@ -1560,6 +1570,26 @@ function storeFor(queryable: Queryable): AuthStore {
       );
       return (result.rowCount ?? 0) === 1;
     },
+    async upsertHeartRateMinuteEvidence(rows) {
+      for (const row of rows.map((item) => parseHeartRateMinuteEvidence(item))) {
+        await queryable.query(
+          `INSERT INTO heart_rate_minute_evidence (user_id, source_family, minute_start_utc, segments)
+           VALUES ($1,$2,$3,$4::jsonb)
+           ON CONFLICT (user_id, source_family, minute_start_utc) DO UPDATE SET segments = EXCLUDED.segments`,
+          [row.userId, row.sourceFamily, new Date(row.minuteStartUtc), JSON.stringify(row.segments)],
+        );
+      }
+    },
+    async listHeartRateMinuteEvidence(input) {
+      const result = await queryable.query(
+        `SELECT * FROM heart_rate_minute_evidence
+         WHERE user_id = $1 AND minute_start_utc >= $2
+           AND ($3::timestamptz IS NULL OR minute_start_utc < $3)
+         ORDER BY minute_start_utc ASC`,
+        [input.userId, new Date(input.fromUtc), input.toUtcExclusive ? new Date(input.toUtcExclusive) : null],
+      );
+      return result.rows.map(mapHeartRateMinuteEvidenceRow);
+    },
     async upsertActivityLevelIntervals(intervals) {
       const parsed = intervals.map((row) => parseActivityLevelInterval(row));
       if (parsed.length === 0) {
@@ -1747,6 +1777,121 @@ function storeFor(queryable: Queryable): AuthStore {
         [input.userId, input.fromCivilDate, input.toCivilDate],
       );
       return result.rows.map(mapDailyCardioRow);
+    },
+    async upsertDailyCardioLoad(row) {
+      const parsed = parseDailyCardioLoad(row);
+      await queryable.query(
+        `INSERT INTO daily_cardio_loads (
+          user_id, civil_date, metric_version, status, daily_load, qualified_seconds, raw_hr_coverage_seconds,
+          unverified_elevated_hr_seconds, awake_coverage_ratio, motion_source, quality_state, rhr_base_bpm, hr_max_est_bpm,
+          hr_max_provenance, input_fingerprint, calculation_context, computed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16::jsonb, now())
+         ON CONFLICT (user_id, civil_date, metric_version) DO UPDATE SET
+           status = EXCLUDED.status, daily_load = EXCLUDED.daily_load, qualified_seconds = EXCLUDED.qualified_seconds,
+           raw_hr_coverage_seconds = EXCLUDED.raw_hr_coverage_seconds, unverified_elevated_hr_seconds = EXCLUDED.unverified_elevated_hr_seconds,
+           awake_coverage_ratio = EXCLUDED.awake_coverage_ratio, motion_source = EXCLUDED.motion_source, quality_state = EXCLUDED.quality_state,
+           rhr_base_bpm = EXCLUDED.rhr_base_bpm, hr_max_est_bpm = EXCLUDED.hr_max_est_bpm, hr_max_provenance = EXCLUDED.hr_max_provenance,
+           input_fingerprint = EXCLUDED.input_fingerprint, calculation_context = EXCLUDED.calculation_context,
+           computed_at = EXCLUDED.computed_at`,
+        [parsed.userId, parsed.civilDate, parsed.metricVersion, parsed.status, parsed.dailyLoad, parsed.qualifiedSeconds,
+          parsed.rawHrCoverageSeconds, parsed.unverifiedElevatedHrSeconds, parsed.awakeCoverageRatio, parsed.motionSource, parsed.qualityState,
+          parsed.rhrBaseBpm, parsed.hrMaxEstBpm, parsed.hrMaxProvenance === null ? null : JSON.stringify(parsed.hrMaxProvenance), parsed.inputFingerprint, JSON.stringify(parsed.calculationContext)],
+      );
+    },
+    async getDailyCardioLoad(input) {
+      const result = await queryable.query(
+        `SELECT * FROM daily_cardio_loads WHERE user_id = $1 AND civil_date = $2 AND metric_version = $3`,
+        [input.userId, input.civilDate, CARDIO_LOAD_TRIMP_VERSION],
+      );
+      return result.rows[0] ? mapDailyCardioLoadRow(result.rows[0]) : undefined;
+    },
+    async listDailyCardioLoads(input) {
+      const result = await queryable.query(
+        `SELECT * FROM daily_cardio_loads
+         WHERE user_id = $1 AND civil_date >= $2 AND civil_date <= $3 AND metric_version = $4
+         ORDER BY civil_date ASC`,
+        [input.userId, input.fromCivilDate, input.toCivilDate, CARDIO_LOAD_TRIMP_VERSION],
+      );
+      return result.rows.map(mapDailyCardioLoadRow);
+    },
+    async upsertWeeklyCardioBaseline(row) {
+      const parsed = parseWeeklyCardioBaseline(row);
+      await queryable.query(
+        `INSERT INTO weekly_cardio_baselines (
+          user_id, week_start, metric_version, status, weekly_load, week_to_date_load, rm4, ewma4, baseline, input_fingerprint, computed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+         ON CONFLICT (user_id, week_start, metric_version) DO UPDATE SET
+           status = EXCLUDED.status, weekly_load = EXCLUDED.weekly_load, week_to_date_load = EXCLUDED.week_to_date_load,
+           rm4 = EXCLUDED.rm4, ewma4 = EXCLUDED.ewma4, baseline = EXCLUDED.baseline,
+           input_fingerprint = EXCLUDED.input_fingerprint, computed_at = EXCLUDED.computed_at`,
+        [parsed.userId, parsed.weekStart, parsed.metricVersion, parsed.status, parsed.weeklyLoad, parsed.weekToDateLoad,
+          parsed.rm4, parsed.ewma4, parsed.baseline, parsed.inputFingerprint],
+      );
+    },
+    async getWeeklyCardioBaseline(input) {
+      const result = await queryable.query(
+        `SELECT * FROM weekly_cardio_baselines WHERE user_id = $1 AND week_start = $2 AND metric_version = $3`,
+        [input.userId, input.weekStart, CARDIO_LOAD_TRIMP_VERSION],
+      );
+      return result.rows[0] ? mapWeeklyCardioBaselineRow(result.rows[0]) : undefined;
+    },
+    async upsertDailyLoadCapacity(row) {
+      const parsed = parseDailyLoadCapacity(row);
+      await queryable.query(
+        `INSERT INTO daily_load_capacities (
+          user_id, civil_date, metric_version, status, actual_load, usable_load, utilization, recovery_tier,
+          history_sample_count, used_global_fallback, recovery_metric_version, recovery_civil_date, recovery_quality,
+          recovery_input_fingerprint, input_fingerprint, computed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+         ON CONFLICT (user_id, civil_date, metric_version) DO UPDATE SET
+           status = EXCLUDED.status, actual_load = EXCLUDED.actual_load, usable_load = EXCLUDED.usable_load,
+           utilization = EXCLUDED.utilization, history_sample_count = EXCLUDED.history_sample_count,
+           used_global_fallback = EXCLUDED.used_global_fallback, recovery_tier = EXCLUDED.recovery_tier,
+           recovery_metric_version = EXCLUDED.recovery_metric_version, recovery_civil_date = EXCLUDED.recovery_civil_date,
+           recovery_quality = EXCLUDED.recovery_quality, recovery_input_fingerprint = EXCLUDED.recovery_input_fingerprint,
+           input_fingerprint = EXCLUDED.input_fingerprint, computed_at = EXCLUDED.computed_at`,
+        [parsed.userId, parsed.civilDate, parsed.metricVersion, parsed.status, parsed.actualLoad, parsed.usableLoad,
+          parsed.utilization, parsed.recoveryTier, parsed.historySampleCount, parsed.usedGlobalFallback,
+          parsed.recoveryMetricVersion, parsed.recoveryCivilDate, parsed.recoveryQuality, parsed.recoveryInputFingerprint, parsed.inputFingerprint],
+      );
+    },
+    async getDailyLoadCapacity(input) {
+      const result = await queryable.query(
+        `SELECT * FROM daily_load_capacities WHERE user_id = $1 AND civil_date = $2 AND metric_version = $3`,
+        [input.userId, input.civilDate, CARDIO_LOAD_TRIMP_VERSION],
+      );
+      return result.rows[0] ? mapDailyLoadCapacityRow(result.rows[0]) : undefined;
+    },
+    async upsertCardioLoadBootstrap(row) {
+      const parsed = parseCardioLoadBootstrap(row);
+      const owner = await queryable.query(
+        'SELECT user_id FROM google_health_connections WHERE id = $1',
+        [parsed.connectionId],
+      );
+      if (owner.rows[0]?.user_id !== parsed.userId) {
+        throw new HealthMetricsConnectionMismatchError();
+      }
+      await queryable.query(
+        `INSERT INTO cardio_load_bootstraps (connection_id, metric_version, status, attempted_at, completed_at, error_code)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (connection_id, metric_version) DO UPDATE SET
+           status = EXCLUDED.status, attempted_at = EXCLUDED.attempted_at,
+           completed_at = EXCLUDED.completed_at, error_code = EXCLUDED.error_code`,
+        [parsed.connectionId, parsed.metricVersion, parsed.status,
+          parsed.attemptedAt ? new Date(parsed.attemptedAt) : null,
+          parsed.completedAt ? new Date(parsed.completedAt) : null,
+          parsed.errorCode],
+      );
+    },
+    async readCardioLoadBootstrap(input) {
+      const result = await queryable.query(
+        `SELECT bootstrap.*, connection.user_id
+         FROM cardio_load_bootstraps AS bootstrap
+         JOIN google_health_connections AS connection ON connection.id = bootstrap.connection_id
+         WHERE bootstrap.connection_id = $1 AND bootstrap.metric_version = $2 AND connection.user_id = $3`,
+        [input.connectionId, CARDIO_LOAD_TRIMP_VERSION, input.userId],
+      );
+      return result.rows[0] ? mapCardioLoadBootstrapRow(result.rows[0]) : undefined;
     },
     async upsertMetricResult(row) {
       const parsed = parseMetricResult(row);
@@ -2142,6 +2287,15 @@ function storeFor(queryable: Queryable): AuthStore {
       await queryable.query('DELETE FROM exercise_intervals WHERE user_id = $1', [userId]);
       await queryable.query('DELETE FROM daily_cardio WHERE user_id = $1', [userId]);
       await queryable.query('DELETE FROM metric_results WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM heart_rate_minute_evidence WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM daily_cardio_loads WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM weekly_cardio_baselines WHERE user_id = $1', [userId]);
+      await queryable.query('DELETE FROM daily_load_capacities WHERE user_id = $1', [userId]);
+      await queryable.query(
+        `DELETE FROM cardio_load_bootstraps
+         WHERE connection_id IN (SELECT id FROM google_health_connections WHERE user_id = $1)`,
+        [userId],
+      );
       await queryable.query(
         `DELETE FROM health_sync_cursors
          WHERE connection_id IN (SELECT id FROM google_health_connections WHERE user_id = $1)`,
