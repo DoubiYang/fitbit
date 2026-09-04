@@ -209,14 +209,23 @@ test('keeps the 426px editorial hierarchy dense enough to reach the meal action 
   assert.match(homepageCss, /\.editorial-action__art\s*\{[^}]*bottom:\s*2\.5rem;/s);
 });
 
-test('uses the selected prototype’s quieter display scale and recovery spacing', () => {
+test('uses the selected prototype’s compact display scale without shrinking the matched recovery ring', () => {
   const homepageCss = readFileSync(new URL('../../app/globals.css', import.meta.url), 'utf8');
+  const html = render();
+  const narrowViewportCss = homepageCss.slice(homepageCss.indexOf('@media (max-width: 22rem)'));
 
-  assert.match(homepageCss, /\.editorial-home__intro h1\s*\{[^}]*font-size:\s*clamp\(2\.85rem, 10vw, 3\.2rem\);[^}]*font-weight:\s*550;[^}]*letter-spacing:\s*-0\.075em;/s);
+  assert.match(homepageCss, /\.editorial-home__profile\s*\{[^}]*width:\s*2rem;[^}]*height:\s*2rem;/s);
+  assert.match(html, /class="editorial-home__profile"[^>]*><svg[^>]*width="17"[^>]*height="17"/);
+  assert.match(homepageCss, /\.editorial-home__intro h1\s*\{[^}]*font-size:\s*clamp\(2\.45rem, 9vw, 2\.5rem\);[^}]*font-weight:\s*550;[^}]*letter-spacing:\s*-0\.075em;/s);
+  assert.match(homepageCss, /\.editorial-home__intro h1 span\s*\{[^}]*font-size:\s*0\.68em;/s);
   assert.match(homepageCss, /\.editorial-recovery__meter\s*\{[^}]*width:\s*7rem;[^}]*margin-left:\s*1rem;/s);
   assert.match(homepageCss, /\.editorial-recovery__copy\s*\{[^}]*padding-left:\s*1\.75rem;/s);
-  assert.match(homepageCss, /\.editorial-recovery__copy h2,[\s\S]*?\.editorial-action h2\s*\{[^}]*font-size:\s*clamp\(1\.58rem, 6vw, 1\.85rem\);[^}]*font-weight:\s*550;/s);
-  assert.match(homepageCss, /\.editorial-strain__score\s*\{[^}]*font-size:\s*clamp\(3rem, 13vw, 3\.85rem\);/s);
+  assert.match(homepageCss, /\.editorial-recovery__score strong\s*\{[^}]*font-size:\s*clamp\(2rem, 7\.8vw, 2\.2rem\);/s);
+  assert.match(homepageCss, /\.editorial-strain h2\s*\{[^}]*font-size:\s*clamp\(1\.4rem, 5\.2vw, 1\.48rem\);/s);
+  assert.match(homepageCss, /\.editorial-strain__score\s*\{[^}]*font-size:\s*clamp\(2\.75rem, 11\.5vw, 3\.25rem\);/s);
+  assert.doesNotMatch(narrowViewportCss, /\.editorial-home__intro h1\s*\{[^}]*font-size:/s);
+  assert.doesNotMatch(narrowViewportCss, /\.editorial-recovery__meter\s*\{[^}]*width:/s);
+  assert.doesNotMatch(narrowViewportCss, /\.editorial-strain__score\s*\{[^}]*font-size:/s);
 });
 
 test('first authenticated load submits the browser IANA zone over the settings endpoint', async () => {

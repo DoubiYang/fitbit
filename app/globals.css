@@ -767,8 +767,8 @@ textarea {
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 2.75rem;
-  height: 2.75rem;
+  width: 2rem;
+  height: 2rem;
   border: 1px solid rgb(47 118 94 / 28%);
   border-radius: 50%;
   color: #4e7a6d;
@@ -800,7 +800,7 @@ textarea {
 .editorial-home__intro h1 {
   color: #102421;
   font-family: Iowan Old Style, Songti SC, STSong, serif;
-  font-size: clamp(2.85rem, 10vw, 3.2rem);
+  font-size: clamp(2.45rem, 9vw, 2.5rem);
   font-weight: 550;
   letter-spacing: -0.075em;
   line-height: 0.94;
@@ -809,7 +809,7 @@ textarea {
 .editorial-home__intro h1 span {
   color: #5f7b73;
   font-family: inherit;
-  font-size: 0.55em;
+  font-size: 0.68em;
   font-weight: 550;
   letter-spacing: -0.045em;
   white-space: nowrap;
@@ -914,7 +914,7 @@ textarea {
 }
 
 .editorial-recovery__score strong {
-  font-size: clamp(2.2rem, 9vw, 2.55rem);
+  font-size: clamp(2rem, 7.8vw, 2.2rem);
   letter-spacing: -0.075em;
   line-height: 0.88;
 }
@@ -1009,7 +1009,7 @@ textarea {
 }
 
 .editorial-strain h2 {
-  font-size: clamp(1.48rem, 5.6vw, 1.72rem);
+  font-size: clamp(1.4rem, 5.2vw, 1.48rem);
 }
 
 .editorial-strain__summary > div:last-child {
@@ -1028,7 +1028,7 @@ textarea {
 
 .editorial-strain__score {
   color: #19312c;
-  font-size: clamp(3rem, 13vw, 3.85rem);
+  font-size: clamp(2.75rem, 11.5vw, 3.25rem);
   font-weight: 750;
   letter-spacing: -0.08em;
   line-height: 0.84;
@@ -1229,9 +1229,6 @@ textarea {
 }
 
 @media (max-width: 22rem) {
-  .editorial-home__intro h1 { font-size: 3rem; }
   .editorial-recovery { gap: 0.8rem; }
-  .editorial-recovery__meter { width: 8rem; }
   .editorial-recovery__copy { padding-left: 0.8rem; }
-  .editorial-strain__score { font-size: 3rem; }
 }

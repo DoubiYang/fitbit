@@ -87,9 +87,9 @@ export function EditorialHomepage({
         </div>
         {variant === 'oauth' ? (
           <a className="editorial-home__profile" href="/rhythm/account" aria-label="打开账户">
-            <UserRound aria-hidden="true" size={22} strokeWidth={1.7} />
+            <UserRound aria-hidden="true" size={17} strokeWidth={1.7} />
           </a>
-        ) : <span className="editorial-home__profile editorial-home__profile--demo" aria-label="演示账户"><UserRound aria-hidden="true" size={22} strokeWidth={1.7} /></span>}
+        ) : <span className="editorial-home__profile editorial-home__profile--demo" aria-label="演示账户"><UserRound aria-hidden="true" size={17} strokeWidth={1.7} /></span>}
       </header>
 
       <section className="editorial-home__intro" aria-labelledby="today-heading">

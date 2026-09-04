@@ -14,15 +14,16 @@
 - Runtime: `fitbit-app-1` was rebuilt from the current source and reported `healthy` before capture.
 - Primary interactions: the body-age `?` opened the labelled dialog `这个估算从哪里来？`, with a working close button. Account, meal CTA, and all three bottom-navigation destinations expose their intended links; no OAuth, sync, or health record was changed.
 - Console check: no warnings or errors.
-- Latest visual check: after the typography build was recreated, the authenticated Chrome page was refreshed from the top. The brand, date row, meter/copy pairing, load hierarchy, observed-only trace, and action card were all visible without clipping; the console remained free of warnings and errors.
+- Latest visual check: after the typography and account-entry build was recreated, the authenticated Chrome page was hard-refreshed from the top. The brand, date row, meter/copy pairing, compact account entry, load hierarchy, observed-only trace, and action card were all visible without clipping; the console remained free of warnings and errors.
 
 ## Final comparison
 
-- Typography and hierarchy: passed. Brand/tagline, oversized editorial date, compact recovery reading, and large `x.x / 21` load numeral retain the prototype’s ordering and contrast without copying its health claims.
+- Typography and hierarchy: passed. Brand/tagline, editorial date, compact recovery reading, and `x.x / 21` load numeral use the source’s measured compact scale without copying its health claims.
 - Spacing and layout rhythm: passed. The recovery/divider/load/chart/action stack now reaches the meal CTA in the first 426 × 905 view; the CTA ends above the fixed bottom navigation rather than being covered by it.
 - Colors and assets: passed. Warm-white canvas, deep green controls, muted sage surfaces, thin dividers, Lucide icons, and the single right-aligned botanical asset match the selected visual language.
 - Data honesty: passed. The live page shows its actual `正在校准` recovery state, actual observed 5.4/21 cumulative trajectory, and `待补充` body-age state. It does not copy the prototype’s recovery, strain, exercise advice, or forecast.
 - Intentional source difference: the source’s short sample recommendation is replaced with the live data-quality action, which can wrap to several lines. This is required to avoid inventing a recommendation while the live quality is provisional.
+- Account entry: passed for the selected prototype. It uses the same compact outlined-person treatment and routes to the real account page. It is deliberately not shown as a personal Google photo: the current account schema and OAuth identity response do not store one. Adding a real photo would require an explicit identity/profile-data change and user reauthorization.
 
 ## Comparison history
 
@@ -31,6 +32,7 @@
 3. 2026-09-03 — A live record had an in-day missing interval. The final Chrome capture shows a muted dashed bridge plus `数据缺口`; the visible text states that it was not counted as load. Console check remained free of warnings and errors.
 4. 2026-09-03 — The delayed-input policy was changed to a 24-hour heart-rate/activity-level reconciliation window. One protected local sync completed (`claimed=1`, `succeeded=1`); each of the 11:30 and 11:45 UTC+8 buckets then contained 15 eligible persisted aggregate minutes. A refreshed authenticated Chrome capture showed 6.4/21, observed through 17:41, no bridge at that former in-day gap, and no console warnings/errors.
 5. 2026-09-03 — Typography/spacing was compared against the close-up source. The previous display type, recovery ring, and strain numeral were too large/heavy for the selected editorial rhythm. The title/date/section scales and weights were reduced; the recovery meter is now 112px with its centre preserved; the score, divider spacing, and recovery copy inset were tuned. The rebuilt, refreshed authenticated capture has no P0/P1/P2 fidelity issue.
+6. 2026-09-03 — A further source comparison found that the account entry was oversized and the display scale still read too large in the user capture. The account control was reduced from 44px to 32px and its outline glyph from 22px to 17px; the date, recovery numeral, section title, and load numeral use the revised compact scale. The app was rebuilt with the local image, recreated, hard-refreshed in authenticated Chrome, and checked with no console warnings/errors.
 
 ## Gap diagnosis
 
