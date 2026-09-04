@@ -27,17 +27,17 @@
 - Create: `tests/domain/cardio-load-trimp.test.ts`
 - Modify: `src/domain/metric-types.ts`
 
-- [ ] **Step 1: 写 TRIMP 与资格交集的失败测试**
+- [x] **Step 1: 写 TRIMP 与资格交集的失败测试**
 
   在 `tests/domain/cardio-load-trimp.test.ts` 定义最小派生 BPM 片段、active/exercise、sleep 测试夹具。断言：30 秒交集只贡献半分钟；29.999 秒不贡献；交集内的 BPM 而非整分钟平均值决定 HRR；睡眠仅由 exercise 覆盖时可累计；阈值 30% HRR、性别常数、非线性增长、`HRmax <= RHR` 均有确定结果。
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
   Run: `npm test -- tests/domain/cardio-load-trimp.test.ts`
 
   Expected: FAIL，因为 `cardio-load-trimp` 尚不存在。
 
-- [ ] **Step 3: 实现最小纯函数**
+- [x] **Step 3: 实现最小纯函数**
 
   在 `src/domain/cardio-load-trimp.ts` 实现并导出：
 
@@ -50,13 +50,13 @@
 
   每个结果必须带稳定、机器可读的 `status`/`reason`、输入数量及指标版本。使用内部区间 union/clip 辅助函数，禁止依赖 Next 或数据库。
 
-- [ ] **Step 4: 运行领域测试**
+- [x] **Step 4: 运行领域测试**
 
   Run: `npm test -- tests/domain/cardio-load-trimp.test.ts`
 
   Expected: PASS。
 
-- [ ] **Step 5: 扩充边界测试并提交**
+- [x] **Step 5: 扩充边界测试并提交**
 
   增加相同分位边界、样本少于 7、少于 28 历史、目标日为 provisional/unavailable/过期时不适配、可靠低恢复分数时进入 low tier、low tier P80 不低于其他层时不强制下调、低覆盖日、漏戴周、一次高周与持续高周用例；运行该测试后提交：
 

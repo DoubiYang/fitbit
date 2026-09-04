@@ -1,5 +1,6 @@
 export const METRIC_VERSION = 'p1-v1';
 export const WHOOP_STYLE_METRIC_VERSION = 'whoop-style-v2';
+export const CARDIO_LOAD_TRIMP_VERSION = 'cardio-load-trimp-v3';
 
 export type MetricQuality = 'high' | 'medium' | 'low' | 'calibrating';
 export type RecoveryQuality = 'unavailable' | 'provisional' | 'medium' | 'high';
