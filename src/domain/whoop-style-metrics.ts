@@ -677,12 +677,15 @@ export function metricsAffectedByStrainRecompute(strainDate: string): {
   strainDate: string;
   sleepPerformanceDate: string;
   recoveryDate: string;
+  /** The v3 replay must run from the changed daily input through the retained window. */
+  cardioLoadFromDate: string;
 } {
   const nextDate = addCivilDays(strainDate, 1);
   return {
     strainDate,
     sleepPerformanceDate: nextDate,
     recoveryDate: nextDate,
+    cardioLoadFromDate: strainDate,
   };
 }
 

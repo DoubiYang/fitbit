@@ -84,6 +84,28 @@ test('requires HRmax estimate and versioned peak provenance to agree', () => {
   }));
 });
 
+test('allows utilization above 100 when actual load exceeds the personal reference', () => {
+  const capacity = parseDailyLoadCapacity({
+    userId,
+    civilDate,
+    metricVersion: CARDIO_LOAD_TRIMP_VERSION,
+    status: 'scored',
+    actualLoad: 24,
+    usableLoad: 20,
+    utilization: 120,
+    historySampleCount: 28,
+    usedGlobalFallback: false,
+    recoveryTier: 'middle',
+    recoveryMetricVersion: 'whoop-style-v2',
+    recoveryCivilDate: civilDate,
+    recoveryQuality: 'high',
+    recoveryInputFingerprint: `sha256:${'f'.repeat(64)}`,
+    inputFingerprint: `sha256:${'e'.repeat(64)}`,
+  });
+
+  assert.equal(capacity.utilization, 120);
+});
+
 test('stores only normalized per-minute derived BPM evidence', async () => {
   const store = createMemoryStore();
   await store.users.insert(userId);

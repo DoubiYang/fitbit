@@ -23,7 +23,7 @@ import { emptyUserHealthRecords, type UserHealthRecords } from '../../src/server
 const userId = 'u1';
 const connectionId = 'c1';
 const NOW = new Date('2026-08-24T12:00:00.000Z');
-const INITIAL_HR_FROM = '2026-07-18T12:00:00.000Z';
+const INITIAL_HR_FROM = '2026-07-11T12:00:00.000Z';
 const ZONES = {
   LIGHT: { minBeatsPerMinute: '97', maxBeatsPerMinute: '116' },
   MODERATE: { minBeatsPerMinute: '117', maxBeatsPerMinute: '136' },
@@ -468,6 +468,55 @@ test('a valid persisted heart-rate minute raises the historical observed peak on
   });
 });
 
+test('heart-rate sync persists derived minute evidence without the Google point payload', async () => {
+  const store = await seedStore();
+  const api = createFakeApi({ 'heart-rate': [[hrPoint('2026-08-24T11:59:00.000Z', 176)]] });
+
+  await runSync(store, api, { dataTypes: ['heart-rate'] });
+
+  const evidence = await store.healthMetrics.listHeartRateMinuteEvidence({
+    userId,
+    fromUtc: '2026-08-24T11:59:00.000Z',
+    toUtcExclusive: '2026-08-24T12:00:00.000Z',
+  });
+  assert.deepEqual(evidence, [{
+    userId,
+    sourceFamily: 'google-wearables',
+    minuteStartUtc: '2026-08-24T11:59:00.000Z',
+    segments: [{ startOffsetMs: 0, endOffsetMs: 60_000, bpm: 176 }],
+  }]);
+  assert.equal(containsRawPoint(evidence), false);
+});
+
+test('sync replays persisted evidence into v3 TRIMP only after v2 recovery inputs are refreshed', async () => {
+  const store = await seedStore({ timeZone: 'UTC' });
+  await store.healthMetrics.updateBodyAgeProfile({ userId, birthDate: null, referenceSex: 'male' });
+  const dailyRhr = Array.from({ length: 7 }, (_, index) => {
+    const date = addCivilDays('2026-08-17', index);
+    return parseDailyRhr({ userId, source: 'google_health', sourceRecordId: `rhr-${date}`, date, valueBpm: 55 });
+  });
+  const api = createFakeApi({
+    'heart-rate': [[hrPoint('2026-08-24T11:59:00.000Z', 176)]],
+    'activity-level': [[activityPoint('2026-08-24T11:59:00.000Z', 'LIGHTLY_ACTIVE')]],
+  });
+
+  await runSync(store, api, {
+    dataTypes: ['heart-rate', 'activity-level'],
+    records: { ...emptyUserHealthRecords(), dailyRhr },
+  });
+
+  const load = await store.healthMetrics.getDailyCardioLoad({ userId, civilDate: '2026-08-24' });
+  assert.equal(load?.status, 'scored');
+  assert.ok((load?.dailyLoad ?? 0) > 0);
+  const recovery = await store.healthMetrics.getMetricResult({
+    userId,
+    civilDate: '2026-08-24',
+    metricName: 'recovery',
+    metricVersion: WHOOP_STYLE_METRIC_VERSION,
+  });
+  assert.ok(recovery);
+});
+
 test('a lower heart-rate minute does not rewrite observed-peak history', async () => {
   const store = await seedStore();
   await store.healthMetrics.recordObservedHrPeak({ userId, observedHrPeakBpm: 180, observedAt: '2026-08-20T11:00:00.000Z' });
@@ -506,7 +555,7 @@ test('a body-age recompute failure is isolated from cardio metrics and cursor up
   assert.ok(await store.healthMetrics.getDailyCardio({ userId, civilDate: '2026-08-24' }));
 });
 
-test('initial raw HR and activity-level windows are now minus 37 days through now', async () => {
+test('initial raw HR and activity-level windows cover a 42-day local backfill envelope', async () => {
   const store = await seedStore();
   const api = createFakeApi();
   await runSync(store, api);
@@ -522,21 +571,21 @@ test('initial raw HR and activity-level windows are now minus 37 days through no
   assert.equal(requestFor(api.requests, 'time-in-heart-rate-zone').pageSize, HEALTH_HIGH_VOLUME_PAGE_SIZE);
 });
 
-test('initial daily zone window is UTC date minus 36 days to plus 1 day exclusive, not Asia/Shanghai', async () => {
+test('initial daily zone window covers the 42-day UTC range, not Asia/Shanghai', async () => {
   const store = await seedStore();
   const api = createFakeApi();
   const now = new Date('2026-08-23T23:00:00.000Z');
   await runSync(store, api, { now });
 
   const zones = filterBounds(requestFor(api.requests, 'daily-heart-rate-zones').filter);
-  assert.equal(zones.from, '2026-07-18');
+  assert.equal(zones.from, '2026-07-11');
   assert.equal(zones.untilExclusive, '2026-08-24');
   assert.notEqual(zones.from, '2026-07-19');
   assert.notEqual(zones.untilExclusive, '2026-08-25');
   assert.equal(requestFor(api.requests, 'daily-heart-rate-zones').filter.includes('Asia/Shanghai'), false);
 });
 
-test('initial physical window covers a 35 local-day UTC+14 boundary', async () => {
+test('initial physical window covers a 42 local-day UTC+14 boundary', async () => {
   const store = await seedStore();
   const api = createFakeApi({
     'heart-rate': [[hrPoint(INITIAL_HR_FROM, 72, '50400s')]],
@@ -545,9 +594,9 @@ test('initial physical window covers a 35 local-day UTC+14 boundary', async () =
 
   const heartRate = filterBounds(requestFor(api.requests, 'heart-rate').filter);
   assert.equal(heartRate.from, INITIAL_HR_FROM);
-  const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-07-19' });
+  const minutes = await store.healthMetrics.listMinutesByCivilDate({ userId, civilDate: '2026-07-12' });
   assert.ok(minutes.some((minute) => minute.utcOffsetMinutes === 840 && minute.minuteStartUtc === INITIAL_HR_FROM));
-  assert.equal(minutes[0]?.civilDate, '2026-07-19');
+  assert.equal(minutes[0]?.civilDate, '2026-07-12');
 });
 
 test('incremental HR and activity-level reconcile the preceding 24 hours while exercise keeps its civil overlap', async () => {

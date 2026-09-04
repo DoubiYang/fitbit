@@ -3,10 +3,12 @@ import {
   parseDailyHeartRateZones,
   parseDailyTimeInZone,
   parseExerciseInterval,
+  parseHeartRateMinuteEvidence,
   type ActivityLevelInterval,
   type DailyHeartRateZones,
   type DailyTimeInZone,
   type ExerciseInterval,
+  type HeartRateMinuteEvidence,
   type HeartRateSample,
 } from '../../domain/cardio-records';
 import { aggregateHeartRateMinutes, type AggregatedHeartRateMinute } from '../../domain/whoop-style-metrics';
@@ -88,6 +90,71 @@ export function mapHeartRatePageToMinutes(input: {
     lookaheadSample: input.lookaheadSample,
     closeAt: input.closeAt,
   });
+}
+
+function derivedEvidenceForMinute(minute: AggregatedHeartRateMinute): HeartRateMinuteEvidence | undefined {
+  const minuteStartMs = Date.parse(minute.minuteStartUtc);
+  if (!Number.isFinite(minuteStartMs)) {
+    return undefined;
+  }
+  const minuteEndMs = minuteStartMs + 60_000;
+  const source = minute.coverageIntervals.flatMap((interval, index) => {
+    const startMs = Math.max(minuteStartMs, Date.parse(interval.start));
+    const endMs = Math.min(minuteEndMs, Date.parse(interval.end));
+    return Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
+      ? [{ startMs, endMs, bpm: interval.bpm, index }]
+      : [];
+  });
+  const boundaries = [...new Set(source.flatMap((segment) => [segment.startMs, segment.endMs]))]
+    .sort((left, right) => left - right);
+  const segments: Array<{ startOffsetMs: number; endOffsetMs: number; bpm: number }> = [];
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const startMs = boundaries[index]!;
+    const endMs = boundaries[index + 1]!;
+    const selected = source.find((segment) => segment.startMs <= startMs && segment.endMs >= endMs);
+    if (!selected) continue;
+    const previous = segments.at(-1);
+    const startOffsetMs = startMs - minuteStartMs;
+    const endOffsetMs = endMs - minuteStartMs;
+    if (previous && previous.endOffsetMs === startOffsetMs && previous.bpm === selected.bpm) {
+      previous.endOffsetMs = endOffsetMs;
+    } else {
+      segments.push({ startOffsetMs, endOffsetMs, bpm: selected.bpm });
+    }
+  }
+  if (segments.length === 0) {
+    return undefined;
+  }
+  return parseHeartRateMinuteEvidence({
+    userId: minute.userId,
+    sourceFamily: minute.sourceFamily,
+    minuteStartUtc: minute.minuteStartUtc,
+    segments,
+  });
+}
+
+export function mapHeartRateMinutesToEvidence(minutes: AggregatedHeartRateMinute[]): HeartRateMinuteEvidence[] {
+  return minutes.flatMap((minute) => {
+    const mapped = derivedEvidenceForMinute(minute);
+    return mapped ? [mapped] : [];
+  });
+}
+
+/**
+ * Keeps the legacy minute aggregate intact while deriving the only v3
+ * heart-rate evidence that is persisted: clipped offsets and BPM values.
+ */
+export function mapHeartRatePage(input: {
+  userId: string;
+  points: GoogleDataPoint[];
+  lookaheadSample?: HeartRateSample;
+  closeAt?: string;
+}): { minutes: AggregatedHeartRateMinute[]; evidence: HeartRateMinuteEvidence[] } {
+  const minutes = mapHeartRatePageToMinutes(input);
+  return {
+    minutes,
+    evidence: mapHeartRateMinutesToEvidence(minutes),
+  };
 }
 
 export function mapActivityLevelIntervals(points: GoogleDataPoint[], userId: string): ActivityLevelInterval[] {

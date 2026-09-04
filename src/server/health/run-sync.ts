@@ -2,6 +2,7 @@ import type { OAuthConfig } from '../config/env';
 import type { AuthStore, ConnectionRow, ScheduledSyncLease } from '../auth/types';
 import { createGoogleTokenRefresher, resolveAccessToken, TokenRefreshError, type TokenRefresher } from './access-token';
 import {
+  connectionNextSyncAt,
   initialCivilBackfillRange,
   isUnsyncableError,
   scheduleTypeFailure,
@@ -10,10 +11,19 @@ import {
   syncCardioConnection,
   type LoadHealthRecords,
 } from './cardio-sync';
+import { parseCardioLoadBootstrap } from '../../domain/cardio-records';
+import { CARDIO_LOAD_TRIMP_VERSION } from '../../domain/metric-types';
+import type { HealthSyncDataType } from './cardio-store';
 import { createHealthApiClient, type HealthApiClient } from './health-api';
 import { GoogleHealthProvider, type SnapshotRecordDataType } from './google-health-provider';
 import { emptyUserHealthRecords, type HealthDateRange, type UserHealthRecords } from './provider';
 import { loadHealthSnapshot, saveHealthSnapshot, type HealthSnapshot } from './snapshot-store';
+
+const TRIMP_BOOTSTRAP_CARDIO_TYPES = ['heart-rate', 'activity-level'] as const satisfies readonly HealthSyncDataType[];
+
+function bootstrapErrorCode(error: unknown): string {
+  return error instanceof Error && /health api 429/i.test(error.message) ? 'rate_limited' : 'sync_failed';
+}
 
 export async function syncUserConnection(input: {
   config: OAuthConfig;
@@ -30,7 +40,7 @@ export async function syncUserConnection(input: {
   scheduledRun?: ScheduledSyncLease & { signal: AbortSignal };
 }): Promise<boolean> {
   const now = input.now ?? new Date();
-  const rangeDays = input.rangeDays ?? 35;
+  const rangeDays = input.rangeDays ?? 42;
   const { from, to } = initialCivilBackfillRange(now, rangeDays);
   const persistSnapshot =
     input.persistSnapshot ??
@@ -64,6 +74,25 @@ export async function syncUserConnection(input: {
       return write(inner);
     });
   };
+  const existingBootstrap = await input.store.healthMetrics.readCardioLoadBootstrap({
+    userId: connection.userId,
+    connectionId: connection.id,
+  });
+  const needsTrimpBootstrap = existingBootstrap?.status !== 'completed';
+  const writeBootstrap = async (status: 'pending' | 'failed' | 'completed', errorCode: string | null) => {
+    await scheduledWrite((store) => store.healthMetrics.upsertCardioLoadBootstrap(parseCardioLoadBootstrap({
+      userId: connection.userId,
+      connectionId: connection.id,
+      metricVersion: CARDIO_LOAD_TRIMP_VERSION,
+      status,
+      attemptedAt: now.toISOString(),
+      completedAt: status === 'completed' ? now.toISOString() : null,
+      errorCode,
+    })));
+  };
+  if (needsTrimpBootstrap) {
+    await writeBootstrap('pending', null);
+  }
 
   const api = input.api ?? createHealthApiClient();
   const refresher = input.refresher ?? createGoogleTokenRefresher(input.config);
@@ -86,14 +115,22 @@ export async function syncUserConnection(input: {
   let snapshotAffectedDates: string[] = [];
   const dueSnapshotTypes: SnapshotRecordDataType[] = [];
   let hasIncompleteSnapshotBackfill = false;
-  for (const dataType of SNAPSHOT_SYNC_TYPES) {
-    throwIfAborted();
-    const cursor = await input.store.healthMetrics.readCursor({ connectionId: connection.id, dataType });
-    if (!cursor?.nextAttemptAt || cursor.nextAttemptAt.getTime() <= now.getTime()) {
-      dueSnapshotTypes.push(dataType);
-      hasIncompleteSnapshotBackfill ||= !cursor?.successfulWatermark;
+  if (needsTrimpBootstrap) {
+    dueSnapshotTypes.push(...SNAPSHOT_SYNC_TYPES);
+    hasIncompleteSnapshotBackfill = true;
+  } else {
+    for (const dataType of SNAPSHOT_SYNC_TYPES) {
+      throwIfAborted();
+      const cursor = await input.store.healthMetrics.readCursor({ connectionId: connection.id, dataType });
+      if (!cursor?.nextAttemptAt || cursor.nextAttemptAt.getTime() <= now.getTime()) {
+        dueSnapshotTypes.push(dataType);
+        hasIncompleteSnapshotBackfill ||= !cursor?.successfulWatermark;
+      }
     }
   }
+  let snapshotSucceeded: SnapshotRecordDataType[] = [];
+  let snapshotFailure: unknown;
+  let snapshotFailures: Array<{ dataType: SnapshotRecordDataType; error: unknown }> = [];
   try {
     if (dueSnapshotTypes.length > 0) {
       const snapshot = await provider.syncRecords(
@@ -101,10 +138,20 @@ export async function syncUserConnection(input: {
         { from, to },
         dueSnapshotTypes,
         hasIncompleteSnapshotBackfill,
+        !needsTrimpBootstrap,
       );
       snapshotRecords = snapshot.records;
       snapshotAffectedDates = snapshot.affectedDates;
+      snapshotSucceeded = snapshot.succeededDataTypes;
+      snapshotFailures = snapshot.failures.flatMap((failure) =>
+        SNAPSHOT_SYNC_TYPES.includes(failure.dataType as SnapshotRecordDataType)
+          ? [{ dataType: failure.dataType as SnapshotRecordDataType, error: failure.error }]
+          : [],
+      );
       for (const dataType of snapshot.succeededDataTypes) {
+        if (needsTrimpBootstrap) {
+          continue;
+        }
         await scheduledWrite((store) => store.healthMetrics.updateCursor({
           connectionId: connection.id,
           dataType,
@@ -126,11 +173,15 @@ export async function syncUserConnection(input: {
       }
     }
   } catch (error) {
+    snapshotFailure = error;
     const current = await input.store.connections.findByUserId(connection.userId);
     if (!current || (current.status !== 'active' && current.status !== 'partial')) {
       return false;
     }
     if (error instanceof TokenRefreshError && error.isAuthFailure) {
+      if (needsTrimpBootstrap) {
+        await writeBootstrap('failed', bootstrapErrorCode(error));
+      }
       throw error;
     }
     if (error instanceof Error && /connection no longer syncable/i.test(error.message)) {
@@ -151,14 +202,22 @@ export async function syncUserConnection(input: {
   if (latest.status !== 'active' && latest.status !== 'partial') {
     return false;
   }
-  const accessToken = await resolveAccessToken({
-    config: input.config,
-    store: input.store,
-    connection: latest,
-    refresher,
-    now,
-    lease: input.scheduledRun,
-  });
+  let accessToken: string;
+  try {
+    accessToken = await resolveAccessToken({
+      config: input.config,
+      store: input.store,
+      connection: latest,
+      refresher,
+      now,
+      lease: input.scheduledRun,
+    });
+  } catch (error) {
+    if (needsTrimpBootstrap) {
+      await writeBootstrap('failed', bootstrapErrorCode(error));
+    }
+    throw error;
+  }
   const loadRecords: LoadHealthRecords =
     input.loadRecords ??
     (async (userId) => {
@@ -178,8 +237,10 @@ export async function syncUserConnection(input: {
       now,
       loadRecords,
       loadSnapshot,
-      extraDates: snapshotAffectedDates,
+      extraDates: needsTrimpBootstrap ? [from, ...snapshotAffectedDates] : snapshotAffectedDates,
       lastSuccessfulSyncAt,
+      forceInitialBackfillDataTypes: needsTrimpBootstrap ? TRIMP_BOOTSTRAP_CARDIO_TYPES : undefined,
+      deferSuccessCursorDataTypes: needsTrimpBootstrap ? TRIMP_BOOTSTRAP_CARDIO_TYPES : undefined,
       lease: input.scheduledRun,
       signal: input.scheduledRun?.signal,
     });
@@ -187,13 +248,66 @@ export async function syncUserConnection(input: {
     if (isUnsyncableError(error)) {
       return false;
     }
+    if (needsTrimpBootstrap) {
+      await writeBootstrap('failed', bootstrapErrorCode(error));
+    }
     throw error;
+  }
+  if (needsTrimpBootstrap) {
+    const snapshotComplete = SNAPSHOT_SYNC_TYPES.every((dataType) => snapshotSucceeded.includes(dataType));
+    const cardioComplete = TRIMP_BOOTSTRAP_CARDIO_TYPES.every((dataType) => cardio.succeededDataTypes.includes(dataType))
+      && !TRIMP_BOOTSTRAP_CARDIO_TYPES.some((dataType) => cardio.failedDataTypes.includes(dataType));
+    if (snapshotComplete && cardioComplete) {
+      await scheduledWrite(async (store) => {
+        for (const dataType of SNAPSHOT_SYNC_TYPES) {
+          await store.healthMetrics.updateCursor({
+            connectionId: connection.id,
+            dataType,
+            ...successCursor(now),
+          });
+        }
+        for (const dataType of TRIMP_BOOTSTRAP_CARDIO_TYPES) {
+          await store.healthMetrics.updateCursor({
+            connectionId: connection.id,
+            dataType,
+            ...successCursor(now),
+          });
+        }
+        const current = await store.connections.findByUserId(connection.userId);
+        if (!current || (current.status !== 'active' && current.status !== 'partial')) {
+          throw new Error('connection no longer syncable');
+        }
+        const stamped = await store.connections.markLastSuccessfulSyncIfSyncable({
+          id: current.id,
+          userId: current.userId,
+          syncedAt: now,
+          lease: input.scheduledRun,
+        });
+        if (!stamped) {
+          throw new Error('connection no longer syncable');
+        }
+        await store.healthMetrics.upsertCardioLoadBootstrap(parseCardioLoadBootstrap({
+          userId: connection.userId,
+          connectionId: connection.id,
+          metricVersion: CARDIO_LOAD_TRIMP_VERSION,
+          status: 'completed',
+          attemptedAt: now.toISOString(),
+          completedAt: now.toISOString(),
+          errorCode: null,
+        }));
+      });
+    } else {
+      await writeBootstrap('failed', bootstrapErrorCode(snapshotFailure ?? snapshotFailures[0]?.error));
+    }
   }
   const after = await input.store.connections.findByUserId(connection.userId);
   if (!input.scheduledRun && after && (after.status === 'active' || after.status === 'partial')) {
     await input.store.connections.update({
       ...after,
-      nextSyncAt: cardio.nextSyncAt,
+      nextSyncAt: connectionNextSyncAt(
+        await input.store.healthMetrics.listCursors({ connectionId: connection.id }),
+        now,
+      ),
     });
   }
   return true;

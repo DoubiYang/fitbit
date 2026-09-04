@@ -130,21 +130,21 @@
 - Create: `tests/server/cardio-load-recompute.test.ts`
 - Modify: `tests/server/health-provider.test.ts`
 
-- [ ] **Step 1: 写同步/重算失败测试**
+- [x] **Step 1: 写同步/重算失败测试**
 
   覆盖：75 秒 hold 按分钟裁剪成派生 evidence；后到的 activity/sleep interval 能利用 evidence 重算，且不保存 API 原始 point；HRmax 候选**仅**来自 `google-wearables`、非睡眠、分钟覆盖 ≥30 秒、`sampleCount >= 1`、100–230 bpm 的历史峰值（不要求动作证据），并保存峰值 provenance；新高的合格 HRmax 触发所有保留 v3 日/周/容量重算；HRV/RHR/睡眠/sleep goal/Recovery 输入改变从最早影响日一路级联到当前窗口；初次 HR/activity 回填为至少 42 个当地日；已有 cursor 的连接也会因 v3 bootstrap 标记执行一次 42 日强制回拉，且 snapshot 保留同步提升到 42 日。
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
   Run: `npm test -- tests/server/cardio-map.test.ts tests/server/cardio-sync.test.ts tests/server/cardio-load-recompute.test.ts`
 
   Expected: FAIL，因为 evidence 写入与 v3 replayer 尚未接入同步。
 
-- [ ] **Step 3: 从现有 75 秒 hold 产出派生 evidence**
+- [x] **Step 3: 从现有 75 秒 hold 产出派生 evidence**
 
   保持 `aggregateHeartRateMinutes` 的 v2 行为不变，同时从其已有 `coverageIntervals` 输出按分钟裁剪、归一化的 v3 evidence。`cardio-map.ts` 返回 minute aggregate 与 evidence 的成对结果；`cardio-sync.ts` 在同一事务/lease 围栏内写入两者。任何名为 raw sample 的公开 store API 均不得新增。
 
-- [ ] **Step 4: 实现 v3 replayer**
+- [x] **Step 4: 实现 v3 replayer**
 
   在 `cardio-load-recompute.ts`：
 
@@ -156,11 +156,11 @@
 
   复用 `recomputeAffectedDays` 的 v2 重算顺序；v3 仅在 v2 Recovery 已更新后读取它。将 `metricsAffectedByStrainRecompute` 扩为能返回 v3 失效起点的显式 helper，而不是使用 `+28 calendar days` 猜测范围。
 
-- [ ] **Step 5: 扩展回填、bootstrap 和时区重索引**
+- [x] **Step 5: 扩展回填、bootstrap 和时区重索引**
 
   初次同步把 HR/activity 起点扩至 ≥42 当地日的足够 UTC 包络，并把 `HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS` 提升至 42。为每个已连接用户增加可持久化、一次性的 `cardio-load-trimp-v3` bootstrap 状态：即使已有成功 cursor，也强制回拉 42 日所需的 HR/activity/sleep/RHR/HRV；启动前写 `pending`，失败写 `failed` 并保留错误码以便重试，只有全部核心查询、snapshot 持久化及 replayer 在同一 lease/事务围栏成功后写 `completed`。失败不能推进成功 watermark 或清空旧 snapshot。时区修改、sleep/recovery revision 和 HRmax 更新都调用 v3 replayer。更新已有 35 日断言、原始数据不持久化断言，使其允许派生 evidence、仍禁止 Google response/point metadata。
 
-- [ ] **Step 6: 运行同步测试并提交**
+- [x] **Step 6: 运行同步测试并提交**
 
   Run: `npm test -- tests/server/cardio-map.test.ts tests/server/cardio-sync.test.ts tests/server/cardio-load-recompute.test.ts`
 

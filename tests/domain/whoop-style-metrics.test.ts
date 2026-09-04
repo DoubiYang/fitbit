@@ -491,6 +491,7 @@ test('complete previous-day strain cascades into the next local day sleep need a
     strainDate: '2026-08-21',
     sleepPerformanceDate: date,
     recoveryDate: date,
+    cardioLoadFromDate: '2026-08-21',
   });
 
   const goal = parseSleepGoal({ userId, goalMinutes: 420, effectiveCivilDate: '2026-08-01' });

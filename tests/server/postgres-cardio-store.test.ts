@@ -35,6 +35,8 @@ const provenanceMigrationPath = new URL('../../db/migrations/013_homepage_strain
 const provenanceMigration = existsSync(provenanceMigrationPath) ? readFileSync(provenanceMigrationPath, 'utf8') : '';
 const cardioLoadMigrationPath = new URL('../../db/migrations/014_cardio_load_trimp_v3.sql', import.meta.url);
 const cardioLoadMigration = existsSync(cardioLoadMigrationPath) ? readFileSync(cardioLoadMigrationPath, 'utf8') : '';
+const utilizationMigrationPath = new URL('../../db/migrations/015_cardio_load_utilization.sql', import.meta.url);
+const utilizationMigration = existsSync(utilizationMigrationPath) ? readFileSync(utilizationMigrationPath, 'utf8') : '';
 
 const zones = {
   LIGHT: { minBeatsPerMinute: 97, maxBeatsPerMinute: 116 },
@@ -155,6 +157,12 @@ test('migration 014 adds isolated v3 tables without changing v2 constraints', ()
   assert.match(cardioLoadMigration, /REFERENCES users \(id\) ON DELETE CASCADE/u);
   assert.match(cardioLoadMigration, /REFERENCES google_health_connections \(id\) ON DELETE CASCADE/u);
   assert.doesNotMatch(cardioLoadMigration, /ALTER TABLE (daily_cardio|metric_results)/u);
+});
+
+test('migration 015 keeps utilization unbounded above 100 percent', () => {
+  assert.match(utilizationMigration, /DROP CONSTRAINT IF EXISTS daily_load_capacities_utilization_check/u);
+  assert.match(utilizationMigration, /utilization IS NULL OR utilization >= 0/u);
+  assert.doesNotMatch(utilizationMigration, /utilization <= 100/u);
 });
 
 test('postgres parameterizes v3 evidence, metric rows, bootstrap, and user-scoped reads', async () => {

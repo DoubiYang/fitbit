@@ -5,7 +5,7 @@ import { createHealthApiClient, type HealthApiClient } from './health-api';
 import { createGoogleTokenRefresher, resolveAccessToken, type TokenRefresher } from './access-token';
 import { dataPointFilter, exclusiveEnd } from './filters';
 import { mapDailyHrv, mapDailyRhr, mapSleepSession, mapTrainingDays, type GoogleDataPoint } from './map-records';
-import { changedHealthRecordDates, mergeHealthRecords, type HealthSnapshot } from './snapshot-store';
+import { changedHealthRecordDates, HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS, mergeHealthRecords, type HealthSnapshot } from './snapshot-store';
 
 export class IntegrationUnavailableError extends Error {
   readonly code = 'integration_unavailable';
@@ -195,7 +195,7 @@ export class GoogleHealthProvider implements HealthProvider {
         : [],
     };
     const records = mergeHealthRecords(previous?.records, incoming, {
-      retainCivilDays: 35,
+      retainCivilDays: HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS,
       now: syncedAt,
       authoritative: {
         from: queryRange.from,
@@ -259,6 +259,7 @@ export class GoogleHealthProvider implements HealthProvider {
     range: HealthDateRange,
     requestedDataTypes: SnapshotRecordDataType[] = SNAPSHOT_RECORD_TYPES,
     useInitialBackfillRange = false,
+    markSnapshotSuccessful = true,
   ): Promise<SnapshotRecordSyncResult> {
     const collected = await this.collectRecords(userId, range, requestedDataTypes, useInitialBackfillRange);
     if (collected.hasSuccessfulQuery) {
@@ -266,7 +267,9 @@ export class GoogleHealthProvider implements HealthProvider {
         userId,
         collected.records,
         collected.syncedAt,
-        requestedDataTypes.length === SNAPSHOT_RECORD_TYPES.length && collected.succeededDataTypes.length === SNAPSHOT_RECORD_TYPES.length,
+        markSnapshotSuccessful
+          && requestedDataTypes.length === SNAPSHOT_RECORD_TYPES.length
+          && collected.succeededDataTypes.length === SNAPSHOT_RECORD_TYPES.length,
       );
     }
     return {

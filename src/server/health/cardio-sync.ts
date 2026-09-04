@@ -24,6 +24,7 @@ import {
   mapActivityLevelIntervals,
   mapDailyHeartRateZones,
   mapExerciseInterval,
+  mapHeartRateMinutesToEvidence,
   mapHeartRatePageToMinutes,
   mapHeartRateSamples,
   mapTimeInZoneIntervals,
@@ -31,6 +32,7 @@ import {
 import type { HealthSyncCursor, HealthSyncDataType, HealthTimeZoneHistory } from './cardio-store';
 import { dataPointFilter, HEALTH_HIGH_VOLUME_PAGE_SIZE } from './filters';
 import { recomputeBodyAge } from './body-age-recompute';
+import { recomputeTrimpCardioLoad } from './cardio-load-recompute';
 import type { HealthApiClient } from './health-api';
 import type { GoogleDataPoint } from './map-records';
 import { mapDailyVo2 } from './map-records';
@@ -47,7 +49,7 @@ export const HOURLY_SYNC_MS = 60 * 60 * 1_000;
 const TWO_HOURS_MS = 2 * HOURLY_SYNC_MS;
 const TWENTY_FOUR_HOURS_MS = 24 * HOURLY_SYNC_MS;
 const FORTY_EIGHT_HOURS_MS = 48 * HOURLY_SYNC_MS;
-const INITIAL_PHYSICAL_LOOKBACK_MS = 37 * 24 * HOURLY_SYNC_MS;
+const INITIAL_PHYSICAL_LOOKBACK_MS = 44 * 24 * HOURLY_SYNC_MS;
 const RETRY_DELAYS_MS = [30 * 60 * 1_000, 60 * 60 * 1_000, 2 * 60 * 60 * 1_000] as const;
 
 const CARDIO_SYNC_TYPES: HealthSyncDataType[] = [
@@ -63,6 +65,8 @@ export type CardioSyncState = {
   affectedDates: string[];
   nextSyncAt: Date;
   cursors: HealthSyncCursor[];
+  succeededDataTypes: HealthSyncDataType[];
+  failedDataTypes: HealthSyncDataType[];
 };
 
 export type LoadHealthRecords = (userId: string) => Promise<UserHealthRecords>;
@@ -160,7 +164,7 @@ function dailyVo2CivilDate(instant: Date, timeZone: string | undefined): string 
   }
 }
 
-export function initialCivilBackfillRange(now: Date, rangeDays = 35): { from: string; to: string } {
+export function initialCivilBackfillRange(now: Date, rangeDays = 42): { from: string; to: string } {
   const to = utcDate(now);
   return { from: addCivilDays(to, -(rangeDays + 1)), to };
 }
@@ -400,7 +404,16 @@ async function ingestHeartRate(input: {
     const persistable = persistableMinutes(combined, intervals);
     if (persistable.length > 0) {
       await requireSyncable(input.store, input.userId);
-      await scheduledWrite(input, (store) => store.healthMetrics.upsertMinutes(persistable));
+      const evidence = mapHeartRateMinutesToEvidence(combined);
+      const write = async (store: AuthStore) => {
+        await store.healthMetrics.upsertMinutes(persistable);
+        await store.healthMetrics.upsertHeartRateMinuteEvidence(evidence);
+      };
+      if (input.lease) {
+        await scheduledWrite(input, write);
+      } else {
+        await input.store.withTransaction(write);
+      }
       persistedMinutes.push(...persistable);
       for (const minute of persistable) {
         affected.add(minute.civilDate);
@@ -693,11 +706,13 @@ export async function recomputeAffectedDays(
   const zone = historyAt(history, input.now.toISOString());
   const today = zone ? civilDate(input.now, zone.ianaTimeZone) : utcDate(input.now);
   const expanded = new Set<string>();
+  const cardioLoadInvalidationDates = new Set<string>();
   for (const date of input.dates) {
     const cascade = metricsAffectedByStrainRecompute(date);
     expanded.add(cascade.strainDate);
     expanded.add(cascade.sleepPerformanceDate);
     expanded.add(cascade.recoveryDate);
+    cardioLoadInvalidationDates.add(cascade.cardioLoadFromDate);
   }
   const ordered = [...expanded].sort();
   const sleepSessions = records.sleepSessions.filter(
@@ -880,6 +895,16 @@ export async function recomputeAffectedDays(
     );
     throwIfAborted(input.signal);
   }
+  const trimpFromCivilDate = [...cardioLoadInvalidationDates].sort().find((date) => date <= today);
+  if (trimpFromCivilDate) {
+    await recomputeTrimpCardioLoad({
+      store,
+      userId: input.userId,
+      now: input.now,
+      records,
+      fromCivilDate: trimpFromCivilDate,
+    });
+  }
   throwIfAborted(input.signal);
 }
 
@@ -894,11 +919,18 @@ export async function syncCardioConnection(input: {
   loadSnapshot?: LoadHealthSnapshot;
   extraDates?: Iterable<string>;
   lastSuccessfulSyncAt?: Date | string;
+  /** Forces the initial 42-day window without discarding an existing cursor. */
+  forceInitialBackfillDataTypes?: Iterable<HealthSyncDataType>;
+  /** Leaves successful watermarks untouched until a higher-level bootstrap commits. */
+  deferSuccessCursorDataTypes?: Iterable<HealthSyncDataType>;
   lease?: ScheduledCardioRun;
   signal?: AbortSignal;
 }): Promise<CardioSyncState> {
   const dataTypes = input.dataTypes ?? CARDIO_SYNC_TYPES;
+  const forced = new Set(input.forceInitialBackfillDataTypes ?? []);
+  const deferredSuccess = new Set(input.deferSuccessCursorDataTypes ?? []);
   const succeeded: HealthSyncDataType[] = [];
+  const failed: HealthSyncDataType[] = [];
   const affected = new Set<string>(input.extraDates ?? []);
 
   for (const dataType of dataTypes) {
@@ -907,7 +939,8 @@ export async function syncCardioConnection(input: {
       connectionId: input.connection.id,
       dataType,
     });
-    if (cursor?.nextAttemptAt && cursor.nextAttemptAt.getTime() > input.now.getTime()) {
+    const isForcedBackfill = forced.has(dataType);
+    if (!isForcedBackfill && cursor?.nextAttemptAt && cursor.nextAttemptAt.getTime() > input.now.getTime()) {
       continue;
     }
     const timeZone = dataType === 'daily-vo2-max'
@@ -916,7 +949,7 @@ export async function syncCardioConnection(input: {
         at: input.now.toISOString(),
       }))?.ianaTimeZone
       : undefined;
-    const window = syncWindowFor(dataType, input.now, cursor, timeZone);
+    const window = syncWindowFor(dataType, input.now, isForcedBackfill ? undefined : cursor, timeZone);
     try {
       const dates = await ingestDataType({
         store: input.store,
@@ -937,6 +970,7 @@ export async function syncCardioConnection(input: {
       if (isUnsyncableError(error)) {
         throw error;
       }
+      failed.push(dataType);
       await scheduleTypeFailure({
         store: input.store,
         connectionId: input.connection.id,
@@ -963,6 +997,9 @@ export async function syncCardioConnection(input: {
     throwIfAborted(input.signal);
     for (const dataType of succeeded) {
       throwIfAborted(input.signal);
+      if (deferredSuccess.has(dataType)) {
+        continue;
+      }
       await inner.healthMetrics.updateCursor({
         connectionId: input.connection.id,
         dataType,
@@ -1003,6 +1040,8 @@ export async function syncCardioConnection(input: {
   return {
     affectedDates: [...affected].sort(),
     cursors,
+    succeededDataTypes: succeeded,
+    failedDataTypes: failed,
     nextSyncAt: connectionNextSyncAt(cursors, input.now),
   };
 }

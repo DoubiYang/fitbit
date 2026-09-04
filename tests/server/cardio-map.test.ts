@@ -12,6 +12,7 @@ import {
   mapActivityLevelIntervals,
   mapDailyHeartRateZones,
   mapExerciseInterval,
+  mapHeartRatePage,
   mapHeartRatePageToMinutes,
   mapHeartRateSamples,
   mapTimeInZoneIntervals,
@@ -466,4 +467,38 @@ test('forwards an optional lookahead sample so a later page can close the last h
   });
 
   assert.equal(minutes[0]?.coverageSeconds, 30);
+});
+
+test('maps the existing 75-second hold into minute-clipped derived BPM evidence', () => {
+  const points = parsePoints(`[
+    {"heartRate":{"sampleTime":{"physicalTime":"2026-08-22T12:00:50.000Z","utcOffset":"0s"},"beatsPerMinute":"103"}}
+  ]`);
+
+  const mapped = mapHeartRatePage({
+    userId,
+    points,
+    closeAt: '2026-08-22T12:02:10.000Z',
+  });
+
+  assert.equal(mapped.minutes.length, 3);
+  assert.deepEqual(mapped.evidence, [
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-22T12:00:00.000Z',
+      segments: [{ startOffsetMs: 50_000, endOffsetMs: 60_000, bpm: 103 }],
+    },
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-22T12:01:00.000Z',
+      segments: [{ startOffsetMs: 0, endOffsetMs: 60_000, bpm: 103 }],
+    },
+    {
+      userId,
+      sourceFamily: 'google-wearables',
+      minuteStartUtc: '2026-08-22T12:02:00.000Z',
+      segments: [{ startOffsetMs: 0, endOffsetMs: 5_000, bpm: 103 }],
+    },
+  ]);
 });

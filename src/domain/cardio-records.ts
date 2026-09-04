@@ -332,7 +332,7 @@ const dailyLoadCapacitySchema = z.object({
   status: z.enum(['scored', 'calibrating', 'unavailable']),
   actualLoad: z.number().finite().min(0).max(100_000).nullable(),
   usableLoad: z.number().finite().min(0).max(100_000).nullable(),
-  utilization: z.number().finite().min(0).max(100).nullable(),
+  utilization: z.number().finite().min(0).max(100_000).nullable(),
   historySampleCount: z.number().int().min(0).max(10_000),
   usedGlobalFallback: z.boolean(),
   recoveryTier: z.enum(['low', 'middle', 'high', 'unadjusted']).nullable(),

@@ -48,7 +48,7 @@ function connection(overrides: Partial<ConnectionRow> & Pick<ConnectionRow, 'id'
   };
 }
 
-test('initial sync only reads the selected active user for the UTC-wide 35-day backfill range', async () => {
+test('initial sync only reads the selected active user for the UTC-wide 42-day backfill range', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.users.insert('u2');
@@ -69,10 +69,10 @@ test('initial sync only reads the selected active user for the UTC-wide 35-day b
   });
 
   assert.equal(result, true);
-  assert.deepEqual(seen, ['u1:2026-07-19:2026-08-24']);
+  assert.deepEqual(seen, ['u1:2026-07-12:2026-08-24']);
 });
 
-test('35-day snapshot window uses a UTC-wide range, not Asia/Shanghai', async () => {
+test('42-day snapshot window uses a UTC-wide range, not Asia/Shanghai', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.connections.insert(connection({ id: 'c1', userId: 'u1', healthUserId: 'h1' }));
@@ -88,7 +88,7 @@ test('35-day snapshot window uses a UTC-wide range, not Asia/Shanghai', async ()
     },
   });
 
-  assert.deepEqual(seen, ['u1:2026-07-18:2026-08-23']);
+  assert.deepEqual(seen, ['u1:2026-07-11:2026-08-23']);
   assert.notEqual(seen[0], 'u1:2026-07-20:2026-08-23');
 });
 
@@ -108,7 +108,136 @@ test('initial UTC-wide backfill covers a UTC-8 user local day at a UTC date boun
     },
   });
 
-  assert.deepEqual(seen, ['u1:2026-07-19:2026-08-24']);
+  assert.deepEqual(seen, ['u1:2026-07-12:2026-08-24']);
+});
+
+test('v3 bootstrap forces a 42-day core backfill even when every cursor is current', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  await store.users.insert('u-bootstrap');
+  await store.connections.insert(liveConnection('u-bootstrap', 'c-bootstrap'));
+  for (const dataType of [
+    'heart-rate',
+    'activity-level',
+    'sleep',
+    'daily-heart-rate-variability',
+    'daily-resting-heart-rate',
+  ] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId: 'c-bootstrap',
+      dataType,
+      successfulWatermark: new Date('2026-08-24T11:00:00.000Z'),
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: new Date('2026-08-24T13:00:00.000Z'),
+    });
+  }
+  const api = createFakeApi({});
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u-bootstrap',
+    now,
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => undefined,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  const requestedTypes = new Set(api.requests.map((request) => request.dataType));
+  for (const dataType of [
+    'heart-rate',
+    'activity-level',
+    'sleep',
+    'daily-heart-rate-variability',
+    'daily-resting-heart-rate',
+  ]) {
+    assert.equal(requestedTypes.has(dataType), true, `must force ${dataType}`);
+  }
+  for (const dataType of ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate']) {
+    assert.match(
+      api.requests.find((request) => request.dataType === dataType)?.filter ?? '',
+      /2026-07-12/u,
+    );
+  }
+  assert.deepEqual(await store.healthMetrics.readCardioLoadBootstrap({
+    userId: 'u-bootstrap',
+    connectionId: 'c-bootstrap',
+  }), {
+    userId: 'u-bootstrap',
+    connectionId: 'c-bootstrap',
+    metricVersion: 'cardio-load-trimp-v3',
+    status: 'completed',
+    attemptedAt: now.toISOString(),
+    completedAt: now.toISOString(),
+    errorCode: null,
+  });
+  for (const dataType of [
+    'heart-rate',
+    'activity-level',
+    'sleep',
+    'daily-heart-rate-variability',
+    'daily-resting-heart-rate',
+  ] as const) {
+    assert.equal((await store.healthMetrics.readCursor({ connectionId: 'c-bootstrap', dataType }))?.successfulWatermark?.toISOString(), now.toISOString());
+  }
+});
+
+test('a failed v3 bootstrap retains every core success watermark and is retryable', async () => {
+  const store = createMemoryStore();
+  const now = new Date('2026-08-24T12:00:00.000Z');
+  const previousWatermark = new Date('2026-08-24T11:00:00.000Z');
+  await store.users.insert('u-bootstrap-failure');
+  await store.connections.insert(liveConnection('u-bootstrap-failure', 'c-bootstrap-failure'));
+  for (const dataType of [
+    'heart-rate',
+    'activity-level',
+    'sleep',
+    'daily-heart-rate-variability',
+    'daily-resting-heart-rate',
+  ] as const) {
+    await store.healthMetrics.updateCursor({
+      connectionId: 'c-bootstrap-failure',
+      dataType,
+      successfulWatermark: previousWatermark,
+      lastErrorCode: undefined,
+      retryCount: 0,
+      nextAttemptAt: new Date('2026-08-24T13:00:00.000Z'),
+    });
+  }
+  const api = createFakeApi({});
+  const originalList = api.listDataPoints.bind(api);
+  api.listDataPoints = async (input) => {
+    if (input.dataType === 'daily-resting-heart-rate') {
+      throw new Error('Health API 429');
+    }
+    return originalList(input);
+  };
+
+  await syncUserConnection({
+    config: oauthConfig(),
+    store,
+    userId: 'u-bootstrap-failure',
+    now,
+    api,
+    persistSnapshot: async () => {},
+    loadSnapshot: async () => undefined,
+    refresher: { async refresh() { throw new Error('should not refresh'); } },
+  });
+
+  const bootstrap = await store.healthMetrics.readCardioLoadBootstrap({
+    userId: 'u-bootstrap-failure',
+    connectionId: 'c-bootstrap-failure',
+  });
+  assert.equal(bootstrap?.status, 'failed');
+  assert.equal(bootstrap?.errorCode, 'rate_limited');
+  for (const dataType of ['heart-rate', 'activity-level', 'sleep', 'daily-heart-rate-variability'] as const) {
+    assert.equal((await store.healthMetrics.readCursor({ connectionId: 'c-bootstrap-failure', dataType }))?.successfulWatermark?.toISOString(), previousWatermark.toISOString());
+  }
+  const rhr = await store.healthMetrics.readCursor({ connectionId: 'c-bootstrap-failure', dataType: 'daily-resting-heart-rate' });
+  assert.equal(rhr?.successfulWatermark?.toISOString(), previousWatermark.toISOString());
+  assert.equal(rhr?.lastErrorCode, 'rate_limited');
 });
 
 test('initial sync does not read an expired or disconnected connection', async () => {
@@ -269,6 +398,23 @@ function liveConnection(userId: string, connectionId: string): ConnectionRow {
   });
 }
 
+async function completeTrimpBootstrap(
+  store: ReturnType<typeof createMemoryStore>,
+  userId: string,
+  connectionId: string,
+  completedAt: Date,
+): Promise<void> {
+  await store.healthMetrics.upsertCardioLoadBootstrap({
+    userId,
+    connectionId,
+    metricVersion: 'cardio-load-trimp-v3',
+    status: 'completed',
+    attemptedAt: completedAt.toISOString(),
+    completedAt: completedAt.toISOString(),
+    errorCode: null,
+  });
+}
+
 function createFakeApi(pages: Partial<Record<string, GoogleDataPoint[][]>>) {
   const requests: Array<{ dataType: string; filter: string }> = [];
   async function* iterate(input: { dataType: string; filter: string }) {
@@ -407,6 +553,7 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.connections.insert(liveConnection('u1', 'c1'));
+  await completeTrimpBootstrap(store, 'u1', 'c1', new Date('2026-08-24T11:00:00.000Z'));
   const previous = {
     ...emptyUserHealthRecords(),
     dailyHrv: [{ userId: 'u1', source: 'google_health' as const, sourceRecordId: 'hrv-keep', date: '2026-08-04', valueMs: 44 }],
@@ -556,7 +703,7 @@ test('a daily RHR 429 persists successful snapshot types and retries only RHR so
   assert.equal(retriedRhr?.successfulWatermark?.toISOString(), '2026-08-24T12:30:00.000Z');
 });
 
-test('an initial RHR retry retains the 35-day backfill window without refetching successful snapshot types', async () => {
+test('an incomplete v3 bootstrap retries all snapshot core types over the 42-day backfill window', async () => {
   const store = createMemoryStore();
   await store.users.insert('u1');
   await store.connections.insert(liveConnection('u1', 'c1'));
@@ -593,8 +740,16 @@ test('an initial RHR retry retains the 35-day backfill window without refetching
   const snapshotRequests = api.requests.filter((request) =>
     ['sleep', 'daily-heart-rate-variability', 'daily-resting-heart-rate', 'exercise'].includes(request.dataType),
   );
-  assert.deepEqual(snapshotRequests.map((request) => request.dataType), ['daily-resting-heart-rate']);
-  assert.match(snapshotRequests[0]?.filter ?? '', /daily_resting_heart_rate\.date >= "2026-07-19"/);
+  assert.deepEqual(snapshotRequests.map((request) => request.dataType), [
+    'sleep',
+    'daily-heart-rate-variability',
+    'daily-resting-heart-rate',
+    'exercise',
+  ]);
+  assert.match(
+    snapshotRequests.find((request) => request.dataType === 'daily-resting-heart-rate')?.filter ?? '',
+    /daily_resting_heart_rate\.date >= "2026-07-12"/,
+  );
 });
 
 test('a later snapshot sleep recomputes historical strain without another HR backfill', async () => {
@@ -704,7 +859,7 @@ test('a later snapshot sleep recomputes historical strain without another HR bac
   assert.equal(after?.dose, 0);
   assert.equal(after?.attributedMinutes, 0);
   const heartRate = await store.healthMetrics.readCursor({ connectionId: 'c1', dataType: 'heart-rate' });
-  assert.equal(heartRate?.successfulWatermark?.toISOString(), now.toISOString());
+  assert.equal(heartRate?.successfulWatermark?.toISOString(), '2026-08-24T12:30:00.000Z');
 });
 
 test('a snapshot-only HRV revision recomputes Recovery when cardio pages are empty', async () => {
@@ -1005,6 +1160,7 @@ test('partial snapshot success does not mark Recovery fresh before a complete sn
   await store.users.insert('u1');
   const now = new Date('2026-08-24T12:00:00.000Z');
   await store.connections.insert(liveConnection('u1', 'c1'));
+  await completeTrimpBootstrap(store, 'u1', 'c1', new Date(now.getTime() - 60 * 60 * 1_000));
   const historyDates = priorDates('2026-08-23', 28);
   const previous: UserHealthRecords = {
     ...emptyUserHealthRecords(),
@@ -1076,6 +1232,7 @@ test('an incremental snapshot merge recomputes only dates changed in its 48-hour
   await store.users.insert('u1');
   const now = new Date('2026-08-24T12:00:00.000Z');
   await store.connections.insert(liveConnection('u1', 'c1'));
+  await completeTrimpBootstrap(store, 'u1', 'c1', new Date(now.getTime() - 60 * 60 * 1_000));
   const dates = priorDates('2026-08-25', 35);
   const previous: UserHealthRecords = {
     ...emptyUserHealthRecords(),

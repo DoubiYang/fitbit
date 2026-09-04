@@ -10,7 +10,7 @@ export type HealthSnapshot = {
   syncedAt: Date;
 };
 
-export const HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS = 35;
+export const HEALTH_SNAPSHOT_RETAIN_CIVIL_DAYS = 42;
 
 export type AuthoritativeHealthRecordWindow = {
   from: string;
