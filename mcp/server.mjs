@@ -1,11 +1,12 @@
 import { createServer as createHttpServer } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createHealthReader, dateSchema, rangeSchema } from './health.mjs';
+import { oauthApp } from './oauth-http.mjs';
+import { HealthOAuthProvider, sessionUser } from './oauth.mjs';
 
 export function createMcp(reader) {
   const server = new McpServer({ name: 'rhythm-health', version: '0.1.0' });
@@ -33,21 +34,13 @@ export function createMcp(reader) {
   return server;
 }
 
-export function createRemoteServer({ reader, token, publicUrl }) {
-  if (!token || token.length < 32) throw new Error('MCP_TOKEN must contain at least 32 characters.');
+export function createRemoteServer({ reader, provider, resolveSession, publicUrl, accountUrl = '/rhythm/account' }) {
   const endpoint = new URL(publicUrl);
   if (endpoint.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(endpoint.hostname)) {
     throw new Error('A remote MCP_PUBLIC_URL must use HTTPS.');
   }
-  const digest = (value) => createHash('sha256').update(value).digest();
-  return createHttpServer(async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    if (req.url !== endpoint.pathname) { res.writeHead(404).end(); return; }
-    if (req.headers.origin && req.headers.origin !== endpoint.origin) { res.writeHead(403).end(); return; }
-    if (!timingSafeEqual(digest(req.headers.authorization ?? ''), digest(`Bearer ${token}`))) {
-      res.writeHead(401, { 'WWW-Authenticate': 'Bearer' }).end(); return;
-    }
-    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
+  const app = oauthApp({ provider, resolveSession, endpoint, accountUrl });
+  app.post(endpoint.pathname, async (req, res) => {
     const mcp = createMcp(reader);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => { void transport.close(); void mcp.close(); });
@@ -59,6 +52,9 @@ export function createRemoteServer({ reader, token, publicUrl }) {
       else res.end();
     }
   });
+  app.all(endpoint.pathname, (_req, res) => res.status(405).set('Allow', 'POST').end());
+  app.use((_error, _req, res, _next) => { res.status(500).json({ error: 'server_error' }); });
+  return createHttpServer(app);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -68,7 +64,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const pool = new pg.Pool({ connectionString: databaseUrl, max: 4, statement_timeout: 10000,
     options: '-c default_transaction_read_only=on', connectionTimeoutMillis: 5000 });
   const accountUrl = new URL('/rhythm/account', process.env.APP_ORIGIN ?? 'http://localhost:3000').href;
-  const server = createRemoteServer({ reader: createHealthReader(pool, userId, accountUrl), token: process.env.MCP_TOKEN, publicUrl });
+  const provider = new HealthOAuthProvider({ resource: publicUrl, userId,
+    stateFile: process.env.MCP_OAUTH_STATE_FILE ?? '/data/oauth.json',
+    isConnected: async (id) => (await pool.query("SELECT 1 FROM google_health_connections WHERE user_id = $1 AND status <> 'disconnected'", [id])).rowCount > 0 });
+  const server = createRemoteServer({ reader: createHealthReader(pool, userId, accountUrl), provider,
+    resolveSession: (cookie) => sessionUser(pool, cookie), publicUrl, accountUrl });
   server.requestTimeout = 30000;
   server.listen(Number(process.env.MCP_PORT ?? 3001), '0.0.0.0', () => console.error('Health MCP listening'));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {

@@ -4,12 +4,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createHealthReader, rangeSchema } from './health.mjs';
 import { createRemoteServer } from './server.mjs';
+import { HealthOAuthProvider } from './oauth.mjs';
 
 test('remote MCP requires a bearer token and supports SDK initialize/list/call', async () => {
   const reader = { status: async () => ({ connection: 'active', stale: false }),
     history: async () => ({ sleep: [] }), summary: async ({ date }) => ({ date }) };
-  const token = 'a'.repeat(40);
-  const server = createRemoteServer({ reader, token, publicUrl: 'http://localhost/mcp' });
+  const provider = new HealthOAuthProvider({ resource: 'http://localhost/mcp', userId: 'owner' });
+  const token = provider.issue('test-client', 'owner').access_token;
+  const server = createRemoteServer({ reader, provider, resolveSession: async () => undefined, publicUrl: 'http://localhost/mcp' });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = new URL(`http://127.0.0.1:${server.address().port}/mcp`);
   const client = new Client({ name: 'test-dot', version: '1' });

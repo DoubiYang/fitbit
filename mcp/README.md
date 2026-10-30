@@ -8,23 +8,34 @@
 
 ```dotenv
 MCP_USER_ID=已连接账户的本地用户UUID
-MCP_TOKEN=至少32字符的随机密钥
 MCP_PUBLIC_URL=https://你的域名/mcp
 APP_ORIGIN=https://你的应用域名
 ```
 
-用 `openssl rand -hex 32` 生成密钥。查本地账户 UUID：
+查本地账户 UUID：
 
 ```sh
 docker compose exec -T db psql -U rhythm -d rhythm -c 'SELECT user_id, status FROM google_health_connections;'
 docker compose --profile mcp up --build -d mcp
 ```
 
-通过已有 HTTPS 反向代理，把 `/mcp` 原样代理至 `127.0.0.1:3001/mcp`，保留 Authorization 头。MCP 端口默认仅绑定回环地址。远程使用必须配置真实 HTTPS 域名和证书；本地验证可用 `MCP_PUBLIC_URL=http://localhost:3001/mcp`。
+通过已有 HTTPS 反向代理，把以下路径原样代理至 `127.0.0.1:3001`，保留 Authorization、Cookie 和 Origin 头：
 
-Dot 添加远程 MCP：URL 填 `MCP_PUBLIC_URL`，认证头填 `Authorization: Bearer <MCP_TOKEN>`。此版要求客户端支持自定义 Bearer Token；没有实现 MCP 客户端的 OAuth 授权服务器。Google OAuth 由现有账户页处理。
+- `/mcp`
+- `/.well-known/oauth-protected-resource/mcp`
+- `/.well-known/oauth-authorization-server`
+- `/authorize`、`/token`、`/register`、`/revoke`
+- `/rhythm/mcp/consent`
 
-一个 MCP 实例固定绑定一个账户。多用户可先启动多个实例，分别使用不同 UUID、密钥及端口。客户端不能指定其他用户 UUID。
+MCP 端口默认仅绑定回环地址。远程使用必须配置真实 HTTPS 域名和证书；本地验证可用 `MCP_PUBLIC_URL=http://localhost:3001/mcp`。账户页与 MCP 须使用同一域名，以便确认页读取现有的 `rhythm_session` 登录会话。
+
+Codex / Dot 添加远程 MCP：URL 填 `MCP_PUBLIC_URL`，选择 OAuth。客户端会自动发现授权地址并注册，使用 Authorization Code + PKCE S256 获取访问令牌。浏览器打开授权确认页后，先登录绑定的节律账户，返回刷新确认页，再点击“同意授权”。没有登录、登录其他账户或未同意均不能取得授权码。
+
+Google OAuth 继续由现有账户页处理；MCP OAuth 只授权客户端读取本地数据。访问令牌有效期1小时，刷新令牌30天并在每次使用后轮换。撤销刷新令牌会同时撤销同一授权下的访问令牌。断开 Google 账户后，MCP 令牌验证也会失效。
+
+OAuth 状态默认保存在 `/data/oauth.json`，由 Compose 的 `mcp-oauth` 卷持久化。文件权限为0600，访问/刷新令牌只保存哈希。此版只支持单实例写入此文件；不要多个副本共享状态文件。可用 `MCP_OAUTH_STATE_FILE` 修改位置。`MCP_TOKEN` 静态密钥验证已移除。
+
+一个 MCP 实例固定绑定一个账户。多用户可先启动多个实例，分别使用不同 UUID、独立域名、状态卷及端口。客户端不能指定其他用户 UUID。
 
 ## 工具
 

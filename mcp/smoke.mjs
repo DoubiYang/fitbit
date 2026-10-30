@@ -1,11 +1,11 @@
 // Optional real-database smoke test. Never prints health values or credentials.
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createHealthReader } from './health.mjs';
 import { createRemoteServer } from './server.mjs';
+import { HealthOAuthProvider } from './oauth.mjs';
 
 const pool = new pg.Pool({
   host: process.env.POSTGRES_HOST ?? 'db', user: process.env.POSTGRES_USER ?? 'rhythm',
@@ -22,9 +22,10 @@ try {
   const dates = (await pool.query(`SELECT max(civil_date)::text AS date
     FROM heart_rate_minute_aggregates WHERE user_id = $1`, [userId])).rows;
   const date = dates[0]?.date ?? new Date().toISOString().slice(0, 10);
-  const token = randomBytes(32).toString('hex');
+  const provider = new HealthOAuthProvider({ resource: 'http://localhost/mcp', userId });
+  const token = provider.issue('smoke-client', userId).access_token;
   server = createRemoteServer({ reader: createHealthReader(pool, userId, 'http://localhost:3000/rhythm/account'),
-    token, publicUrl: 'http://localhost/mcp' });
+    provider, resolveSession: async () => undefined, publicUrl: 'http://localhost/mcp' });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = new URL(`http://127.0.0.1:${server.address().port}/mcp`);
   assert.equal((await fetch(url, { method: 'POST' })).status, 401);

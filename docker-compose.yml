@@ -11,6 +11,8 @@ services:
       MCP_PORT: 3001
     ports:
       - '127.0.0.1:3001:3001'
+    volumes:
+      - mcp-oauth:/data
     depends_on:
       db:
         condition: service_healthy
@@ -95,3 +97,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+volumes:
+  mcp-oauth:

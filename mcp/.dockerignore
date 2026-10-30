@@ -1,2 +1,4 @@
 node_modules
 test.mjs
+oauth.test.mjs
+smoke.mjs
