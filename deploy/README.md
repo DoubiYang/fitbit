@@ -34,6 +34,12 @@ docker compose -f deploy/compose.yml up --build -d
 
 Nginx 配置模板在此目录。只为 health 子域名添加新站点，保留交易 MCP 与发布工具的配置。ACME 使用 `/var/www/fitbit-acme`，Certbot 定时续签，deploy hook 校验后重载 Nginx。
 
+## Google 出站网络
+
+北京服务器直连 Google 会连接超时。账户/同步应用加入现有 `rednotemove_app` Docker 网络，使用 `http://proxy-gateway:21862`（rednotemove 现有海外 OAuth 监听入口）。`7890` 默认是 DIRECT，不能用于此用途。未修改 rednotemove 的配置、节点或选择器，也未向公网开放代理端口。
+
+Node 25 使用 `NODE_USE_ENV_PROXY=1` 使原生 fetch 使用代理；Google SDK 同时读取 `HTTPS_PROXY`。`NO_PROXY` 使数据库、应用内部请求和本机保持直连。此配置仅传给 Fitbit app，MCP 入站和数据库不经代理。现有网关及该监听端口必须可用；如果 rednotemove 更改了服务绑定或监听端口，需同步更新此处配置。
+
 首次部署经用户明确许可，将本地数据库与必需配置通过 SSH 迁移到服务器。真实凭据存于权限0600的根目录 `.env.local`，不进入 Git。OAuth 状态卷应与数据库一起备份；不要删除卷或运行 `down -v`。
 
 公网验证脚本（创建5分钟测试登录，最后删除会话并撤销令牌，只输出通过状态）：

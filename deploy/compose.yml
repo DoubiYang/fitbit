@@ -24,6 +24,13 @@ services:
       POSTGRES_USER: rhythm
       POSTGRES_DB: rhythm
       APP_BASE_PATH: /rhythm
+      HTTPS_PROXY: http://proxy-gateway:21862
+      HTTP_PROXY: http://proxy-gateway:21862
+      NO_PROXY: localhost,127.0.0.1,db,app,mcp
+      NODE_USE_ENV_PROXY: '1'
+    networks:
+      - default
+      - overseas
     ports:
       - '127.0.0.1:3002:3000'
     depends_on:
@@ -61,3 +68,8 @@ services:
         condition: service_healthy
 volumes:
   oauth:
+
+networks:
+  overseas:
+    external: true
+    name: rednotemove_app
