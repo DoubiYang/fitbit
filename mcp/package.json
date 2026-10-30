@@ -1,0 +1,12 @@
+{
+  "name": "rhythm-health-mcp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": { "start": "node server.mjs", "test": "node --test test.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "pg": "^8.23.0",
+    "zod": "^4.0.0"
+  }
+}
