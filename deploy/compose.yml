@@ -1,0 +1,63 @@
+name: fitbit
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: ../.env.local
+    environment:
+      POSTGRES_USER: rhythm
+      POSTGRES_DB: rhythm
+    volumes:
+      - ../.data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U rhythm -d rhythm']
+      interval: 3s
+      timeout: 5s
+      retries: 30
+  app:
+    build: ..
+    restart: unless-stopped
+    env_file: ../.env.local
+    environment:
+      HOSTNAME: 0.0.0.0
+      POSTGRES_HOST: db
+      POSTGRES_USER: rhythm
+      POSTGRES_DB: rhythm
+      APP_BASE_PATH: /rhythm
+    ports:
+      - '127.0.0.1:3002:3000'
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:3000/rhythm/account").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 10s
+      timeout: 5s
+      retries: 30
+  mcp:
+    build: ../mcp
+    restart: unless-stopped
+    env_file: ../.env.local
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_USER: rhythm
+      POSTGRES_DB: rhythm
+    ports:
+      - '127.0.0.1:3001:3001'
+    volumes:
+      - oauth:/data
+    depends_on:
+      db:
+        condition: service_healthy
+  sync:
+    build: ..
+    restart: unless-stopped
+    command: ['node', 'worker/sync-loop.mjs']
+    env_file: ../.env.local
+    environment:
+      SYNC_ENDPOINT: http://app:3000/rhythm/api/internal/sync
+    depends_on:
+      app:
+        condition: service_healthy
+volumes:
+  oauth:
