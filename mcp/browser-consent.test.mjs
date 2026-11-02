@@ -17,8 +17,12 @@ test('real Chrome consent form retains its Origin and authorizes successfully', 
   const port = probe.address().port;
   await new Promise((resolve) => probe.close(resolve));
   const origin = `http://127.0.0.1:${port}`;
+  let callbackVisited = false;
+  const callbackServer = createServer((_req, res) => { callbackVisited = true; res.end('Authorized'); });
+  await new Promise((resolve) => callbackServer.listen(0, '127.0.0.1', resolve));
+  const callbackUrl = `http://127.0.0.1:${callbackServer.address().port}/complete`;
   const provider = new HealthOAuthProvider({ resource: `${origin}/mcp`, userId: 'owner' });
-  const client = await provider.clientsStore.registerClient({ redirect_uris: [`${origin}/complete`], token_endpoint_auth_method: 'none' });
+  const client = await provider.clientsStore.registerClient({ redirect_uris: [callbackUrl], token_endpoint_auth_method: 'none' });
   let path;
   await provider.authorize(client, { redirectUri: client.redirect_uris[0], codeChallenge: 'test' }, { redirect: (value) => { path = value; } });
   const server = createRemoteServer({ provider, resolveSession: async () => 'owner', publicUrl: `${origin}/mcp`, reader: {} });
@@ -70,10 +74,12 @@ test('real Chrome consent form retains its Origin and authorizes successfully', 
     await until(() => submission);
     assert.equal(submission.origin, origin);
     assert.equal(submission.status, 302);
+    await until(() => callbackVisited);
   } finally {
     browser.kill('SIGTERM');
     if (browser.exitCode === null) await new Promise((resolve) => browser.once('exit', resolve));
     await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => callbackServer.close(resolve));
     rmSync(profile, { recursive: true, force: true });
   }
 });

@@ -17,6 +17,11 @@ export function oauthApp({ provider, resolveSession, endpoint, accountUrl }) {
   app.use(mcpAuthRouter({ provider, issuerUrl: new URL(endpoint.origin), resourceServerUrl: endpoint,
     scopesSupported: [HEALTH_SCOPE], resourceName: '节律健康数据' }));
   const escape = (text) => String(text).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+  const consentPolicy = (res, redirectUri) => {
+    // Chrome applies form-action to redirects too. Permit only this registered
+    // client's callback origin, keeping all other form destinations blocked.
+    res.set('Content-Security-Policy', `default-src 'none'; form-action 'self' ${new URL(redirectUri).origin}; frame-ancestors 'none'`);
+  };
   app.get(CONSENT_PATH, async (req, res) => {
     try {
       const pending = provider.pending(req.query.request);
@@ -25,6 +30,7 @@ export function oauthApp({ provider, resolveSession, endpoint, accountUrl }) {
         return;
       }
       const client = await provider.clientsStore.getClient(pending.clientId);
+      consentPolicy(res, pending.redirectUri);
       res.type('html').send(`<html lang="zh"><meta charset="utf-8"><h1>授权读取健康数据</h1><p>客户端：${escape(client.client_name ?? client.client_id)}</p><p>回调地址：${escape(pending.redirectUri)}</p><p>允许读取你的睡眠、心率、HRV和每日健康汇总。</p><form method="post"><input type="hidden" name="request" value="${escape(req.query.request)}"><input type="hidden" name="csrf" value="${escape(pending.csrf)}"><button name="decision" value="approve">同意授权</button><button name="decision" value="deny">取消</button></form></html>`);
     } catch { res.status(400).send('授权请求无效或已过期'); }
   });
@@ -34,6 +40,7 @@ export function oauthApp({ provider, resolveSession, endpoint, accountUrl }) {
       const pending = provider.pending(req.body.request);
       const userId = await resolveSession(req.headers.cookie);
       if (userId !== provider.userId || req.body.csrf !== pending.csrf) { res.status(403).end(); return; }
+      consentPolicy(res, pending.redirectUri);
       if (req.body.decision !== 'approve') {
         delete provider.state.pending[req.body.request];
         provider.save();
