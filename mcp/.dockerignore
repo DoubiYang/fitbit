@@ -1,4 +1,5 @@
 node_modules
 test.mjs
 oauth.test.mjs
+browser-consent.test.mjs
 smoke.mjs

@@ -8,7 +8,9 @@ export function oauthApp({ provider, resolveSession, endpoint, accountUrl }) {
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
     res.set('Cache-Control', 'no-store');
-    res.set('Referrer-Policy', 'no-referrer');
+    // no-referrer makes native browser form POSTs send Origin: null.
+    // Keep the real Origin for CSRF checks without exposing request queries.
+    res.set('Referrer-Policy', 'strict-origin');
     res.set('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'");
     next();
   });
