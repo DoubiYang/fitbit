@@ -6,6 +6,8 @@
 - Google 登录/重新授权：`https://health.doubiyang.com/rhythm/account`
 - Google OAuth 回调：`https://health.doubiyang.com/rhythm/api/auth/google/callback`
 
+Google OAuth 品牌审核使用 **Air Recovery**。填写公开首页 `https://health.doubiyang.com/rhythm/about`、隐私政策 `https://health.doubiyang.com/rhythm/privacy`、服务条款 `https://health.doubiyang.com/rhythm/terms`。不要填旧的根域名 URL 或账户登录页。公开介绍和政策页面无需登录，仪表盘入口仍为 `/rhythm`。
+
 ## 用户配置
 
 在 Google Cloud 原 OAuth Web 客户端中新增：

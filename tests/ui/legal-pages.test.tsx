@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 
@@ -14,6 +15,18 @@ require.extensions['.css'] = (module) => {
 const PrivacyPage = require('../../app/privacy/page').default as () => React.ReactNode;
 const TermsPage = require('../../app/terms/page').default as () => React.ReactNode;
 
+test('public app introduction identifies Air Recovery and links directly to the privacy policy', () => {
+  assert.ok(existsSync(new URL('../../app/about/page.tsx', import.meta.url)), 'Public app introduction route is missing');
+  const AboutPage = require('../../app/about/page').default as () => React.ReactNode;
+  const html = renderToStaticMarkup(React.createElement(AboutPage));
+  assert.match(html, /<h1[^>]*>Air Recovery<\/h1>/);
+  assert.match(html, /href="\/rhythm\/privacy"[^>]*>隐私政策/);
+  assert.match(html, /Google Health/);
+  assert.match(html, /睡眠、心率/);
+  assert.match(html, /恢复趋势/);
+  assert.doesNotMatch(html, /尚未登录|无法显示今日视图/);
+});
+
 function assertAccountNavigation(html: string) {
   assert.match(html, /aria-label="主要导航"/);
   assert.match(html, /href="\/rhythm\/account"[^>]*aria-current="page"/);
@@ -26,15 +39,16 @@ function assertAccountNavigation(html: string) {
 test('privacy page accurately discloses the current data handling', () => {
   const html = renderToStaticMarkup(React.createElement(PrivacyPage));
 
-  assert.match(html, /已授权的健康记录会同步为本地健康快照/);
-  assert.match(html, /在本地读取和展示/);
-  assert.match(html, /经你同意后，当前餐食照片只用于一次视觉识别/);
-  assert.match(html, /保存后不会保留照片或识别来源/);
-  assert.match(html, /餐食助手只会收到当前结构化餐食和当前问题/);
-  assert.match(html, /不会收到照片、OAuth、会话或刷新令牌/);
+  assert.match(html, /Air Recovery 隐私政策/);
+  assert.match(html, /健康快照.*42 天/);
+  assert.match(html, /MCP.*授权/);
+  assert.match(html, /DeepSeek/);
+  assert.match(html, /同步这一餐/);
   assert.match(html, /OAuth 凭据会加密保存在服务器数据库/);
-  assert.match(html, /不会进入浏览器存储或模型请求/);
-  assert.match(html, /断开连接会删除本地授权/);
+  assert.match(html, /断开连接.*停止后续同步.*删除/);
+  assert.match(html, /https:\/\/myaccount\.google\.com\/permissions/);
+  assert.match(html, /Limited Use/);
+  assert.match(html, /mailto:tibet211@gmail\.com/);
   assert.doesNotMatch(html, /本阶段不会拉取、展示或向模型发送你的真实健康记录/);
   assertAccountNavigation(html);
 });

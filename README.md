@@ -48,9 +48,10 @@ http://localhost:3000/rhythm/account
 
 Google Cloud 还需：启用 Health API、Testing + Test users、[OAuth 设计](docs/superpowers/specs/2026-08-24-05-oauth-account-docker-design.md)中固定的 10 个 scope，以及授权网域 `doubiyang.com`。营养写入权限仅用于用户已本地保存后、再明确点击“同步这一餐”的餐食写回；保存或打开页面不会写入 Google Health。
 
-- `https://doubiyang.com/rhythm`
-- `https://doubiyang.com/rhythm/privacy`
-- `https://doubiyang.com/rhythm/terms`
+- 应用名称：`Air Recovery`
+- 公开首页：`https://health.doubiyang.com/rhythm/about`
+- 隐私政策：`https://health.doubiyang.com/rhythm/privacy`
+- 服务条款：`https://health.doubiyang.com/rhythm/terms`
 
 ## 餐食审阅与显式同步
 

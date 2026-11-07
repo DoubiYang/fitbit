@@ -42,16 +42,33 @@
   line-height: 1.8;
 }
 
+.section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.section h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.15rem;
+  line-height: 1.4;
+}
+
 .return {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
   margin: 0;
   padding-top: 1.25rem;
   border-top: 1px solid rgb(23 40 38 / 13%);
 }
 
-.returnLink {
+.return a {
   display: inline-flex;
   align-items: center;
   min-height: 2.75rem;
   color: var(--sage-deep);
   font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
 }

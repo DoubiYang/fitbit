@@ -132,12 +132,18 @@ export function AccountPanel({ view }: { view: AccountView }) {
     <AppShell active="account">
       <main className="dashboard">
         <header className="dashboard-header">
-          <p className="eyebrow">节律 · 账户</p>
+          <p className="eyebrow">Air Recovery · 账户</p>
           <div className="dashboard-header__title-row">
             <h1>Google Health</h1>
           </div>
           <p className="lede">请在浏览器标签中完成授权。独立安装的 PWA 窗口可能无法带回登录状态。</p>
         </header>
+
+        <section className="action-card">
+          <h2>Google Health 数据说明</h2>
+          <p className="lede">授权后，Air Recovery 会同步睡眠、心率及活动记录，用于展示个人趋势和计算恢复与负荷。只有另行授权的 MCP 客户端才能查询同步数据。</p>
+          <p><a href="/rhythm/about">关于 Air Recovery</a>{' · '}<a href="/rhythm/privacy">隐私政策</a></p>
+        </section>
 
         <AccountState view={view} />
 
